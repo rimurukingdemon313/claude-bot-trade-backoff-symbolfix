@@ -1,0 +1,14 @@
+# Live trading path: no third-party packages required.
+# market_data.py, risk_engine.py, tradelocker_client.py, tradelocker_state.py,
+# and analysis_engine/* use only the Python standard library (json, urllib,
+# dataclasses, datetime, etc).
+#
+# The two packages below are used ONLY by
+# diagnose_tradelocker_connection.py — a one-time startup diagnostic (see
+# server/index.ts) that tries several HTTP approaches against TradeLocker
+# and logs which one gets past its Cloudflare protection. They are not
+# imported anywhere in the live trading path. Remove this file's pip
+# install step (and these two lines) once that Cloudflare-block issue is
+# confirmed fixed and the diagnostic is no longer needed.
+requests
+tradelocker

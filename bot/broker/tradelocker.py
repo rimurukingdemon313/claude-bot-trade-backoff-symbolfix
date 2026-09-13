@@ -16,6 +16,9 @@ tests/fakes.py can stand in for the whole class.
 
 from __future__ import annotations
 
+import base64
+import binascii
+import json
 import threading
 import time
 from typing import Any, Mapping, Sequence
@@ -73,6 +76,53 @@ def normalize_symbol(raw: str) -> str:
     """
 
     return alphanumeric(raw)
+
+
+#: Claim values larger than this are not environment markers; refusing
+#: them keeps a hostile or malformed token from becoming a memory or log
+#: problem on a path that runs before every order.
+_MAX_CLAIM_CHARS = 256
+
+
+def decode_token_claims(token: str | None) -> dict[str, Any] | None:
+    """Read the payload of a broker-issued JWT.
+
+    The DEMO guard needs a second, broker-controlled statement of which
+    environment this session belongs to, and TradeLocker brands that omit
+    a type field on the account record still sign one into the token.
+
+    The signature is deliberately NOT verified: nothing here grants
+    access, and the token already reached us over TLS from the host we
+    authenticated against. It is read as evidence, never as authority —
+    and because it is untrusted input, only scalar claims within a sane
+    length survive, so no nested structure or unbounded blob is handed to
+    the guard. Returns None when the token is absent or not a JWT, which
+    the guard treats as "no evidence" (and therefore as failure).
+    """
+
+    if not token:
+        return None
+    parts = token.split(".")
+    if len(parts) != 3:
+        return None
+    payload = parts[1]
+    payload += "=" * (-len(payload) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(payload)
+        decoded = json.loads(raw)
+    except (binascii.Error, ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(decoded, Mapping):
+        return None
+
+    claims: dict[str, Any] = {}
+    for key, value in decoded.items():
+        if not isinstance(value, (str, bool, int, float)):
+            continue
+        if isinstance(value, str) and len(value) > _MAX_CLAIM_CHARS:
+            continue
+        claims[str(key)] = value
+    return claims
 
 
 class TradeLockerBroker:
@@ -209,6 +259,19 @@ class TradeLockerBroker:
         """Raw account record used by the DEMO guard. None until connected."""
 
         return self._account_meta
+
+    @property
+    def session_claims(self) -> dict[str, Any] | None:
+        """Environment claims from the broker-signed access token.
+
+        The DEMO guard's second source. Returns the claims only — the
+        token itself never leaves this class, so nothing downstream can
+        log or persist a live credential while reading the evidence.
+        """
+
+        with self._lock:
+            token = self._access_token
+        return decode_token_claims(token)
 
     # -- request helpers -------------------------------------------------
 

@@ -251,6 +251,10 @@ class FakeBroker:
     metadata: dict[str, Any] | None = field(
         default_factory=lambda: {"id": "1", "accNum": "1", "accountType": "DEMO", "currency": "USD"}
     )
+    #: Broker-signed session claims. Defaults to None so the fake keeps
+    #: proving that the account record alone is enough; tests that model a
+    #: brand with no account type set this instead.
+    claims: dict[str, Any] | None = None
     specs: dict[str, InstrumentSpec] = field(default_factory=lambda: {"EURUSD": DEFAULT_SPEC})
     series: dict[tuple[str, str], list[Candle]] = field(default_factory=dict)
     quotes: dict[str, Quote] = field(default_factory=dict)
@@ -272,6 +276,10 @@ class FakeBroker:
     @property
     def account_metadata(self) -> dict[str, Any] | None:
         return self.metadata
+
+    @property
+    def session_claims(self) -> dict[str, Any] | None:
+        return self.claims
 
     def account_state(self) -> AccountState:
         return self.account

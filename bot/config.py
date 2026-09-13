@@ -411,10 +411,24 @@ class TradingConfig:
 def profit_floor_feasibility(config: "TradingConfig", equity: float) -> dict[str, Any]:
     """Can the profit floor be reached at all, at this equity?
 
-    Best case for the system is the largest risk it is ever allowed to take
-    multiplied by the best R:R it is willing to require. If even that falls
-    short of the floor, no setup can ever pass and the honest answer is to
-    say so loudly instead of returning NO TRADE forever.
+    `min_risk_reward` is a floor, not a ceiling — targets are structural,
+    so a setup's R:R is whatever the liquidity above it happens to be
+    worth. An earlier version of this function multiplied the risk ceiling
+    by the *minimum* R:R and called the shortfall impossible, which was
+    simply wrong: it declared "no setup can pass" on an account where any
+    setup reaching 1:4 would have passed comfortably.
+
+    So the question is split in two, because they have different answers
+    and different remedies:
+
+    * **Infeasible** — not even an exceptional setup clears the floor.
+      Nothing but more equity (or a lower floor) changes that.
+    * **Demanding** — reachable, but only by setups whose R:R exceeds the
+      configured minimum. The bot will trade; it will just say NO TRADE
+      far more often, which is the profit objective working as a filter
+      (project rule 8), not a fault.
+
+    Risk is never raised to close the gap. That direction is forbidden.
     """
 
     opportunity = config.opportunity
@@ -422,35 +436,72 @@ def profit_floor_feasibility(config: "TradingConfig", equity: float) -> dict[str
         return {"feasible": True, "reason": "profit objective disabled"}
 
     max_risk = max(0.0, equity) * config.risk.max_risk_pct
-    best_case_profit = max_risk * config.risk.min_risk_reward
     floor = opportunity.minimum_profit
-    feasible = best_case_profit >= floor
+    min_rr = config.risk.min_risk_reward
 
+    # The largest R:R this build will entertain as realistic. It is the
+    # same ceiling `RISK_MIN_RR` is clamped to, and structural targets
+    # beyond it are rare enough that promising them would be dishonest.
+    ceiling_rr = ATTAINABLE_RISK_REWARD_CEILING
+
+    comfortable_profit = max_risk * min_rr
+    best_case_profit = max_risk * ceiling_rr
+    feasible = best_case_profit >= floor
+    demanding = feasible and comfortable_profit < floor
+
+    required_rr = floor / max_risk if max_risk > 0 else None
     required_equity = (
-        floor / (config.risk.max_risk_pct * config.risk.min_risk_reward)
-        if config.risk.max_risk_pct > 0 and config.risk.min_risk_reward > 0
+        floor / (config.risk.max_risk_pct * ceiling_rr)
+        if config.risk.max_risk_pct > 0
         else None
     )
+    comfortable_equity = (
+        floor / (config.risk.max_risk_pct * min_rr)
+        if config.risk.max_risk_pct > 0 and min_rr > 0
+        else None
+    )
+
+    if not feasible:
+        reason = (
+            f"at ${equity:,.2f} equity the maximum allowed risk is ${max_risk:,.2f}, which even at "
+            f"an exceptional 1:{ceiling_rr:g} R:R yields at best ${best_case_profit:,.2f} — below "
+            f"the ${floor:,.2f} profit floor. No setup can pass this filter until equity reaches "
+            f"about ${required_equity:,.2f}, or the floor is lowered. Risk is never raised to "
+            f"close this gap."
+        )
+    elif demanding:
+        reason = (
+            f"reachable but demanding: at ${equity:,.2f} equity the ${max_risk:,.2f} risk ceiling "
+            f"needs a setup worth 1:{required_rr:.1f} R:R to clear the ${floor:,.2f} floor, above "
+            f"the 1:{min_rr:g} minimum. Ordinary setups will be filtered out; expect NO TRADE most "
+            f"days until equity reaches about ${comfortable_equity:,.2f}."
+        )
+    else:
+        reason = (
+            f"reachable: ${comfortable_profit:,.2f} at the ${max_risk:,.2f} risk ceiling and the "
+            f"1:{min_rr:g} minimum R:R, versus a ${floor:,.2f} floor"
+        )
+
     return {
         "feasible": feasible,
+        "demanding": demanding,
         "equity": round(equity, 2),
         "maxRiskPerTrade": round(max_risk, 2),
+        "comfortableProfit": round(comfortable_profit, 2),
         "bestCaseProfit": round(best_case_profit, 2),
         "minimumProfit": floor,
+        "requiredRiskReward": round(required_rr, 2) if required_rr else None,
         "requiredEquity": round(required_equity, 2) if required_equity else None,
-        "reason": (
-            f"at ${equity:,.2f} equity the maximum allowed risk is ${max_risk:,.2f}, which at the "
-            f"minimum 1:{config.risk.min_risk_reward:g} R:R yields at best ${best_case_profit:,.2f} "
-            f"— below the ${floor:,.2f} profit floor. No setup can pass this filter until equity "
-            f"reaches about ${required_equity:,.2f}, or the floor / risk ceiling is changed."
-        )
-        if not feasible
-        else (
-            f"reachable: up to ${best_case_profit:,.2f} at the ${max_risk:,.2f} risk ceiling "
-            f"versus a ${floor:,.2f} floor"
-        ),
+        "comfortableEquity": round(comfortable_equity, 2) if comfortable_equity else None,
+        "reason": reason,
     }
 
+
+#: The largest risk:reward this build treats as attainable when judging
+#: whether the profit floor is reachable. Matches the upper clamp on
+#: `RISK_MIN_RR`; structural targets beyond it exist but are too rare to
+#: base a feasibility promise on.
+ATTAINABLE_RISK_REWARD_CEILING = 10.0
 
 DEFAULT_SYMBOLS = ("EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCHF", "XAUUSD")
 

@@ -162,10 +162,15 @@ export type RiskState = {
   opportunityMinimum: number;
   profitObjective: {
     feasible: boolean;
+    /** Reachable, but only by setups above the configured minimum R:R. */
+    demanding?: boolean;
     reason: string;
+    comfortableProfit?: number;
     bestCaseProfit?: number;
     minimumProfit?: number;
+    requiredRiskReward?: number | null;
     requiredEquity?: number | null;
+    comfortableEquity?: number | null;
   };
 };
 

@@ -156,7 +156,12 @@ class Executor:
 
         # 2. DEMO verification #3 (creation).
         try:
-            require_demo(self.config, self.broker.account_metadata, stage="before_order_creation")
+            require_demo(
+                self.config,
+                self.broker.account_metadata,
+                stage="before_order_creation",
+                claims=getattr(self.broker, "session_claims", None),
+            )
         except DemoVerificationError as exc:
             return ExecutionResult(False, plan, "ABORTED", str(exc))
 
@@ -192,7 +197,12 @@ class Executor:
 
         # 6. DEMO verification #4 (submission) — immediately before the write.
         try:
-            require_demo(self.config, self.broker.account_metadata, stage="before_order_submission")
+            require_demo(
+                self.config,
+                self.broker.account_metadata,
+                stage="before_order_submission",
+                claims=getattr(self.broker, "session_claims", None),
+            )
         except DemoVerificationError as exc:
             self.repos.intents.mark(plan.execution_id, "FAILED", failure_reason=str(exc))
             return ExecutionResult(False, plan, "ABORTED", str(exc))

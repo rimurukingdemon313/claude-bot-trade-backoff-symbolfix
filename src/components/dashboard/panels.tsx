@@ -405,8 +405,14 @@ export function RiskPanel({ risk }: { risk: Envelope<RiskState> }) {
             />
           </div>
           {data.profitObjective && !data.profitObjective.feasible && (
-            <p className="mt-3 rounded-lg border border-amber-900 bg-amber-950/40 p-2 text-xs text-amber-300">
+            <p className="mt-3 rounded-lg border border-rose-900 bg-rose-950/40 p-2 text-xs text-rose-300">
               <span className="font-semibold">Profit floor unreachable: </span>
+              {data.profitObjective.reason}
+            </p>
+          )}
+          {data.profitObjective?.feasible && data.profitObjective.demanding && (
+            <p className="mt-3 rounded-lg border border-amber-900 bg-amber-950/40 p-2 text-xs text-amber-300">
+              <span className="font-semibold">Selective: </span>
               {data.profitObjective.reason}
             </p>
           )}
@@ -594,6 +600,15 @@ const COMPONENT_LABELS: Record<string, string> = {
   scanner: "Scanner",
 };
 
+/** The first human-readable explanation a health component offers. */
+function componentDetail(component: Record<string, any>): string | null {
+  for (const key of ["note", "reason", "error", "hint"]) {
+    const value = component?.[key];
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return null;
+}
+
 export function HealthPanel({ health }: { health: Health | undefined }) {
   if (!health) return <Card title="System health"><Unavailable status="LOADING" /></Card>;
   const components = health.components ?? {};
@@ -607,13 +622,28 @@ export function HealthPanel({ health }: { health: Health | undefined }) {
         {Object.entries(COMPONENT_LABELS).map(([key, label]) => {
           const component = components[key] ?? {};
           const ok = component.ok ?? component.enabled ?? false;
+          // A component switched off on purpose is not a fault. Reporting
+          // AI as DOWN when AI_ENABLED=false sent the last operator
+          // hunting for a broken provider that was never configured.
+          const off = key === "ai" && component.enabled === false;
+          // A bare DOWN badge says something is wrong without saying what,
+          // which is the least useful thing a health panel can do. Every
+          // component that reports a reason shows it here.
+          const detail = componentDetail(component);
           return (
             <div
               key={key}
-              className="flex items-center justify-between gap-2 rounded-lg border border-slate-800 bg-slate-950/40 px-3 py-2"
+              className="rounded-lg border border-slate-800 bg-slate-950/40 px-3 py-2"
             >
-              <span className="text-xs text-slate-300">{label}</span>
-              <Badge tone={ok ? "good" : "bad"}>{ok ? "OK" : "DOWN"}</Badge>
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs text-slate-300">{label}</span>
+                <Badge tone={off ? "neutral" : ok ? "good" : "bad"}>
+                  {off ? "OFF" : ok ? "OK" : "DOWN"}
+                </Badge>
+              </div>
+              {!ok && detail && (
+                <p className="mt-1.5 text-[11px] leading-snug text-rose-300/90">{detail}</p>
+              )}
             </div>
           );
         })}

@@ -175,7 +175,11 @@ def build_setup_report(config: TradingConfig, *, equity: float | None = None) ->
         )
     if equity is not None:
         feasibility = profit_floor_feasibility(config, equity)
-        if not feasibility.get("feasible"):
+        # Both bands are worth saying out loud. "Unreachable" means the bot
+        # can never trade; "demanding" means it will trade rarely — and an
+        # operator who is not told the second one reads a quiet bot as a
+        # broken one.
+        if not feasibility.get("feasible") or feasibility.get("demanding"):
             warnings.append(feasibility["reason"])
 
     # Only the settings still missing, so there is nothing to hunt through.

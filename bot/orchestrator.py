@@ -193,7 +193,10 @@ class Orchestrator:
             return {"ok": False, "error": self.startup_error}
 
         verification = verify_demo(
-            self.config, self.broker.account_metadata, stage="startup"
+            self.config,
+            self.broker.account_metadata,
+            stage="startup",
+            claims=getattr(self.broker, "session_claims", None),
         )
         self.last_demo = verification
         if not verification.verified:
@@ -371,7 +374,10 @@ class Orchestrator:
 
         try:
             verification = verify_demo(
-                self.config, self.broker.account_metadata, stage="scan"
+                self.config,
+                self.broker.account_metadata,
+                stage="scan",
+                claims=getattr(self.broker, "session_claims", None),
             )
             self.last_demo = verification
             result.demo = verification

@@ -383,10 +383,41 @@ def test_simultaneous_limit_breaches_all_report(config, candidate):
 def test_the_profit_floor_is_reported_as_unreachable_rather_than_silently_never_trading(config):
     """A tiny account would otherwise return NO TRADE forever with no clue why."""
 
-    feasibility = profit_floor_feasibility(config, 500.0)
+    feasibility = profit_floor_feasibility(config, 300.0)
     assert feasibility["feasible"] is False
     assert "No setup can pass this filter" in feasibility["reason"]
-    assert feasibility["requiredEquity"] > 500.0
+    assert feasibility["requiredEquity"] > 300.0
+
+
+def test_feasibility_is_judged_against_attainable_rr_not_the_minimum(config):
+    """`min_risk_reward` is a floor, not a cap.
+
+    Targets are structural, so a setup's R:R is whatever the liquidity
+    above it is worth. Judging feasibility by the *minimum* R:R declared a
+    $1,000 account incapable of a $40 win, when any 1:4 setup clears it —
+    the bot was reported as permanently blocked while it was merely
+    selective.
+    """
+
+    feasibility = profit_floor_feasibility(config, 1_000.0)
+    assert feasibility["feasible"] is True
+    assert feasibility["demanding"] is True
+    # $10 risk, $40 floor -> a setup must be worth 1:4.
+    assert feasibility["requiredRiskReward"] == pytest.approx(4.0, abs=0.05)
+    assert "reachable but demanding" in feasibility["reason"]
+
+
+def test_the_profit_floor_never_raises_risk_to_close_the_gap(config):
+    """Rule 2: risk may be reduced by account state, never increased by it.
+
+    A profit objective that could bid the risk ceiling up would be exactly
+    the martingale the risk engine forbids, arriving through the back door.
+    """
+
+    poor = profit_floor_feasibility(config, 300.0)
+    rich = profit_floor_feasibility(config, 30_000.0)
+    assert poor["maxRiskPerTrade"] == pytest.approx(300.0 * config.risk.max_risk_pct)
+    assert rich["maxRiskPerTrade"] == pytest.approx(30_000.0 * config.risk.max_risk_pct)
 
 
 # =========================================================================

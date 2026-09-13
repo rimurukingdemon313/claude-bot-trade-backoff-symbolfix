@@ -198,7 +198,12 @@ def run(
     report.add("authentication", OK, "authenticated and resolved the account number")
 
     # 3. DEMO verification ------------------------------------------------
-    verification = verify_demo(config, broker.account_metadata, stage="doctor")
+    verification = verify_demo(
+        config,
+        broker.account_metadata,
+        stage="doctor",
+        claims=getattr(broker, "session_claims", None),
+    )
     report.add(
         "demo_guard",
         OK if verification.verified else FAIL,

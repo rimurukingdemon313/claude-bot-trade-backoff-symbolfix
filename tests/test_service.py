@@ -307,8 +307,27 @@ def test_an_unreachable_profit_floor_is_warned_about(monkeypatch):
     from bot.config import load_config
     from bot.setup_status import build_setup_report
 
-    report = build_setup_report(load_config(), equity=500.0)
+    # $300 at the 1% ceiling risks $3; even an exceptional 1:10 structural
+    # target returns $30, short of the $40 floor. Nothing but more equity
+    # fixes that, and the operator must be told rather than left watching
+    # a bot that never trades.
+    report = build_setup_report(load_config(), equity=300.0)
     assert any("No setup can pass this filter" in warning for warning in report.warnings)
+
+
+def test_a_reachable_but_demanding_profit_floor_is_also_warned_about(monkeypatch):
+    """The quiet-bot case: it CAN trade, but only on exceptional setups.
+
+    Silence here is what made the last deployment look broken — a healthy
+    bot returning NO TRADE every day is indistinguishable from a stuck one
+    unless it says why.
+    """
+
+    from bot.config import load_config
+    from bot.setup_status import build_setup_report
+
+    report = build_setup_report(load_config(), equity=1_000.0)
+    assert any("reachable but demanding" in warning for warning in report.warnings)
 
 
 def test_ai_enabled_without_a_provider_is_flagged_as_blocking(monkeypatch):

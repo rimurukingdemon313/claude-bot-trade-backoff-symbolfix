@@ -8,6 +8,7 @@ import pytest
 
 from bot.config import BrokerConfig, load_config
 from bot.errors import ConfigError, DemoVerificationError
+from bot.broker.tradelocker import decode_token_claims
 from bot.safety.demo_guard import require_demo, verify_demo
 from bot.safety.kill_switch import KillSwitch
 
@@ -72,6 +73,135 @@ def test_unknown_url_is_not_assumed_demo(config):
 def test_require_demo_raises_and_names_the_stage(config):
     with pytest.raises(DemoVerificationError, match="before_order_submission"):
         require_demo(config, {"accountType": "LIVE"}, stage="before_order_submission")
+
+
+# -- signal 2 from the access token ---------------------------------------
+#
+# GATESFX returns account records with no type field of any kind — the live
+# deployment sat blocked on ENVIRONMENT_MISMATCH with a correctly configured
+# demo account. The broker still states the environment; it states it in the
+# session it signed. These tests pin that second source and, just as
+# important, pin that it cannot be used to soften anything.
+
+
+#: The account record GATESFX actually returns: no type field anywhere.
+GATESFX_ACCOUNT = {
+    "id": "2475112",
+    "name": "2475112",
+    "currency": "USD",
+    "accNum": "1",
+    "accountBalance": "998.34",
+    "status": "ACTIVE",
+}
+
+
+def jwt(payload: dict) -> str:
+    """A JWT with a real payload and a junk signature.
+
+    The signature is junk on purpose: the guard must read the claims as
+    evidence and never as authority.
+    """
+
+    import base64
+    import json
+
+    def segment(data: dict) -> str:
+        raw = json.dumps(data).encode()
+        return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+    return f"{segment({'alg': 'HS256'})}.{segment(payload)}.not-a-real-signature"
+
+
+def test_a_demo_claim_satisfies_signal_two_when_the_account_record_is_silent(config):
+    claims = decode_token_claims(jwt({"sub": "2475112", "iss": "https://demo.tradelocker.com"}))
+    verification = verify_demo(config, GATESFX_ACCOUNT, stage="test", claims=claims)
+    assert verification.verified is True
+    assert verification.account_ok is True
+
+
+def test_a_live_claim_fails_even_when_the_account_record_says_demo(config):
+    """A contradiction resolves the safe way, never the convenient one."""
+
+    claims = decode_token_claims(jwt({"iss": "https://live.tradelocker.com"}))
+    verification = verify_demo(config, {"accountType": "DEMO"}, stage="test", claims=claims)
+    assert verification.verified is False
+    assert "LIVE" in (verification.reason or "")
+
+
+def test_a_live_account_record_fails_even_when_the_token_says_demo(config):
+    claims = decode_token_claims(jwt({"iss": "https://demo.tradelocker.com"}))
+    verification = verify_demo(config, {"accountType": "LIVE"}, stage="test", claims=claims)
+    assert verification.verified is False
+
+
+def test_a_token_with_no_environment_claim_is_still_a_failure(config):
+    """The whole point: absence of evidence is not evidence."""
+
+    claims = decode_token_claims(jwt({"sub": "2475112", "exp": 1893456000}))
+    verification = verify_demo(config, GATESFX_ACCOUNT, stage="test", claims=claims)
+    assert verification.verified is False
+
+
+def test_the_failure_names_the_fields_it_actually_saw(config):
+    """The old message said only that nothing matched, which cost a full
+    deployment cycle to diagnose. It must say what it looked at."""
+
+    claims = decode_token_claims(jwt({"sub": "2475112", "exp": 1893456000}))
+    reason = verify_demo(config, GATESFX_ACCOUNT, stage="test", claims=claims).reason or ""
+    assert "accNum" in reason and "status" in reason  # account keys
+    assert "token fields seen" in reason or "token: nothing returned" in reason
+
+
+@pytest.mark.parametrize(
+    "token",
+    ["", "not-a-jwt", "only.two", "a.!!!not-base64!!!.c", None],
+)
+def test_an_unreadable_token_yields_no_claims_rather_than_raising(token):
+    """This runs immediately before every order. It may not throw."""
+
+    assert decode_token_claims(token) is None
+
+
+def test_token_claims_are_scalars_only_and_bounded():
+    """Untrusted input: no nested structure, no unbounded blob reaches the guard."""
+
+    claims = decode_token_claims(
+        jwt({"iss": "demo", "accounts": [1, 2, 3], "meta": {"a": 1}, "blob": "x" * 5000})
+    )
+    assert claims == {"iss": "demo"}
+
+
+def test_a_nickname_containing_demo_cannot_be_used_as_a_token_signal(config):
+    """Claims are read from an allowlist, not scanned wholesale.
+
+    A user-chosen account nickname is not the broker's statement about the
+    environment, and must never be promoted into one.
+    """
+
+    claims = decode_token_claims(jwt({"nickname": "my demo account", "sub": "2475112"}))
+    assert verify_demo(config, GATESFX_ACCOUNT, stage="test", claims=claims).verified is False
+
+
+def test_the_url_signal_still_has_to_pass_on_its_own(config):
+    """Signal 2 broadening must not turn two signals into one."""
+
+    claims = decode_token_claims(jwt({"iss": "https://demo.tradelocker.com"}))
+    unknown = dataclasses.replace(
+        config, broker=dataclasses.replace(config.broker, base_url="https://api.example.com/v1")
+    )
+    assert verify_demo(unknown, GATESFX_ACCOUNT, stage="test", claims=claims).verified is False
+
+
+def test_the_guard_never_sees_the_token_itself(config):
+    """The claims cross the boundary; the credential does not."""
+
+    import inspect
+
+    from bot.safety import demo_guard
+
+    source = inspect.getsource(demo_guard)
+    for forbidden in ("accessToken", "_access_token", "Authorization", "Bearer"):
+        assert forbidden not in source
 
 
 def test_kill_switch_survives_a_new_process(repos):

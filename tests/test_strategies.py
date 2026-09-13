@@ -263,3 +263,55 @@ def test_a_target_built_on_the_floor_is_not_rejected_by_float_error(config):
         # Whichever side of the floor the arithmetic lands on, the tolerance
         # must cover it.
         assert recomputed >= config.risk.min_risk_reward - R_EPSILON
+
+
+# -- the trade record says which mode produced it --------------------------
+
+
+def test_a_trade_plan_records_the_strategy_that_produced_it(config, broker, repos):
+    """Project rule 14. After the fact there is no other way to tell.
+
+    Two modes with different targets and different frequencies averaged
+    into one win rate is a number that describes nothing. Separating them
+    later is only possible if it was written down at the time.
+    """
+
+    from bot.execution.plan import build_plan
+    from bot.marketdata.provider import MarketDataProvider
+    from bot.risk.engine import RiskEngine
+    from bot.safety.kill_switch import KillSwitch
+    from bot.scoring.scorer import SetupScorer
+    from bot.smc.engine import SmcEngine
+    from fakes import DEFAULT_SPEC
+
+    series = MarketDataProvider(broker, config).multi_timeframe(DEFAULT_SPEC, now=SETUP_END)
+    candidate = SmcEngine(config).analyze("EURUSD", series, now=SETUP_END).candidate
+    assert candidate is not None
+    score = SetupScorer(config).score(candidate)
+
+    from bot.risk.engine import AccountRiskState
+
+    account = AccountRiskState(
+        balance=10_000.0, equity=10_000.0, available_margin=10_000.0, peak_equity=10_000.0,
+        daily_realized_pnl=0.0, open_pnl=0.0, trades_today=0, trades_this_session=0,
+        consecutive_losses=0, open_positions=[],
+    )
+    decision = RiskEngine(config, KillSwitch(repos.state)).evaluate(
+        candidate=candidate, tier=score.tier, account=account, spec=DEFAULT_SPEC, now=SETUP_END
+    )
+    assert decision.approved, decision.reasons
+
+    for mode in ("smc", "reversion"):
+        plan = build_plan(
+            candidate=candidate, spec=DEFAULT_SPEC, risk_decision=decision,
+            score=score, ai_confidence=None, strategy=mode,
+        )
+        assert plan.strategy == mode
+        assert plan.as_dict()["versions"]["strategy"] == mode
+
+
+def test_the_orchestrator_stamps_the_mode_actually_in_force(orchestrator):
+    """Not the configured default — the one the switch selected."""
+
+    orchestrator.set_strategy("reversion")
+    assert orchestrator.strategy_key == "reversion"

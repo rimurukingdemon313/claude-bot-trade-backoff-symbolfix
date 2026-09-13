@@ -94,6 +94,17 @@ export default function Dashboard() {
     retry: 1,
   });
 
+  // The mode in force, for the header. Never guessed from config: the
+  // switch persists its choice, so only the bot can say what is running.
+  const activeStrategy = useMemo(() => {
+    const option = strategy.data?.data?.options?.find((item) => item.active);
+    if (!option) return null;
+    return {
+      name: option.name,
+      shortLabel: option.key === "smc" ? "SMC" : "REVERSION",
+    };
+  }, [strategy.data]);
+
   const invalidate = useCallback(() => {
     void queryClient.invalidateQueries({ queryKey: ["snapshot"] });
     void queryClient.invalidateQueries({ queryKey: ["journal"] });
@@ -183,7 +194,9 @@ export default function Dashboard() {
               <ShieldAlert className="h-5 w-5 shrink-0 text-rose-400" aria-hidden />
             )}
             <div className="min-w-0">
-              <h1 className="truncate text-sm font-semibold">SMC Trading Bot</h1>
+              <h1 className="truncate text-sm font-semibold">
+                {activeStrategy?.name ?? "Trading Bot"}
+              </h1>
               <p className="truncate text-[11px] text-slate-500">
                 {demoVerified
                 ? `TradeLocker DEMO · ${health?.paper ? "paper" : "live orders"}`
@@ -192,6 +205,10 @@ export default function Dashboard() {
             </div>
           </div>
           <div className="ml-auto flex flex-wrap items-center gap-1.5">
+            {/* Which strategy is looking for trades, at a glance. Buried in
+                a tab it was the one thing an operator could not answer
+                without hunting for it. */}
+            {activeStrategy && <Badge tone="info">{activeStrategy.shortLabel}</Badge>}
             <Badge tone={connectionState.tone}>{connectionState.label}</Badge>
             <Badge tone={killActive ? "bad" : scannerEnabled ? "good" : "warn"}>
               {killActive ? "STOPPED" : scannerEnabled ? "SCANNING" : "PAUSED"}

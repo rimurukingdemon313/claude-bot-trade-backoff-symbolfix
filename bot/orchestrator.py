@@ -840,6 +840,7 @@ class Orchestrator:
                 if outcome.ai is not None and outcome.ai.decision is not None
                 else None
             ),
+            strategy=self.strategy_key,
         )
         result = self.executor.execute(plan, spec, atr=outcome.atr)
         self.repos.journal.record(

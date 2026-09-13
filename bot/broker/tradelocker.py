@@ -78,6 +78,35 @@ def normalize_symbol(raw: str) -> str:
     return alphanumeric(raw)
 
 
+#: Top-level keys that mark a TradeLocker response envelope rather than
+#: data. A payload whose keys are all drawn from this set (plus "d") is
+#: the envelope and gets unwrapped; anything else is returned as-is.
+ENVELOPE_KEYS = frozenset({"s", "d", "errmsg", "errMsg", "errCode", "msg", "status"})
+
+
+#: `/trade/config` panel keys, by the name this code asks for.
+#:
+#: TradeLocker brands rename these. Asking for one spelling and treating
+#: its absence as a fatal error meant a single renamed key took out the
+#: whole table: working_orders and order_history failed on a GATESFX
+#: account where authentication, instruments and account state all worked.
+PANEL_ALIASES: dict[str, tuple[str, ...]] = {
+    "accountDetailsConfig": (
+        "accountDetailsConfig",
+        "accountDetailConfig",
+        "accountConfig",
+    ),
+    "positionsConfig": ("positionsConfig", "openPositionsConfig"),
+    "ordersConfig": ("ordersConfig", "openOrdersConfig", "workingOrdersConfig"),
+    "ordersHistoryConfig": (
+        "ordersHistoryConfig",
+        "orderHistoryConfig",
+        "ordersHistoryColumnConfig",
+        "historyConfig",
+    ),
+}
+
+
 #: Claim values larger than this are not environment markers; refusing
 #: them keeps a hostile or malformed token from becoming a memory or log
 #: problem on a path that runs before every order.
@@ -300,11 +329,26 @@ class TradeLockerBroker:
 
     @staticmethod
     def _unwrap(payload: Any) -> Any:
-        if isinstance(payload, Mapping) and "s" in payload and "d" in payload:
-            if payload.get("s") != "ok":
-                raise BrokerRejected(f"TradeLocker returned status {payload.get('s')}: {payload}")
-            return payload["d"]
-        return payload
+        """Strip TradeLocker's {"s": "ok", "d": ...} envelope.
+
+        Requiring BOTH keys was too strict: a brand that returns the
+        envelope without the status field left every reader looking at
+        {"d": {...}} and finding none of the keys it wanted — an empty
+        table indistinguishable from an account with nothing in it.
+
+        Unwrapping only when the remaining top-level keys are all envelope
+        metadata keeps a legitimate payload that happens to contain a field
+        called "d" from being mistaken for one.
+        """
+
+        if not isinstance(payload, Mapping) or "d" not in payload:
+            return payload
+        status = payload.get("s")
+        if status is not None and str(status).lower() != "ok":
+            raise BrokerRejected(f"TradeLocker returned status {status}: {payload}")
+        if set(payload) - ENVELOPE_KEYS:
+            return payload
+        return payload["d"]
 
     def get(self, path: str, query: Mapping[str, Any] | None = None) -> Any:
         self.ensure_session()
@@ -331,14 +375,54 @@ class TradeLockerBroker:
         return self._trade_config
 
     def _columns(self, panel: str) -> list[str]:
-        config = self.trade_config().get(panel, {})
-        return [str(column.get("id")) for column in config.get("columns", [])]
+        """Column ids for a panel, under whichever name this brand uses.
 
-    def _decode(self, rows: Sequence[Sequence[Any]], panel: str) -> list[dict[str, Any]]:
+        `/trade/config` describes each table's columns, and brands do not
+        agree on the keys. A hardcoded name that a brand happens not to use
+        takes down the whole table — which is what made working_orders and
+        order_history fail on an account where everything else worked.
+        """
+
+        config = self.trade_config()
+        for name in PANEL_ALIASES.get(panel, (panel,)):
+            panel_config = config.get(name)
+            if isinstance(panel_config, Mapping):
+                columns = [
+                    str(column.get("id"))
+                    for column in panel_config.get("columns", [])
+                    if isinstance(column, Mapping) and column.get("id")
+                ]
+                if columns:
+                    return columns
+        return []
+
+    def _decode(self, rows: Sequence[Any], panel: str) -> list[dict[str, Any]]:
+        """Turn positional rows into dictionaries.
+
+        Some brands return objects here instead of arrays. Zipping column
+        names over a dictionary iterates its KEYS and produces confident
+        nonsense — a row of {"id": "qty", "qty": "side"} that every reader
+        downstream would treat as real. A row that already names its fields
+        is passed through untouched.
+        """
+
+        if not rows:
+            return []
+        if all(isinstance(row, Mapping) for row in rows):
+            return [dict(row) for row in rows]
+
         columns = self._columns(panel)
         if not columns:
-            raise BrokerError(f"TradeLocker /trade/config did not describe {panel}")
-        return [dict(zip(columns, row)) for row in rows]
+            described = ", ".join(sorted(str(key) for key in self.trade_config())) or "nothing"
+            raise BrokerError(
+                f"TradeLocker /trade/config did not describe {panel}. "
+                f"It described: {described}. This account's brand uses different panel "
+                "names; the alias list in PANEL_ALIASES needs the one it uses."
+            )
+        return [
+            dict(zip(columns, row)) if not isinstance(row, Mapping) else dict(row)
+            for row in rows
+        ]
 
     # -- account ---------------------------------------------------------
 

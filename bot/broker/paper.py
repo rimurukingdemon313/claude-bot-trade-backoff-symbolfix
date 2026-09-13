@@ -85,6 +85,12 @@ class PaperBroker:
 
         return self.live.account_metadata
 
+    @property
+    def session_claims(self) -> dict[str, Any] | None:
+        """The REAL session's claims, for the same reason as above."""
+
+        return getattr(self.live, "session_claims", None)
+
     def ensure_session(self) -> None:
         self.live.ensure_session()
         self._ensure_account()

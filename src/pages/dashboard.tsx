@@ -29,10 +29,12 @@ import { api, fmt, type Snapshot } from "@/lib/api";
 import { Badge, Card, cn } from "@/components/dashboard/primitives";
 import {
   AccountPanel,
-  ModeBanner,
+  ConfigurationPanel,
+  DoctorPanel,
   HealthPanel,
   HistoryPanel,
   JournalPanel,
+  ModeBanner,
   PerformancePanel,
   PositionsPanel,
   RiskPanel,
@@ -61,6 +63,16 @@ export default function Dashboard() {
     queryFn: api.snapshot,
     refetchInterval: REFRESH_MS,
     refetchOnWindowFocus: true,
+    retry: 1,
+  });
+
+  // Polled slowly: configuration changes on redeploy, not continuously. It is
+  // fetched even when the snapshot fails, because an unconfigured deployment
+  // is exactly when this is the only screen with anything useful on it.
+  const setup = useQuery({
+    queryKey: ["setup"],
+    queryFn: api.setup,
+    refetchInterval: REFRESH_MS * 8,
     retry: 1,
   });
 
@@ -220,6 +232,8 @@ export default function Dashboard() {
 
         <ModeBanner health={health} />
 
+        {setup.data && !setup.data.ready && <ConfigurationPanel setup={setup.data} />}
+
         {tab === "overview" && (
           <>
             <AccountPanel account={data?.account as any} />
@@ -237,6 +251,8 @@ export default function Dashboard() {
         {tab === "system" && (
           <>
             <HealthPanel health={health} />
+            {setup.data?.ready && <ConfigurationPanel setup={setup.data} />}
+            <DoctorPanel />
             <JournalPanel
               rows={journal.data?.data ?? []}
               histogram={journal.data?.histogram ?? []}

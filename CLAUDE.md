@@ -9,13 +9,31 @@ specific, known failure.
 `REQUIRE_DEMO` in `bot/config.py` is a module constant with no environment
 override, and that is deliberate. Do not add one.
 
-Demo status is verified from two independent signals (the API URL and the
-broker's own account metadata) at four points: startup, broker connection,
-before order creation, before order submission. **Both signals must agree.**
+Demo status is verified from two independent signals at four points:
+startup, broker connection, before order creation, before order submission.
+**Both signals must agree.**
 
-- Never add a fallback that assumes demo when metadata is missing.
+1. **Ours**: the configured API URL is a demo endpoint and matches no live
+   marker.
+2. **The broker's**: it says so itself, in the account record
+   (`/auth/jwt/all-accounts`) *or* in the claims of the access token it
+   signed at login. Brands differ in which one they populate — GATESFX
+   returns an account record with no type field at all — so either source
+   counts as positive evidence, and a LIVE marker in *either* fails the
+   check outright even when the other says demo.
+
+- Never add a fallback that assumes demo when metadata is missing. Absence
+  of evidence fails; only positive evidence passes.
+- Token claims are read from an allowlist, never scanned wholesale. A
+  user-settable string (an account nickname) must never become a safety
+  signal.
+- The access token itself never leaves the broker adapter. The guard reads
+  claims as evidence, never as authority, and does not verify the
+  signature — nothing here grants access.
 - Never let a retry, a config default, or an error path change the endpoint.
-- If verification fails: no trade, trip the kill switch, say why.
+- If verification fails: no trade, trip the kill switch, say why — and the
+  failure message must name the fields it actually looked at, or the next
+  operator loses a deploy cycle to guessing.
 
 ## 2. One risk engine
 

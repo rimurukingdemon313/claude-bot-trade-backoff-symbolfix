@@ -2,9 +2,13 @@
  * Dashboard panels. Presentation only — no calculation of trading values.
  */
 
-import { type ReactNode } from "react";
+import { type ReactNode, useState } from "react";
 import {
+  api,
   type Account,
+  type DoctorReport,
+  type SetupReport,
+  type SetupSetting,
   type Envelope,
   type HistoryRow,
   type Health,
@@ -401,8 +405,14 @@ export function RiskPanel({ risk }: { risk: Envelope<RiskState> }) {
             />
           </div>
           {data.profitObjective && !data.profitObjective.feasible && (
-            <p className="mt-3 rounded-lg border border-amber-900 bg-amber-950/40 p-2 text-xs text-amber-300">
+            <p className="mt-3 rounded-lg border border-rose-900 bg-rose-950/40 p-2 text-xs text-rose-300">
               <span className="font-semibold">Profit floor unreachable: </span>
+              {data.profitObjective.reason}
+            </p>
+          )}
+          {data.profitObjective?.feasible && data.profitObjective.demanding && (
+            <p className="mt-3 rounded-lg border border-amber-900 bg-amber-950/40 p-2 text-xs text-amber-300">
+              <span className="font-semibold">Selective: </span>
               {data.profitObjective.reason}
             </p>
           )}
@@ -590,6 +600,15 @@ const COMPONENT_LABELS: Record<string, string> = {
   scanner: "Scanner",
 };
 
+/** The first human-readable explanation a health component offers. */
+function componentDetail(component: Record<string, any>): string | null {
+  for (const key of ["note", "reason", "error", "hint"]) {
+    const value = component?.[key];
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return null;
+}
+
 export function HealthPanel({ health }: { health: Health | undefined }) {
   if (!health) return <Card title="System health"><Unavailable status="LOADING" /></Card>;
   const components = health.components ?? {};
@@ -603,13 +622,28 @@ export function HealthPanel({ health }: { health: Health | undefined }) {
         {Object.entries(COMPONENT_LABELS).map(([key, label]) => {
           const component = components[key] ?? {};
           const ok = component.ok ?? component.enabled ?? false;
+          // A component switched off on purpose is not a fault. Reporting
+          // AI as DOWN when AI_ENABLED=false sent the last operator
+          // hunting for a broken provider that was never configured.
+          const off = key === "ai" && component.enabled === false;
+          // A bare DOWN badge says something is wrong without saying what,
+          // which is the least useful thing a health panel can do. Every
+          // component that reports a reason shows it here.
+          const detail = componentDetail(component);
           return (
             <div
               key={key}
-              className="flex items-center justify-between gap-2 rounded-lg border border-slate-800 bg-slate-950/40 px-3 py-2"
+              className="rounded-lg border border-slate-800 bg-slate-950/40 px-3 py-2"
             >
-              <span className="text-xs text-slate-300">{label}</span>
-              <Badge tone={ok ? "good" : "bad"}>{ok ? "OK" : "DOWN"}</Badge>
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs text-slate-300">{label}</span>
+                <Badge tone={off ? "neutral" : ok ? "good" : "bad"}>
+                  {off ? "OFF" : ok ? "OK" : "DOWN"}
+                </Badge>
+              </div>
+              {!ok && detail && (
+                <p className="mt-1.5 text-[11px] leading-snug text-rose-300/90">{detail}</p>
+              )}
             </div>
           );
         })}
@@ -650,6 +684,204 @@ export function HealthPanel({ health }: { health: Health | undefined }) {
             ))}
           </ul>
         </div>
+      )}
+    </Card>
+  );
+}
+
+/**
+ * Configuration checklist.
+ *
+ * Shown whenever something required is missing, because the failure that
+ * actually strands people is a deployed service with one absent variable and
+ * no indication of which. Presence only — never a value.
+ */
+export function ConfigurationPanel({ setup }: { setup: SetupReport | undefined }) {
+  const [copied, setCopied] = useState(false);
+  if (!setup) return null;
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(setup.pasteBlock);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 4000);
+    } catch {
+      /* selection fallback: the block is rendered below */
+    }
+  };
+
+  const byImportance = (level: SetupSetting['importance']) =>
+    setup.settings.filter((item) => item.importance === level);
+
+  return (
+    <Card
+      title="Configuration"
+      subtitle="What this deployment has, and what it still needs. Values are never shown."
+      action={
+        <Badge tone={setup.ready ? 'good' : 'bad'}>
+          {setup.ready ? 'READY' : `${setup.missingRequired.length} MISSING`}
+        </Badge>
+      }
+    >
+      <p className="rounded-lg border border-slate-800 bg-slate-950/40 p-2 text-xs text-slate-300">
+        {setup.nextStep}
+      </p>
+
+      {setup.warnings.map((warning, index) => (
+        <p
+          key={index}
+          className="mt-2 rounded-lg border border-amber-900 bg-amber-950/40 p-2 text-[11px] text-amber-300"
+        >
+          {warning}
+        </p>
+      ))}
+
+      {(['required', 'recommended', 'optional'] as const).map((level) => {
+        const items = byImportance(level);
+        if (!items.length) return null;
+        return (
+          <div key={level} className="mt-4">
+            <h3 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+              {level}
+            </h3>
+            <ul className="space-y-1">
+              {items.map((item) => (
+                <li
+                  key={item.name}
+                  className="flex items-start gap-2 rounded-lg border border-slate-800 bg-slate-950/40 px-2 py-1.5"
+                >
+                  <span
+                    className={cn(
+                      'mt-0.5 shrink-0 text-xs',
+                      item.present ? 'text-emerald-400' : level === 'required' ? 'text-rose-400' : 'text-amber-400',
+                    )}
+                    aria-hidden
+                  >
+                    {item.present ? '✓' : '✗'}
+                  </span>
+                  <span className="min-w-0">
+                    <span className="block font-mono text-[11px] text-slate-200">{item.name}</span>
+                    <span className="block text-[11px] text-slate-500">{item.purpose}</span>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        );
+      })}
+
+      {setup.pasteBlock && (
+        <div className="mt-4">
+          <div className="mb-1.5 flex items-center justify-between gap-2">
+            <h3 className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+              Paste into your host's environment variables
+            </h3>
+            <button
+              type="button"
+              onClick={copy}
+              className="inline-flex min-h-[32px] items-center rounded-lg border border-sky-800 bg-sky-950 px-2.5 text-[11px] font-medium text-sky-200 hover:bg-sky-900"
+            >
+              {copied ? 'Copied' : 'Copy'}
+            </button>
+          </div>
+          <pre className="overflow-x-auto rounded-lg border border-slate-800 bg-slate-950 p-3 text-[10px] leading-relaxed text-slate-300">
+            {setup.pasteBlock}
+          </pre>
+          <p className="mt-1.5 text-[11px] text-slate-500">
+            Fill the blanks in your host's settings — never in a chat, a file, or this page.
+          </p>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+/**
+ * Broker verification, in the UI.
+ *
+ * The same read-only check as `python3 -m bot.doctor`, reachable without a
+ * terminal — which is the only way some operators can reach it at all. The
+ * report is masked server-side, so Copy produces something safe to share.
+ */
+export function DoctorPanel() {
+  const [report, setReport] = useState<DoctorReport | null>(null);
+  const [running, setRunning] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  const runCheck = async () => {
+    setRunning(true);
+    setError(null);
+    setCopied(false);
+    try {
+      setReport(await api.doctor());
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'verification failed');
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const copy = async () => {
+    if (!report?.text) return;
+    try {
+      await navigator.clipboard.writeText(report.text);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 4000);
+    } catch {
+      setError('Could not copy automatically — select the text below manually.');
+    }
+  };
+
+  const tone =
+    report?.verdict === 'PASS' ? 'good' : report?.verdict === 'WARN' ? 'warn' : 'bad';
+
+  return (
+    <Card
+      title="Verify broker account"
+      subtitle="Read-only. Never places an order. Balances are masked, so the report is safe to share."
+      action={report ? <Badge tone={tone}>{report.verdict}</Badge> : undefined}
+    >
+      <div className="flex flex-wrap gap-2">
+        <button
+          type="button"
+          onClick={runCheck}
+          disabled={running}
+          className="inline-flex min-h-[38px] items-center rounded-lg border border-slate-700 bg-slate-900 px-3 text-xs font-medium text-slate-200 hover:bg-slate-800 disabled:opacity-50"
+        >
+          {running ? 'Checking…' : 'Run verification'}
+        </button>
+        {report?.text && (
+          <button
+            type="button"
+            onClick={copy}
+            className="inline-flex min-h-[38px] items-center rounded-lg border border-sky-800 bg-sky-950 px-3 text-xs font-medium text-sky-200 hover:bg-sky-900"
+          >
+            {copied ? 'Copied' : 'Copy report'}
+          </button>
+        )}
+      </div>
+
+      {running && (
+        <p className="mt-3 text-[11px] text-slate-500">
+          This makes a few dozen read calls to the broker and can take up to a minute.
+        </p>
+      )}
+      {error && (
+        <p className="mt-3 rounded-lg border border-rose-900 bg-rose-950/50 p-2 text-xs text-rose-300">
+          {error}
+        </p>
+      )}
+      {report && report.failed.length > 0 && (
+        <p className="mt-3 rounded-lg border border-amber-900 bg-amber-950/40 p-2 text-xs text-amber-300">
+          <span className="font-semibold">Failing: </span>
+          {report.failed.join(', ')}
+        </p>
+      )}
+      {report?.text && (
+        <pre className="mt-3 max-h-96 overflow-auto rounded-lg border border-slate-800 bg-slate-950 p-3 text-[10px] leading-relaxed text-slate-300">
+          {report.text}
+        </pre>
       )}
     </Card>
   );

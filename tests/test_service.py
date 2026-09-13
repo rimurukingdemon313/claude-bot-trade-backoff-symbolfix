@@ -206,3 +206,187 @@ def test_graceful_shutdown_does_not_touch_positions(service, broker):
     service.shutdown()
     assert broker.closures == [], "a deploy must never close a live position"
     assert len(broker.positions()) == 1
+
+
+# -- the doctor over HTTP --------------------------------------------------
+
+
+def test_the_doctor_report_is_readable_over_http(base_url):
+    """Exposed so the account can be verified from a browser — including a
+    phone — without a terminal."""
+
+    status, payload = get(f"{base_url}/api/doctor")
+    assert status == 200
+    assert "verdict" in payload
+    assert "text" in payload, "a human-readable rendering must be included"
+    assert isinstance(payload.get("checks"), list)
+
+
+def test_the_doctor_endpoint_masks_account_figures(base_url, service, monkeypatch):
+    """It is a read endpoint, so it must never publish a balance."""
+
+    monkeypatch.setenv("TRADELOCKER_PASSWORD", "hunter2-very-secret-value")
+    _, payload = get(f"{base_url}/api/doctor")
+    body = json.dumps(payload)
+    assert "hunter2-very-secret-value" not in body
+    balance = service.broker.account_state().balance
+    # 10000.0 formatted any of the ways the report might render it.
+    for rendering in (f"{balance:.2f}", f"{balance:,.2f}", str(balance)):
+        assert rendering not in body, f"account balance leaked as {rendering!r}"
+
+
+def test_the_doctor_endpoint_answers_even_when_the_broker_is_broken(base_url, service):
+    from bot.errors import BrokerError
+
+    def explode(*args, **kwargs):
+        raise BrokerError("total outage")
+
+    service.orchestrator.broker.ensure_session = explode  # type: ignore[assignment]
+    status, payload = get(f"{base_url}/api/doctor")
+    assert status == 200, "a diagnostic must always answer"
+    assert payload["verdict"] == "FAIL"
+
+
+# -- configuration checklist -----------------------------------------------
+
+
+def test_the_setup_endpoint_answers_before_credentials_exist(base_url):
+    """This is the screen to read when nothing else works yet."""
+
+    status, payload = get(f"{base_url}/api/setup")
+    assert status == 200
+    for key in ("ready", "missingRequired", "settings", "warnings", "pasteBlock", "nextStep"):
+        assert key in payload
+    assert payload["nextStep"]
+
+
+def test_the_setup_endpoint_never_reveals_a_value(base_url, monkeypatch):
+    monkeypatch.setenv("TRADELOCKER_PASSWORD", "hunter2-very-secret-value")
+    monkeypatch.setenv("DASHBOARD_TOKEN", "token-abcdef-123456")
+    _, payload = get(f"{base_url}/api/setup")
+    body = json.dumps(payload)
+    assert "hunter2-very-secret-value" not in body
+    assert "token-abcdef-123456" not in body
+    # Presence is reported; the value is not.
+    names = {item["name"]: item for item in payload["settings"]}
+    assert names["TRADELOCKER_PASSWORD"]["present"] is True
+    assert "value" not in names["TRADELOCKER_PASSWORD"]
+
+
+def test_missing_required_settings_are_named(monkeypatch):
+    from bot.config import load_config
+    from bot.setup_status import build_setup_report
+
+    for name in ("TRADELOCKER_EMAIL", "TRADELOCKER_PASSWORD", "TRADELOCKER_SERVER", "TRADELOCKER_ACC_ID"):
+        monkeypatch.delenv(name, raising=False)
+    report = build_setup_report(load_config())
+    assert report.ready is False
+    assert "TRADELOCKER_SERVER" in report.missing_required
+    assert "TRADELOCKER_SERVER=" in report.paste_block
+
+
+def test_a_missing_database_url_is_warned_about(monkeypatch):
+    from bot.config import load_config
+    from bot.setup_status import build_setup_report
+
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    report = build_setup_report(load_config())
+    assert any("reset on every redeploy" in warning for warning in report.warnings)
+
+
+def test_demo_live_mode_is_warned_about(monkeypatch):
+    from bot.config import load_config
+    from bot.setup_status import build_setup_report
+
+    monkeypatch.setenv("TRADING_MODE", "demo_live")
+    report = build_setup_report(load_config())
+    assert any("real orders" in warning.lower() for warning in report.warnings)
+
+
+def test_an_unreachable_profit_floor_is_warned_about(monkeypatch):
+    from bot.config import load_config
+    from bot.setup_status import build_setup_report
+
+    # $300 at the 1% ceiling risks $3; even an exceptional 1:10 structural
+    # target returns $30, short of the $40 floor. Nothing but more equity
+    # fixes that, and the operator must be told rather than left watching
+    # a bot that never trades.
+    report = build_setup_report(load_config(), equity=300.0)
+    assert any("No setup can pass this filter" in warning for warning in report.warnings)
+
+
+def test_a_reachable_but_demanding_profit_floor_is_also_warned_about(monkeypatch):
+    """The quiet-bot case: it CAN trade, but only on exceptional setups.
+
+    Silence here is what made the last deployment look broken — a healthy
+    bot returning NO TRADE every day is indistinguishable from a stuck one
+    unless it says why.
+    """
+
+    from bot.config import load_config
+    from bot.setup_status import build_setup_report
+
+    report = build_setup_report(load_config(), equity=1_000.0)
+    assert any("reachable but demanding" in warning for warning in report.warnings)
+
+
+def test_ai_enabled_without_a_provider_is_flagged_as_blocking(monkeypatch):
+    """The silent never-trade trap: AI required, no key, no permission to
+    proceed without one. Failing closed is correct; failing closed silently
+    is not."""
+
+    from bot.config import load_config
+    from bot.setup_status import build_setup_report
+
+    for name in ("GEMINI_API_KEY", "GROQ_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("AI_ENABLED", "true")
+    monkeypatch.setenv("AI_ALLOW_TRADE_WITHOUT_AI", "false")
+
+    report = build_setup_report(load_config())
+    assert any("never open a trade" in warning for warning in report.warnings), report.warnings
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"AI_ENABLED": "false"},
+        {"AI_ENABLED": "true", "AI_ALLOW_TRADE_WITHOUT_AI": "true"},
+        {"AI_ENABLED": "true", "GEMINI_API_KEY": "a-key"},
+    ],
+)
+def test_each_documented_fix_clears_the_ai_block(monkeypatch, env):
+    from bot.config import load_config
+    from bot.setup_status import build_setup_report
+
+    for name in ("GEMINI_API_KEY", "GROQ_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("AI_ALLOW_TRADE_WITHOUT_AI", "false")
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+
+    report = build_setup_report(load_config())
+    assert not any("never open a trade" in warning for warning in report.warnings)
+
+
+def test_health_reports_the_ai_gate_as_blocking(config, broker, repos, monkeypatch):
+    import dataclasses
+
+    from bot.marketdata.provider import MarketDataProvider
+    from bot.orchestrator import Orchestrator
+
+    blocked = dataclasses.replace(
+        config,
+        ai=dataclasses.replace(
+            config.ai, enabled=True, gemini_key=None, groq_key=None,
+            allow_trade_without_ai=False,
+        ),
+    )
+    orchestrator = Orchestrator(
+        blocked, broker=broker, repositories=repos,
+        market_data=MarketDataProvider(broker, blocked),
+    )
+    orchestrator.startup()
+    ai = orchestrator.health()["components"]["ai"]
+    assert ai["blockingAllTrades"] is True
+    assert "every setup is rejected" in ai["note"]

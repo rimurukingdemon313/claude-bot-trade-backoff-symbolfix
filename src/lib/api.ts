@@ -162,10 +162,15 @@ export type RiskState = {
   opportunityMinimum: number;
   profitObjective: {
     feasible: boolean;
+    /** Reachable, but only by setups above the configured minimum R:R. */
+    demanding?: boolean;
     reason: string;
+    comfortableProfit?: number;
     bestCaseProfit?: number;
     minimumProfit?: number;
+    requiredRiskReward?: number | null;
     requiredEquity?: number | null;
+    comfortableEquity?: number | null;
   };
 };
 
@@ -180,6 +185,31 @@ export type Health = {
   components: Record<string, any>;
   reconciliations: any;
   upcomingNews: any;
+};
+
+export type SetupSetting = {
+  name: string;
+  importance: 'required' | 'recommended' | 'optional';
+  purpose: string;
+  present: boolean;
+  example: string;
+};
+
+export type SetupReport = {
+  ready: boolean;
+  missingRequired: string[];
+  missingRecommended: string[];
+  settings: SetupSetting[];
+  warnings: string[];
+  pasteBlock: string;
+  nextStep: string;
+};
+
+export type DoctorReport = {
+  verdict: 'PASS' | 'WARN' | 'FAIL';
+  text: string;
+  failed: string[];
+  checks: Array<{ check: string; status: string; detail: string }>;
 };
 
 export type Snapshot = {
@@ -210,6 +240,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   snapshot: () => request<Snapshot>("/api/snapshot"),
+  setup: () => request<SetupReport>("/api/setup"),
+  doctor: () => request<DoctorReport>("/api/doctor"),
   journal: (limit = 60) =>
     request<{ status: Status; data: any[]; histogram: any[] }>(`/api/journal?limit=${limit}`),
   setScanning: (enabled: boolean) =>

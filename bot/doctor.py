@@ -141,7 +141,18 @@ class Report:
         return "\n".join(lines)
 
 
-def run(config: TradingConfig, symbols: list[str]) -> Report:
+def run(
+    config: TradingConfig,
+    symbols: list[str],
+    *,
+    broker: Any = None,
+) -> Report:
+    """Verify the account. Read-only.
+
+    `broker` lets a running service pass its already-authenticated client in
+    rather than opening a second session — the same checks, one login.
+    """
+
     report = Report()
 
     # 1. configuration ----------------------------------------------------
@@ -176,7 +187,7 @@ def run(config: TradingConfig, symbols: list[str]) -> Report:
         paper=config.is_paper,
     )
 
-    broker = TradeLockerBroker(config)
+    broker = broker if broker is not None else TradeLockerBroker(config)
 
     # 2. authentication ---------------------------------------------------
     try:
@@ -187,7 +198,12 @@ def run(config: TradingConfig, symbols: list[str]) -> Report:
     report.add("authentication", OK, "authenticated and resolved the account number")
 
     # 3. DEMO verification ------------------------------------------------
-    verification = verify_demo(config, broker.account_metadata, stage="doctor")
+    verification = verify_demo(
+        config,
+        broker.account_metadata,
+        stage="doctor",
+        claims=getattr(broker, "session_claims", None),
+    )
     report.add(
         "demo_guard",
         OK if verification.verified else FAIL,

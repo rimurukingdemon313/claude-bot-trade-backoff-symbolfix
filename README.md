@@ -75,6 +75,15 @@ commission per lot).
 
 There is no third value. LIVE is not a mode this build has.
 
+## No terminal? Deploy from a browser
+
+You do not need a local setup. Deploy to Railway from GitHub, set the
+variables in its UI, then verify your account by opening the dashboard's
+**System** tab and tapping **Run verification** — or just visiting
+`/api/doctor`. The report is masked and safe to share.
+
+Full walkthrough: **[docs/DEPLOY_RAILWAY.md](docs/DEPLOY_RAILWAY.md)**.
+
 ## Quick start
 
 One command does everything — installs, prompts for your credentials
@@ -147,6 +156,7 @@ python3 -m bot.backtest --symbol EURUSD --walk-forward --folds 3
 | [RISK_MANAGEMENT.md](docs/RISK_MANAGEMENT.md) | Position sizing maths, limits, the $50 objective |
 | [EXECUTION_ENGINE.md](docs/EXECUTION_ENGINE.md) | Idempotency, reconciliation, crash recovery |
 | [DEPLOYMENT.md](docs/DEPLOYMENT.md) | Railway setup, environment, persistence |
+| [DEPLOY_RAILWAY.md](docs/DEPLOY_RAILWAY.md) | Deploying and verifying with no terminal at all |
 | [PAPER_TRADING.md](docs/PAPER_TRADING.md) | Paper mode, the doctor, and the path to live demo orders |
 | [TESTING.md](docs/TESTING.md) | What is tested and how to extend it |
 | [SECURITY.md](docs/SECURITY.md) | Threat model and hardening |

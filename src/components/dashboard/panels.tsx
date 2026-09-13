@@ -35,6 +35,18 @@ import {
 function guard<T>(envelope: Envelope<T> | undefined, render: (data: T) => ReactNode): ReactNode {
   if (!envelope) return <Unavailable status="LOADING" />;
   if (envelope.status !== "LIVE" || envelope.data === null) {
+    // A weekend is a schedule, not an outage. Showing the broker's raw
+    // "circuit open after 5 consecutive failures" for two days running
+    // teaches the operator to ignore a warning that will one day be real.
+    if (envelope.marketClosed) {
+      return (
+        <Unavailable
+          status="MARKET CLOSED"
+          error="The forex market is shut for the weekend. It reopens Sunday 22:00 UTC."
+          hint="The bot is idle by design. Nothing is wrong and nothing needs doing."
+        />
+      );
+    }
     return <Unavailable status={envelope.status} error={envelope.error} hint={envelope.hint} />;
   }
   return render(envelope.data);

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+from datetime import datetime, timezone
 import json
 import urllib.error
 import urllib.request
@@ -390,3 +391,45 @@ def test_health_reports_the_ai_gate_as_blocking(config, broker, repos, monkeypat
     ai = orchestrator.health()["components"]["ai"]
     assert ai["blockingAllTrades"] is True
     assert "every setup is rejected" in ai["note"]
+
+
+# -- a closed market is a schedule, not an outage -------------------------
+#
+# On a Sunday the broker's own answer is "circuit open after 5 consecutive
+# failures", and every panel rendered that for two days. It taught the
+# operator to ignore a warning that will one day be real, and it was the
+# bot's own doing: it kept calling a broker it already knew was shut.
+
+
+SUNDAY = datetime(2026, 9, 13, 11, 30, tzinfo=timezone.utc)
+WEDNESDAY = datetime(2026, 9, 9, 11, 30, tzinfo=timezone.utc)
+
+
+def test_no_broker_call_is_made_while_the_market_is_shut(orchestrator, broker):
+    assert SUNDAY.strftime("%A") == "Sunday"
+    before = len(broker.submitted), broker.calls if hasattr(broker, "calls") else 0
+
+    result = orchestrator.scan(source="test", now=SUNDAY)
+
+    assert "closed for the weekend" in (result.skipped_reason or "")
+    assert len(broker.submitted) == before[0]  # nothing was sent
+
+
+def test_position_polling_stands_down_over_the_weekend(orchestrator):
+    outcome = orchestrator.manage_positions(now=SUNDAY)
+    assert outcome["ok"] is True
+    assert "closed for the weekend" in outcome["skipped"]
+
+
+def test_a_weekday_scan_is_not_skipped_as_a_weekend(orchestrator):
+    result = orchestrator.scan(source="test", now=WEDNESDAY)
+    assert "closed for the weekend" not in (result.skipped_reason or "")
+
+
+def test_health_reports_the_closed_market_without_calling_it_a_fault(orchestrator):
+    health = orchestrator.health()
+    market = health["components"]["market"]
+    # Whatever day the suite runs on, a shut market is never a failure.
+    assert market["ok"] is True
+    assert market["open"] is not None
+    assert health["marketClosed"] == (not market["open"])

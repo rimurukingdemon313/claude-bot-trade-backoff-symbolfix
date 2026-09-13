@@ -44,7 +44,7 @@ from .safety.demo_guard import DemoVerification, verify_demo
 from .safety.kill_switch import KillSwitch
 from .scoring.scorer import SetupScore, SetupScorer, tier_rank
 from .smc.engine import SetupCandidate, SmcEngine, SmcResult
-from .smc.sessions import classify_session
+from .smc.sessions import classify_session, is_forex_weekend
 from .storage.repositories import Repositories
 
 STATE_TRADING_ENABLED = "trading_enabled"
@@ -370,6 +370,22 @@ class Orchestrator:
             result.skipped_reason = "scanning is paused by the operator"
             result.finished_at = utc_now().isoformat()
             self.last_scan = result
+            return result
+
+        # Before anything touches the network. The risk engine and the SMC
+        # engine both refuse a closed market anyway, but they refuse it
+        # after a full round of broker calls — and a broker in weekend
+        # maintenance answers those with errors, five of which open the
+        # circuit and leave the dashboard reading OFFLINE all weekend for
+        # no reason. There is nothing to analyse on a shut market; asking
+        # is the bug.
+        if is_forex_weekend(moment):
+            result.skipped_reason = (
+                "the forex market is closed for the weekend (it reopens Sunday 22:00 UTC)"
+            )
+            result.finished_at = utc_now().isoformat()
+            self.last_scan = result
+            log_event("SCAN", result.skipped_reason, event_id=scan_id, source=source)
             return result
 
         try:
@@ -743,12 +759,21 @@ class Orchestrator:
         """
 
         moment = now or utc_now()
+        # A shut market cannot move a stop into profit or invalidate a
+        # structure, and it cannot be asked for a price either. Polling it
+        # every 30 seconds only feeds the circuit breaker.
+        if is_forex_weekend(moment):
+            return {
+                "ok": True,
+                "skipped": "the forex market is closed for the weekend",
+                "actions": [],
+            }
         try:
             positions = self.broker.positions()
         except BotError as exc:
             return {"ok": False, "error": str(exc)}
 
-        rows = self.manager.track(positions)
+        rows = self.manager.track(positions, now=moment)
         actions = []
         for position, row in zip(positions, rows):
             trade = self.repos.trades.by_position_id(position.position_id)
@@ -851,9 +876,20 @@ class Orchestrator:
             },
             "reconcile": self.last_reconcile.as_dict() if self.last_reconcile else None,
         }
+        market_closed = is_forex_weekend(utc_now())
+        components["market"] = {
+            "ok": True,  # a shut market is a schedule, never a fault
+            "open": not market_closed,
+            "note": (
+                "the forex market is closed for the weekend; it reopens Sunday 22:00 UTC"
+                if market_closed
+                else None
+            ),
+        }
         critical_ok = database_ok and components["broker"]["ok"] and demo_ok and self.startup_complete
         return {
             "ok": critical_ok,
+            "marketClosed": market_closed,
             "tradingPermitted": critical_ok and not kill.active and self.trading_enabled,
             "mode": self.config.mode.value,
             "paper": self.config.is_paper,

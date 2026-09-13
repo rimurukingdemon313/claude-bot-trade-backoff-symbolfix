@@ -14,6 +14,8 @@ export type Envelope<T> = {
   data: T | null;
   error?: string;
   hint?: string;
+  /** True when the read failed only because FX is shut for the weekend. */
+  marketClosed?: boolean;
 };
 
 export type Account = {

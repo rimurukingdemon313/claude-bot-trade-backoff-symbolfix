@@ -129,7 +129,7 @@ class FakeResponse:
 
 
 def transport(**overrides) -> HttpTransport:
-    defaults = dict(timeout=1.0, max_attempts=4, throttle=Throttle(min_interval=0.0), sleeper=lambda _s: None)
+    defaults = dict(timeout=1.0, max_attempts=4, throttle=Throttle(min_interval=0.0, sleeper=lambda _s: None), sleeper=lambda _s: None)
     defaults.update(overrides)
     return HttpTransport(**defaults)
 
@@ -243,3 +243,67 @@ def test_access_tokens_are_redacted_from_logs():
 def test_configured_secrets_are_redacted(monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "gsk_supersecret_value")
     assert "gsk_supersecret_value" not in redact("key is gsk_supersecret_value")
+
+
+# -- a rate limit belongs to the host, not to the unlucky request ---------
+
+
+def test_a_429_holds_back_every_caller_not_just_the_one_that_saw_it():
+    """The live failure this prevents.
+
+    GATESFX answered Cloudflare error 1015 — "you are being rate-limited
+    by the website owner's configuration" — and the startup sequence could
+    not read account state at all. Per-request backoff was the whole
+    design, and it cannot work: the scan, the position poll and the
+    reconcile run on separate threads over one transport, so the thread
+    that caught the 429 slept while the other two carried on hammering the
+    same host. That is how one rate limit becomes a sustained one.
+    """
+
+    slept: list[float] = []
+    throttle = Throttle(min_interval=0.0, sleeper=slept.append)
+    assert throttle.cooling_down == 0.0
+
+    throttle.penalise(60.0)
+
+    assert throttle.cooling_down > 55.0
+    throttle.wait()
+    assert slept and slept[-1] > 55.0, "a caller that never saw the 429 must still be held"
+
+
+def test_retry_after_is_preferred_over_the_default_cooldown():
+    throttle = Throttle(min_interval=0.0, sleeper=lambda _s: None)
+    throttle.penalise(5.0)
+    assert 4.0 < throttle.cooling_down <= 5.0
+
+
+def test_the_cooldown_only_ever_extends():
+    """A later, shorter penalty must not shorten a longer one already set."""
+
+    throttle = Throttle(min_interval=0.0, sleeper=lambda _s: None)
+    throttle.penalise(60.0)
+    throttle.penalise(1.0)
+    assert throttle.cooling_down > 55.0
+
+
+def test_a_rate_limited_response_sets_the_shared_cooldown(monkeypatch):
+    def fake_urlopen(request, timeout=None):
+        raise http_error(429)
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    client = transport(max_attempts=1)
+    with pytest.raises(BrokerRateLimited):
+        client.request("GET", "http://x")
+    assert client.throttle.cooling_down > 55.0, (
+        "the 429 must pause the whole transport, not only this call"
+    )
+
+
+def test_a_transport_built_without_a_throttle_shares_its_sleeper():
+    """Otherwise an injected sleeper is silently bypassed by the pacing."""
+
+    slept: list[float] = []
+    client = HttpTransport(timeout=1.0, sleeper=slept.append)
+    client.throttle.penalise(30.0)
+    client.throttle.wait()
+    assert slept, "the throttle slept on the real clock instead of the injected one"

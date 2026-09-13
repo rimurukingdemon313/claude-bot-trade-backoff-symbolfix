@@ -31,6 +31,12 @@ def config() -> TradingConfig:
         symbols=("EURUSD",),
         ai=dataclasses.replace(base.ai, enabled=False),
         news=dataclasses.replace(base.news, enabled=False),
+        # Real request spacing is 0.6s, to stay under Cloudflare's limit on
+        # the live host. Nothing in these tests reaches a network, so
+        # honouring it would only add minutes of genuine sleeping — the
+        # same reason the clock is injected rather than waited on
+        # (project rule 10).
+        broker=dataclasses.replace(base.broker, min_request_interval=0.0),
     )
 
 

@@ -83,24 +83,57 @@ class CircuitBreaker:
 
 
 class Throttle:
-    """Minimum spacing between outbound requests.
+    """Minimum spacing between outbound requests, plus a shared cooldown.
 
     TradeLocker sits behind Cloudflare, which rate-limits bursts (HTTP
     429 / error 1015). Spacing requests at the source is cheaper and more
     reliable than absorbing 429s after the fact.
+
+    Two mechanisms, because spacing alone was not enough:
+
+    1. `min_interval` — the floor between any two requests. The scan,
+       the position poll and the reconcile run on separate threads and
+       share one transport, so this lock is what keeps them from
+       interleaving into a burst.
+
+    2. `penalise()` — a cooldown every caller observes. Per-request
+       backoff was the original design and it does not work across
+       threads: the thread that received the 429 slept while the other
+       two carried straight on hammering the same host, which is how a
+       single rate limit became a sustained one. A limit is a property of
+       the HOST, not of the unlucky request that discovered it.
     """
 
-    def __init__(self, min_interval: float = 0.12) -> None:
+    def __init__(self, min_interval: float = 0.6, *, sleeper: Any = time.sleep) -> None:
         self.min_interval = min_interval
+        # Injectable for the same reason the clock is (project rule 10):
+        # a test that really sleeps is a test nobody runs. This class used
+        # time.sleep directly while the transport beside it already took a
+        # sleeper, so raising the production interval silently added
+        # minutes to the suite.
+        self._sleep = sleeper
         self._last = 0.0
+        self._penalty_until = 0.0
         self._lock = threading.Lock()
+
+    def penalise(self, seconds: float) -> None:
+        """Hold every caller back — the host asked us to stop, not this call."""
+
+        with self._lock:
+            self._penalty_until = max(self._penalty_until, time.monotonic() + max(0.0, seconds))
+
+    @property
+    def cooling_down(self) -> float:
+        """Seconds left on the shared cooldown, for health reporting."""
+
+        return max(0.0, self._penalty_until - time.monotonic())
 
     def wait(self) -> None:
         with self._lock:
             now = time.monotonic()
-            delay = self.min_interval - (now - self._last)
+            delay = max(self.min_interval - (now - self._last), self._penalty_until - now)
             if delay > 0:
-                time.sleep(delay)
+                self._sleep(delay)
             self._last = time.monotonic()
 
 
@@ -117,7 +150,11 @@ class HttpTransport:
         self.timeout = timeout
         self.max_attempts = max(1, max_attempts)
         self.circuit = circuit or CircuitBreaker()
-        self.throttle = throttle or Throttle()
+        # A throttle built here shares the transport's sleeper. Otherwise a
+        # caller that injected one to keep tests instant still got a
+        # throttle sleeping on the real clock — and after a 429 that is a
+        # full minute of it.
+        self.throttle = throttle or Throttle(sleeper=sleeper)
         self._sleep = sleeper
         self.calls = 0
         self.last_latency_ms: float | None = None
@@ -192,6 +229,10 @@ class HttpTransport:
                     self.circuit.record_success()  # an auth error is not an outage
                     raise BrokerAuthError(f"{method} {url} unauthorized ({exc.code}): {detail}")
                 if exc.code == 429:
+                    # Cloudflare's 1015 does not carry Retry-After. A minute
+                    # is the shortest cooldown that reliably clears it, and
+                    # guessing lower is how a rate limit becomes permanent.
+                    self.throttle.penalise(retry_after if retry_after is not None else 60.0)
                     last_error = BrokerRateLimited(f"{method} {url} rate limited: {detail}")
                 elif 500 <= exc.code < 600:
                     last_error = BrokerError(f"{method} {url} server error ({exc.code}): {detail}")
@@ -233,8 +274,14 @@ class HttpTransport:
         raise last_error or BrokerError(f"{method} {url} failed after {attempts} attempts")
 
     def health(self) -> dict[str, Any]:
+        cooling = self.throttle.cooling_down
         return {
             "circuit": self.circuit.state,
             "calls": self.calls,
             "lastLatencyMs": round(self.last_latency_ms, 1) if self.last_latency_ms else None,
+            "requestSpacingSeconds": self.throttle.min_interval,
+            # Visible because a rate-limit cooldown looks exactly like a
+            # hang from outside: the bot is deliberately silent and the
+            # operator has no way to tell that from a broken one.
+            "rateLimitedFor": round(cooling, 1) if cooling > 0 else None,
         }

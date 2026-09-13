@@ -117,6 +117,15 @@ class BrokerConfig:
     max_attempts: int = 4
     circuit_failure_threshold: int = 5
     circuit_reset_seconds: float = 60.0
+    #: Seconds between outbound broker requests.
+    #:
+    #: TradeLocker sits behind Cloudflare. At 0.15s — about seven requests
+    #: a second — a live GATESFX account answered with error 1015, "you
+    #: are being rate-limited by the website owner's configuration", and
+    #: the startup sequence could not read account state at all. Scanning
+    #: more symbols multiplies the call count, so this is the setting that
+    #: has to give, never the symbol list.
+    min_request_interval: float = 0.6
 
     @property
     def is_demo_url(self) -> bool:
@@ -573,6 +582,9 @@ def load_config(env: Mapping[str, str] | None = None) -> TradingConfig:
         base_url=(_env_str("TRADELOCKER_URL") or "https://demo.tradelocker.com/backend-api").rstrip("/"),
         request_timeout=_env_float("TL_TIMEOUT_SECONDS", 20.0, low=5.0, high=60.0),
         max_attempts=_env_int("TL_MAX_ATTEMPTS", 4, low=1, high=6),
+        min_request_interval=_env_float(
+            "BROKER_MIN_REQUEST_INTERVAL", 0.6, low=0.05, high=10.0
+        ),
     )
     risk = RiskConfig(
         base_risk_pct=_env_float("RISK_BASE_PCT", 0.005, low=0.0005, high=0.02),

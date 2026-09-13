@@ -26,6 +26,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from .clock import ensure_utc, utc_now
+from .broker.symbols import alphanumeric, canonical_symbol
 from .config import NewsConfig
 from .observability import log_event
 
@@ -77,12 +78,22 @@ class NewsVerdict:
 
 
 def currencies_for(symbol: str) -> tuple[str, ...]:
-    upper = "".join(char for char in symbol.upper() if char.isalnum())
-    if upper in SYMBOL_CURRENCIES:
-        return SYMBOL_CURRENCIES[upper]
-    if len(upper) == 6:
-        return (upper[:3], upper[3:])
-    return ()
+    """The currencies a symbol is exposed to, for blackout matching.
+
+    Resolved through the canonical pair so a decorated broker name
+    (`EURUSD.R`) maps to the same currencies as a bare one. Returning ()
+    for an unresolvable name means "no blackout" — which is why resolution
+    has to work: an unparsed name would silently disable the news filter
+    for that symbol.
+    """
+
+    canonical = canonical_symbol(symbol)
+    if canonical is not None and canonical in SYMBOL_CURRENCIES:
+        return SYMBOL_CURRENCIES[canonical]
+    if canonical is not None:
+        return (canonical[:3], canonical[3:])
+    upper = alphanumeric(symbol)
+    return SYMBOL_CURRENCIES.get(upper, ())
 
 
 class NewsFilter:

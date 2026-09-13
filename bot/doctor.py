@@ -28,6 +28,7 @@ from typing import Any
 
 from .broker.tradelocker import TradeLockerBroker
 from .clock import utc_now
+from .broker.symbols import broker_suffix, canonical_symbol
 from .config import ExecutionMode, TradingConfig, load_config, profit_floor_feasibility
 from .errors import BotError, ConfigError
 from .marketdata.candles import to_candles
@@ -187,14 +188,41 @@ def run(config: TradingConfig, symbols: list[str]) -> Report:
     except BotError as exc:
         report.add("trade_config", FAIL, f"could not read /trade/config: {exc}")
 
-    # 6. instruments ------------------------------------------------------
+    # 6. instruments + suffix detection ------------------------------------
     try:
         available = broker.available_symbols()
+        suffixes: dict[str, int] = {}
+        unresolved: list[str] = []
+        for name in available:
+            if canonical_symbol(name) is None:
+                unresolved.append(name)
+                continue
+            suffixes[broker_suffix(name) or "(none)"] = suffixes.get(broker_suffix(name) or "(none)", 0) + 1
+        dominant = max(suffixes.items(), key=lambda item: item[1]) if suffixes else None
+
+        detail = f"{len(available)} instruments on this account, e.g. {', '.join(available[:12])}"
+        if dominant and dominant[0] != "(none)":
+            detail += (
+                f"\nNaming: {dominant[1]} pair(s) use the suffix {dominant[0]!r}. "
+                "You may set TRADED_SYMBOLS to either the bare pair (EURUSD) or the "
+                "broker's exact name (EURUSD.R) — both resolve to the same instrument."
+            )
+        if suffixes:
+            detail += "\nSuffixes seen: " + ", ".join(
+                f"{suffix} x{count}" for suffix, count in sorted(suffixes.items(), key=lambda i: -i[1])
+            )
+        if unresolved:
+            detail += (
+                f"\n{len(unresolved)} instrument(s) are not currency pairs and cannot be sized "
+                f"(they will be skipped): {', '.join(unresolved[:10])}"
+            )
         report.add(
             "instruments",
             OK,
-            f"{len(available)} instruments on this account, e.g. {', '.join(available[:12])}",
+            detail,
             count=len(available),
+            suffixes=suffixes,
+            unresolved=unresolved[:20],
             sample=available[:40],
         )
     except BotError as exc:
@@ -242,11 +270,21 @@ def _check_symbol(
     # Contract size and lot step are what position sizing depends on. The
     # broker refuses to size a symbol that lacks them, so a WARN here means
     # "this symbol will be skipped", which is worth knowing before a scan.
-    sizing_ok = spec.contract_size > 0 and spec.lot_step > 0 and spec.min_lot > 0
+    # A pair that does not resolve has no known quote currency, so sizing
+    # refuses it rather than assuming one. Report that as the finding.
+    resolved = canonical_symbol(spec.broker_name) is not None
+    sizing_ok = spec.contract_size > 0 and spec.lot_step > 0 and spec.min_lot > 0 and resolved
+    suffix = broker_suffix(spec.broker_name)
     report.add(
         f"{symbol}:specification",
         OK if sizing_ok else FAIL,
-        f"broker name {spec.broker_name}, contract size {spec.contract_size:g}, "
+        (f"canonical {spec.symbol} <- broker name {spec.broker_name}"
+         + (f" (suffix {suffix!r})" if suffix else "")
+         + "\n"
+         + ("" if resolved else
+            "NOT a recognisable currency pair — no quote currency, so this symbol "
+            "CANNOT be sized and every scan will skip it.\n"))
+        + f"contract size {spec.contract_size:g}, "
         f"tick {spec.tick_size:g}, lot step {spec.lot_step:g}, "
         f"min/max lot {spec.min_lot:g}/{spec.max_lot:g}, "
         f"{spec.base_currency}/{spec.quote_currency} vs account {spec.account_currency}",

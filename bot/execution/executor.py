@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..broker.models import InstrumentSpec
+from ..broker.symbols import same_instrument
 from ..config import TradingConfig
 from ..errors import (
     AmbiguousExecution,
@@ -97,7 +98,11 @@ class Executor:
 
         positions = self.broker.positions()
         for position in positions:
-            if position.symbol.upper() == plan.symbol.upper():
+            # same_instrument, not string equality: on a broker whose names
+            # carry a suffix, `EURUSD` and `EURUSD.R` are one instrument, and
+            # comparing them as strings is how a second position gets opened
+            # on a pair that is already held.
+            if same_instrument(position.symbol, plan.symbol):
                 return (
                     f"a {position.direction} position on {plan.symbol} "
                     f"(id {position.position_id}) already exists at the broker"
@@ -105,7 +110,7 @@ class Executor:
         unresolved = [
             intent
             for intent in self.repos.intents.unresolved()
-            if str(intent["symbol"]).upper() == plan.symbol.upper()
+            if same_instrument(str(intent["symbol"]), plan.symbol)
             and intent["idempotency_key"] != plan.execution_id
         ]
         if unresolved:
@@ -324,7 +329,7 @@ class Executor:
                 positions = []
             for position in positions:
                 if (
-                    position.symbol.upper() == plan.symbol.upper()
+                    same_instrument(position.symbol, plan.symbol)
                     and position.direction == plan.direction
                 ):
                     return position

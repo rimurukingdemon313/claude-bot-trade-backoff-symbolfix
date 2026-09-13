@@ -23,6 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..broker.symbols import same_instrument
 from ..clock import utc_now
 from ..config import TradingConfig
 from ..errors import BotError
@@ -103,7 +104,8 @@ class Reconciler:
                 (
                     position
                     for position in positions
-                    if position.symbol.upper() == symbol and position.direction == direction
+                    if same_instrument(position.symbol, symbol)
+                    and position.direction == direction
                 ),
                 None,
             )

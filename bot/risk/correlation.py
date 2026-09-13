@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Sequence
 
-from ..broker.tradelocker import split_currencies
+from ..broker.symbols import alphanumeric, canonical_symbol, split_currencies
 
 #: Non-FX instruments that behave like a currency bloc for exposure
 #: purposes. Gold is priced in USD and trades as an anti-dollar asset.
@@ -32,7 +32,10 @@ def currency_exposure(symbol: str, direction: str) -> dict[str, float]:
     """
 
     sign = 1.0 if direction.upper() == "BUY" else -1.0
-    upper = symbol.upper()
+    # Canonical, so a decorated broker name yields the same exposure as a
+    # bare one. An unresolved name previously returned {}, which made every
+    # correlation score 0 and silently disabled the stacking limit.
+    upper = canonical_symbol(symbol) or alphanumeric(symbol)
     if upper in SYNTHETIC_EXPOSURE:
         return {currency: weight * sign for currency, weight in SYNTHETIC_EXPOSURE[upper]}
     base, quote = split_currencies(upper)

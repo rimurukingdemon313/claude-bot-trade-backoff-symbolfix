@@ -25,6 +25,13 @@ from ..config import TradingConfig
 from ..errors import BrokerAuthError, BrokerError, BrokerRejected, ConfigError
 from ..observability import log_event
 from .history import HistoryFetcher, TIMEFRAME_MINUTES
+from .symbols import (
+    alphanumeric,
+    broker_suffix,
+    canonical_symbol,
+    same_instrument,
+    split_currencies,
+)
 from .http import CircuitBreaker, HttpTransport, Throttle
 from .models import (
     AccountState,
@@ -56,25 +63,16 @@ def _first(mapping: Mapping[str, Any], *names: str, default: Any = None) -> Any:
 
 
 def normalize_symbol(raw: str) -> str:
-    return "".join(char for char in str(raw).upper() if char.isalnum())
+    """Alphanumeric uppercase form, for exact-name comparison only.
 
-
-def split_currencies(symbol: str) -> tuple[str | None, str | None]:
-    """Split a 6-letter FX pair; map metals/indices to their known quote.
-
-    Returning (None, None) is meaningful: the sizing layer then refuses to
-    guess a conversion rate rather than assuming USD.
+    NOT for identity: `EURUSD` and `EURUSD.R` normalize differently. Use
+    bot.broker.symbols.same_instrument() whenever two names need to be
+    judged as the same tradable instrument — that distinction is what kept
+    the duplicate-order check from seeing an existing position on a broker
+    whose names carry a suffix.
     """
 
-    normalized = normalize_symbol(symbol)
-    metals = {"XAU": "USD", "XAG": "USD", "XPT": "USD", "XPD": "USD"}
-    if len(normalized) == 6:
-        base, quote = normalized[:3], normalized[3:]
-        return base, quote
-    for metal, quote in metals.items():
-        if normalized.startswith(metal):
-            return metal, normalized[len(metal):] or quote
-    return None, None
+    return alphanumeric(raw)
 
 
 class TradeLockerBroker:
@@ -333,15 +331,27 @@ class TradeLockerBroker:
         pick places a real order on the wrong instrument.
         """
 
-        key = normalize_symbol(symbol)
+        key = canonical_symbol(symbol) or normalize_symbol(symbol)
         if not force and key in self._instrument_cache:
             return self._instrument_cache[key]
 
         instruments = self._load_instruments(force=force)
-        exact = [i for i in instruments if normalize_symbol(str(i.get("name", ""))) == key]
-        candidates = exact or [
-            i for i in instruments if normalize_symbol(str(i.get("name", ""))).startswith(key)
-        ]
+        requested = normalize_symbol(symbol)
+
+        # 1. The broker's exact name, so TRADED_SYMBOLS=EURUSD.R works.
+        candidates = [i for i in instruments if normalize_symbol(str(i.get("name", ""))) == requested]
+        # 2. Same instrument by canonical pair, so TRADED_SYMBOLS=EURUSD finds
+        #    EURUSD.R on a suffixed broker without guessing at the suffix.
+        if not candidates:
+            candidates = [
+                i for i in instruments if same_instrument(str(i.get("name", "")), symbol)
+            ]
+        # 3. Last resort: prefix. Kept for names this module cannot resolve to
+        #    a currency pair at all (indices, commodities).
+        if not candidates:
+            candidates = [
+                i for i in instruments if normalize_symbol(str(i.get("name", ""))).startswith(requested)
+            ]
         if len(candidates) > 1:
             names = ", ".join(sorted(str(i.get("name")) for i in candidates))
             raise BrokerRejected(
@@ -384,11 +394,25 @@ class TradeLockerBroker:
                 "position sizing cannot be computed safely and this symbol will be skipped"
             )
 
-        base, quote = split_currencies(str(raw.get("name", symbol)))
+        broker_name = str(raw.get("name", symbol))
+        base, quote = split_currencies(broker_name)
         account_currency = str(_first(self._account_meta or {}, "currency", default="USD"))
+        # spec.symbol is the CANONICAL pair, never the decorated broker name:
+        # it is the join key for duplicate detection, the per-symbol limit,
+        # news blackouts and correlation. spec.broker_name keeps the exact
+        # name the API expects.
+        canonical = canonical_symbol(broker_name) or normalize_symbol(broker_name)
+        suffix = broker_suffix(broker_name)
+        if suffix:
+            log_event(
+                "BROKER",
+                f"resolved {symbol} to broker instrument {broker_name} (suffix {suffix!r})",
+                symbol=canonical,
+                broker_name=broker_name,
+            )
         return InstrumentSpec(
-            symbol=normalize_symbol(symbol),
-            broker_name=str(raw.get("name", symbol)),
+            symbol=canonical,
+            broker_name=broker_name,
             tradable_instrument_id=int(
                 _num(_first(raw, "tradableInstrumentId", "id", default=0), 0) or 0
             ),
@@ -468,7 +492,13 @@ class TradeLockerBroker:
             positions.append(
                 BrokerPosition(
                     position_id=str(_first(row, "id", "positionId", default="")),
-                    symbol=normalize_symbol(names.get(instrument_id, instrument_id)),
+                    # Canonical, so this matches the plan's symbol. Reporting the
+                    # decorated broker name here is what broke the executor's
+                    # duplicate check on a suffixed account.
+                    symbol=(
+                        canonical_symbol(names.get(instrument_id, instrument_id))
+                        or normalize_symbol(names.get(instrument_id, instrument_id))
+                    ),
                     instrument_id=int(_num(instrument_id, 0) or 0),
                     direction="BUY" if str(_first(row, "side", default="buy")).lower() == "buy" else "SELL",
                     quantity=float(_num(_first(row, "qty", "quantity"), 0.0) or 0.0),

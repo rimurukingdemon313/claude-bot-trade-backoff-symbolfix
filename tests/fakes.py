@@ -8,6 +8,7 @@ about whether a detector found the right swing.
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterable, Sequence
@@ -281,7 +282,16 @@ class FakeBroker:
     # -- instruments / data ---------------------------------------------
 
     def instrument(self, symbol: str, *, force: bool = False) -> InstrumentSpec:
-        key = "".join(char for char in symbol.upper() if char.isalnum())
+        """Resolve by canonical pair, mirroring the real broker.
+
+        Keyed canonically so a suffixed account (`EURUSD.R`) behaves the way
+        TradeLockerBroker does after symbol resolution: either form of the
+        name finds the instrument, and the spec reports the canonical symbol.
+        """
+
+        from bot.broker.symbols import alphanumeric, canonical_symbol
+
+        key = canonical_symbol(symbol) or alphanumeric(symbol)
         if key not in self.specs:
             raise BrokerRejected(f"symbol {symbol!r} not available on this account")
         return self.specs[key]
@@ -444,6 +454,38 @@ class FakeBroker:
         if quantity is None:
             self.remove_position(position_id)
         return {"ok": True}
+
+
+def suffixed_broker(suffix: str = ".R", symbols: tuple[str, ...] = ("EURUSD",)) -> FakeBroker:
+    """A FakeBroker whose instrument names all carry a broker suffix.
+
+    Models the account shape this project was reported against: every pair
+    listed as `EURUSD.R`, `XAUUSD.R` and so on. Positions report the
+    CANONICAL symbol, exactly as the real broker does after resolution —
+    which is the behaviour the duplicate-order check depends on.
+    """
+
+    broker = FakeBroker()
+    broker.specs = {}
+    for symbol in symbols:
+        contract = 100.0 if symbol.startswith("XAU") else 100_000.0
+        digits = 2 if symbol.startswith("XAU") else (3 if symbol.endswith("JPY") else 5)
+        broker.specs[symbol] = dataclasses.replace(
+            DEFAULT_SPEC,
+            symbol=symbol,
+            broker_name=f"{symbol}{suffix}",
+            contract_size=contract,
+            tick_size=10 ** (-digits),
+            digits=digits,
+            base_currency=symbol[:3],
+            quote_currency=symbol[3:],
+        )
+    m15 = bullish_setup_m15()
+    for symbol in symbols:
+        broker.set_series(symbol, "M15", m15)
+        broker.set_series(symbol, "H1", aligned_htf(m15, timeframe="H1"))
+        broker.set_series(symbol, "H4", aligned_htf(m15, timeframe="H4"))
+    return broker
 
 
 def ambiguous_hook(request: dict[str, Any]) -> Exception:

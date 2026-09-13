@@ -152,7 +152,47 @@ nothing would be worse than one that says why.
 Steps 2 and 3 are the ones this repository cannot do for you: the strategy's
 edge is unproven until it has been measured on real history.
 
-## 4. The profit floor and account size
+## 4. Broker symbol naming (`EURUSD.R` and friends)
+
+Many brokers decorate instrument names to mark account type or routing:
+`EURUSD.R`, `EURUSD_i`, `EURUSDm`, `EURUSD.pro`, `EUR/USD`. The decoration is
+not part of the instrument.
+
+Set `TRADED_SYMBOLS` to **either** form — bare pairs or your broker's exact
+names. `bot/broker/symbols.py` resolves the canonical pair and the system uses
+that as the identity, while calling the API with `spec.broker_name`.
+
+### Why this is a safety issue, not a convenience one
+
+Symbol identity is the join key for three safety controls, and each one
+**fails open** if the key does not match. On an account listing `EURUSD.R`,
+before canonical resolution:
+
+| Control | What happened |
+| --- | --- |
+| Duplicate-order check | `positions()` reported `EURUSDR`, the plan said `EURUSD` → the executor could not see an existing position and **could open a second one on the same pair** |
+| `max_open_per_symbol` | same comparison → never enforced |
+| News blackout | `currencies_for("EURUSD.R")` returned `()` → **never blocked** |
+| Portfolio correlation | exposure `{}` → every score 0 → **unlimited stacking of the same currency** |
+| Position sizing | `XAUUSD.R` derived quote `USDR`; other pairs refused outright (fail-closed) |
+
+Resolution is a **known-code match**, not suffix stripping: "does this start
+with a known currency code followed by another known currency code". Suffix
+lists are guesswork and go stale; this is decidable. A name that does not
+resolve returns `None`, and sizing then refuses it — failing closed and
+loudly rather than trading an instrument the system cannot identify.
+
+`tests/test_suffixed_symbols.py` (46 tests) pins each hole closed, including
+the full pipeline trading a suffix-only account and a second scan not
+duplicating.
+
+### Two variants of one pair
+
+If your account lists both `EURUSD.R` and `EURUSD.RAW`, the bot **refuses to
+guess** and tells you both names. Set `TRADED_SYMBOLS` to the exact one you
+want.
+
+## 5. The profit floor and account size
 
 The configured floor is **$40 minimum expected profit at the structural
 target** (`OPPORTUNITY_MINIMUM_PROFIT`), with $50 as the target. No tier,

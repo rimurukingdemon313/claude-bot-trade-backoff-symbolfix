@@ -35,7 +35,12 @@ bugs and the *code* changed:
 - **a concurrency race escaped as a raw `sqlite3.IntegrityError`**: two
   threads could both pass the intent existence check. The UNIQUE constraint
   still prevented the duplicate order, but the losing thread crashed instead
-  of reporting DUPLICATE.
+  of reporting DUPLICATE;
+- **a broker suffix (`EURUSD.R`) silently disabled three safety controls.**
+  Symbol identity is the join key for the duplicate-order check, the
+  per-symbol limit, news blackouts and correlation — and all four compared
+  decorated names as strings, so every one of them failed OPEN. Reported by
+  the operator, reproduced, and closed by canonical resolution.
 
 **Scenarios are hand-built, not random.** A random walk proves nothing about
 whether a detector found the *right* swing. `tests/fakes.py` constructs each
@@ -46,7 +51,7 @@ retracement — so the correct answer is known by construction.
 network, not the engine. Risk, sizing, scoring, structure detection and the
 executor all run for real.
 
-## What is covered (379 tests)
+## What is covered (425 tests)
 
 ### Safety
 DEMO verification passes only on positive proof and fails on absent,
@@ -192,6 +197,21 @@ partial closes reduce the position; order history is shaped like the broker's
 so the reconciler can read it. The whole pipeline runs in paper mode without
 touching the broker, the mode is visible in health, and reset is refused
 outside paper mode.
+
+### Suffixed broker symbols (46 tests)
+Every decoration (`.R`, `_i`, `m`, `.pro`, `EUR/USD`) resolves to the same
+pair; a non-pair (`US500`, `WTI`) does not resolve and is not guessed;
+`XAUUSD.R` yields quote `USD`, not `USDR`. A bare symbol finds the suffixed
+instrument and vice versa; a genuinely ambiguous account (`EURUSD.R` +
+`EURUSD.RAW`) still refuses to guess, and an exact name disambiguates it;
+`positions()` reports the canonical symbol. Then the fail-open holes:
+**the duplicate check sees an existing suffixed position**, the per-symbol
+limit fires, a decorated name already in the database still matches, the
+reconciler settles an intent against a suffixed position, news currencies and
+correlation both resolve, and a suffixed metal sizes correctly. Finally the
+whole pipeline trades a suffix-only account, a second scan does not
+duplicate, `TRADED_SYMBOLS` accepts either form, and five different suffixes
+all behave identically.
 
 ### Stress and extreme conditions (39 tests)
 **Market:** a 20% flash crash makes the regime untradeable and produces no

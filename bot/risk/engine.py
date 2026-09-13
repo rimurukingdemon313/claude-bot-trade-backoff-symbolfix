@@ -25,6 +25,7 @@ from datetime import datetime, timedelta
 from typing import Any, Mapping, Sequence
 
 from ..broker.models import InstrumentSpec
+from ..broker.symbols import same_instrument
 from ..clock import trading_day, utc_now
 from ..config import TradingConfig
 from ..observability import log_event
@@ -229,7 +230,7 @@ class RiskEngine:
         same_symbol = [
             position
             for position in account.open_positions
-            if str(position.get("symbol", "")).upper() == candidate.symbol.upper()
+            if same_instrument(str(position.get("symbol", "")), candidate.symbol)
         ]
         if len(same_symbol) >= limits.max_open_per_symbol:
             reasons.append(f"already holding a position in {candidate.symbol}")

@@ -48,6 +48,16 @@ serving a dead trading process.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full map.
 
+## Broker symbol naming
+
+If your broker decorates instrument names (`EURUSD.R`, `EURUSD_i`,
+`EURUSDm`), set `TRADED_SYMBOLS` to **either** the bare pairs or your
+broker's exact names — both resolve. The canonical pair is used as the
+identity for duplicate detection, the per-symbol limit, news blackouts and
+correlation, while the API is called with the broker's own name. See
+[PAPER_TRADING.md §4](docs/PAPER_TRADING.md) for why this is a safety
+property rather than a convenience.
+
 ## Execution modes
 
 | `TRADING_MODE` | Behaviour |
@@ -99,7 +109,7 @@ python3 -m bot.service
 Run the test suite:
 
 ```sh
-python3 -m pytest         # 379 tests, no network required
+python3 -m pytest         # 425 tests, no network required
 npm run typecheck
 ```
 

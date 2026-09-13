@@ -70,6 +70,7 @@ bot/
 │   ├── http.py          Backoff + jitter + throttle + circuit breaker.
 │   ├── models.py        InstrumentSpec, Quote, Position, Order.
 │   ├── history.py       Candle endpoint DISCOVERY + permissive decoding.
+│   ├── symbols.py       Canonical pair identity (EURUSD.R -> EURUSD).
 │   ├── paper.py         Live prices in, simulated fills out. No broker writes.
 │   └── tradelocker.py   Session, decoding, instruments, candles, writes.
 │

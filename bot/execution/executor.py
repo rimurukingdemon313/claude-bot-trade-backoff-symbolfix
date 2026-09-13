@@ -96,7 +96,20 @@ class Executor:
         symbol in that window, and a cached snapshot would not see it.
         """
 
-        positions = self.broker.positions()
+        # A broker that cannot be read cannot rule out a duplicate, and an
+        # unverifiable duplicate is a refusal (project rule 7). Raising
+        # instead was worse than it looked: the intent is already persisted
+        # by this point, so the exception escaped leaving it CREATED, and
+        # the NEXT scan then found that unresolved intent and refused the
+        # symbol again. One rate-limited read blocked a pair until a
+        # reconcile came round.
+        try:
+            positions = self.broker.positions()
+        except BotError as exc:
+            return (
+                f"could not read open positions to rule out a duplicate: {exc}. "
+                "No order is created when a duplicate cannot be excluded."
+            )
         for position in positions:
             # same_instrument, not string equality: on a broker whose names
             # carry a suffix, `EURUSD` and `EURUSD.R` are one instrument, and
@@ -347,6 +360,32 @@ class Executor:
                 self._sleep(self.config.execution.order_verify_delay_seconds)
         return None
 
+    def _protection_still_missing(self, position_id: str, missing: list[str]) -> list[str]:
+        """Re-read the position and report which protections are still absent.
+
+        A broker that cannot be read afterwards is treated as still
+        missing: "we could not confirm the stop is there" and "the stop is
+        not there" carry the same consequence, and only one of them is
+        safe to assume.
+        """
+
+        try:
+            positions = self.broker.positions()
+        except BotError:
+            return list(missing)
+        current = next((p for p in positions if str(p.position_id) == str(position_id)), None)
+        if current is None:
+            # The position is gone: it filled, was closed, or never was.
+            # Either way there is nothing left to protect, and claiming a
+            # repair on a position that no longer exists would be worse.
+            return []
+        still: list[str] = []
+        if "stopLoss" in missing and not current.stop_loss:
+            still.append("stopLoss")
+        if "takeProfit" in missing and not current.take_profit:
+            still.append("takeProfit")
+        return still
+
     def _verify_protection(self, plan: TradePlan, position: Any) -> None:
         """Confirm SL/TP are attached at the broker, and repair if not."""
 
@@ -375,6 +414,18 @@ class Executor:
                 stop_loss=plan.stop_loss if "stopLoss" in missing else None,
                 take_profit=plan.take_profit if "takeProfit" in missing else None,
             )
+            # Read it back. A write that returned without raising is not a
+            # write that took effect, and this is the one repair whose
+            # silent failure leaves an unbounded loss open while the system
+            # records that it is protected. Re-reading is also the ONLY
+            # sanctioned recovery for a write whose outcome is in doubt
+            # (project rule 3) — the modify is never retried here.
+            still_missing = self._protection_still_missing(position.position_id, missing)
+            if still_missing:
+                raise BrokerError(
+                    f"the repair returned successfully but {', '.join(still_missing)} "
+                    f"is still absent at the broker"
+                )
             self.repos.events.append(
                 plan.execution_id, "PROTECTION_REPAIRED", {"missing": missing}
             )

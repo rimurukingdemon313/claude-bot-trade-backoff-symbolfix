@@ -295,3 +295,76 @@ def test_reconciler_restores_a_missing_stop_from_the_recorded_plan(config, broke
     report = Reconciler(config, broker, repos).reconcile()
     assert result.broker_position_id in report.unprotected
     assert broker.modifications[-1]["stopLoss"] == pytest.approx(1.0950)
+
+
+# -- the two failures that only appear once a trade is real ---------------
+
+
+def test_an_unreadable_broker_aborts_cleanly_instead_of_raising(config, broker, repos):
+    """A rate-limited read used to escape as an exception.
+
+    The intent is persisted before this check, so the exception left it
+    CREATED — and the NEXT scan then found that unresolved intent and
+    refused the same symbol again. One rate-limited read blocked a pair
+    until a reconcile came round. This account is rate-limited in the
+    normal course of things, so that was not hypothetical.
+    """
+
+    from bot.errors import BrokerRateLimited
+
+    def refuse_positions():
+        raise BrokerRateLimited("error 1015: you are being rate-limited")
+
+    broker.positions = refuse_positions  # type: ignore[assignment]
+    executor = Executor(config, broker, repos)
+    plan = make_plan()
+
+    result = executor.execute(plan, DEFAULT_SPEC, atr=0.0010)
+
+    assert result.ok is False
+    assert result.status == "ABORTED"
+    assert "rule out a duplicate" in (result.reason or "")
+    assert broker.submitted == [], "no order may be sent when a duplicate cannot be excluded"
+    # And the symbol is free to trade again: the intent is resolved, not
+    # left CREATED for the next scan to trip over.
+    assert repos.intents.unresolved() == []
+
+
+def test_a_protection_repair_that_did_not_take_is_reported_as_unprotected(
+    config, broker, repos
+):
+    """A write that returned without raising is not a write that took.
+
+    This is the one repair whose silent failure leaves an unbounded loss
+    open while the system records the position as protected.
+    """
+
+    executor = Executor(config, broker, repos)
+    plan = make_plan()
+
+    broker.strip_protection = True
+    # The broker accepts the modify and changes nothing — the exact shape
+    # of the failure this check exists for.
+    broker.modify_position = lambda position_id, **kwargs: {}  # type: ignore[assignment]
+
+    executor.execute(plan, DEFAULT_SPEC, atr=0.0010)
+
+    kinds = [row.get("kind") for row in repos.reconciliations.recent(limit=20)]
+    assert "UNPROTECTED_POSITION" in kinds, (
+        "a repair that did not take must be recorded as unprotected, not as repaired"
+    )
+
+
+def test_a_protection_repair_that_did_take_is_not_reported_as_unprotected(
+    config, broker, repos
+):
+    """The fake's own modify DOES apply, so the read-back finds it."""
+
+    executor = Executor(config, broker, repos)
+    broker.strip_protection = True
+
+    executor.execute(make_plan(), DEFAULT_SPEC, atr=0.0010)
+
+    kinds = [row.get("kind") for row in repos.reconciliations.recent(limit=20)]
+    assert "UNPROTECTED_POSITION" not in kinds
+    assert broker.modifications, "the repair must actually have been attempted"

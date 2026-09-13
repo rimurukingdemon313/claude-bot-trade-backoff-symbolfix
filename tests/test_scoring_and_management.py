@@ -211,3 +211,47 @@ def test_no_management_without_a_recorded_stop(config):
     assert plan_actions(
         position=position(stop_loss=None), trade=None, price=1.11, config=config, now=SETUP_END
     ) == []
+
+
+def test_break_even_is_skipped_when_price_retraced_back_to_entry(config):
+    """Found by the paper simulator.
+
+    Price can touch 1R and come back to entry between polls. The break-even
+    level is then already through the market: a broker would reject it, and a
+    simulator that accepted it would close the position instantly at a
+    flattering price. The correct action is to leave the original stop alone.
+    """
+
+    actions = plan_actions(
+        position=position(),
+        trade=TRADE,
+        price=1.10001,      # touched 1R earlier, now back at entry
+        config=config,
+        now=SETUP_END,
+    )
+    assert not [action for action in actions if action.kind == "MOVE_STOP"]
+
+
+def test_break_even_still_fires_when_price_holds_above_the_level(config):
+    actions = plan_actions(
+        position=position(), trade=TRADE, price=1.1060, config=config, now=SETUP_END
+    )
+    move = next(action for action in actions if action.kind == "MOVE_STOP")
+    assert move.stop_loss < 1.1060, "the stop must sit behind the market"
+    assert move.stop_loss > TRADE["actual_entry"]
+
+
+def test_trailing_never_proposes_a_stop_through_the_market(config):
+    trailing = dataclasses.replace(
+        config, execution=dataclasses.replace(config.execution, enable_trailing=True)
+    )
+    actions = plan_actions(
+        position=position(stop_loss=1.1001),
+        trade=TRADE,
+        price=1.1101,       # 2.02R, so the trail level lands right at the market
+        config=trailing,
+        now=SETUP_END,
+    )
+    for action in actions:
+        if action.kind == "MOVE_STOP" and action.stop_loss is not None:
+            assert action.stop_loss < 1.1101

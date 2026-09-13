@@ -24,6 +24,7 @@ from ..clock import from_epoch, utc_now
 from ..config import TradingConfig
 from ..errors import BrokerAuthError, BrokerError, BrokerRejected, ConfigError
 from ..observability import log_event
+from .history import HistoryFetcher, TIMEFRAME_MINUTES
 from .http import CircuitBreaker, HttpTransport, Throttle
 from .models import (
     AccountState,
@@ -33,12 +34,6 @@ from .models import (
     OrderResult,
     Quote,
 )
-
-#: Timeframe -> TradeLocker history resolution string.
-RESOLUTIONS = {"M5": "5M", "M15": "15M", "H1": "1H", "H4": "4H", "D1": "1D"}
-
-#: Minutes per timeframe, used for candle-close alignment.
-TIMEFRAME_MINUTES = {"M5": 5, "M15": 15, "H1": 60, "H4": 240, "D1": 1440}
 
 
 def _num(value: Any, default: float | None = 0.0) -> float | None:
@@ -108,6 +103,9 @@ class TradeLockerBroker:
         self._instruments_raw: list[dict[str, Any]] = []
         self._account_meta: dict[str, Any] | None = None
         self.instrument_cache_ttl = 3600.0
+        self.history = HistoryFetcher(
+            lambda path, query: self.get(path, query=query)
+        )
 
     # -- session ---------------------------------------------------------
 
@@ -431,59 +429,25 @@ class TradeLockerBroker:
     ) -> list[dict[str, Any]]:
         """Broker-native OHLC history.
 
+        The endpoint shape is DISCOVERED rather than assumed (see
+        bot/broker/history.py): TradeLocker deployments differ in path, in
+        the time unit of the range bounds, and in the envelope key the bars
+        arrive under. Hard-coding one guess is why the previous version
+        could silently return nothing on a broker that used another.
+
         Returned rows are raw dicts; validation (ordering, gaps, staleness,
         forming-candle removal) happens in bot.marketdata.validation so the
-        rules are testable without a broker.
+        rules stay testable without a broker.
         """
 
-        resolution = RESOLUTIONS.get(timeframe.upper())
-        if resolution is None:
+        if timeframe.upper() not in TIMEFRAME_MINUTES:
             raise BrokerError(f"unsupported timeframe {timeframe!r}")
-        minutes = TIMEFRAME_MINUTES[timeframe.upper()]
-        now = utc_now()
-        # Over-fetch: weekends and holidays mean wall-clock span is a poor
-        # proxy for candle count on FX.
-        span_seconds = minutes * 60 * count * 2.2
-        result = self.get(
-            "/trade/history",
-            query={
-                "tradableInstrumentId": spec.tradable_instrument_id,
-                "routeId": spec.quote_route_id or spec.route_id,
-                "resolution": resolution,
-                "from": int((now.timestamp() - span_seconds) * 1000),
-                "to": int(now.timestamp() * 1000),
-            },
-        ) or {}
-        bars = result.get("barDetails") or result.get("bars") or []
-        candles: list[dict[str, Any]] = []
-        for bar in bars:
-            if isinstance(bar, Mapping):
-                timestamp = _first(bar, "t", "time", "timestamp")
-                open_price = _num(_first(bar, "o", "open"), None)
-                high = _num(_first(bar, "h", "high"), None)
-                low = _num(_first(bar, "l", "low"), None)
-                close = _num(_first(bar, "c", "close"), None)
-                volume = _num(_first(bar, "v", "volume"), 0.0)
-            elif isinstance(bar, (list, tuple)) and len(bar) >= 5:
-                timestamp, open_price, high, low, close = bar[0], _num(bar[1], None), _num(bar[2], None), _num(bar[3], None), _num(bar[4], None)
-                volume = _num(bar[5], 0.0) if len(bar) > 5 else 0.0
-            else:
-                continue
-            if None in (open_price, high, low, close) or timestamp is None:
-                continue
-            candles.append(
-                {
-                    "timestamp": from_epoch(float(timestamp)).isoformat(),
-                    "timeframe": timeframe.upper(),
-                    "open": float(open_price),
-                    "high": float(high),
-                    "low": float(low),
-                    "close": float(close),
-                    "volume": float(volume or 0.0),
-                }
-            )
-        candles.sort(key=lambda row: row["timestamp"])
-        return candles[-count:]
+        return self.history.fetch(
+            instrument_id=spec.tradable_instrument_id,
+            route_id=spec.quote_route_id or spec.route_id,
+            timeframe=timeframe,
+            count=count,
+        )
 
     # -- positions / orders ----------------------------------------------
 
@@ -614,5 +578,6 @@ class TradeLockerBroker:
             "connected": self._access_token is not None,
             "accountResolved": self._acc_num is not None,
             "instrumentsCached": len(self._instrument_cache),
+            "history": self.history.describe(),
             **self.transport.health(),
         }

@@ -30,7 +30,7 @@ from .ai.client import AIClient
 from .ai.validator import AIValidation, validate_ai_decision
 from .broker.models import InstrumentSpec
 from .clock import trading_day, utc_now
-from .config import TradingConfig
+from .config import TradingConfig, profit_floor_feasibility
 from .errors import AIError, BotError, DemoVerificationError, MarketDataError
 from .execution.executor import ExecutionResult, Executor
 from .execution.manager import PositionManager, plan_actions
@@ -155,6 +155,7 @@ class Orchestrator:
         self.last_demo: DemoVerification | None = None
         self.startup_complete = False
         self.startup_error: str | None = None
+        self.feasibility: dict[str, Any] = {}
 
     # -- state -----------------------------------------------------------
 
@@ -223,13 +224,26 @@ class Orchestrator:
                 report=report.as_dict(),
             )
 
+        # A profit floor that cannot be reached at this equity would make the
+        # bot silently never trade. Say so at boot instead.
+        self.feasibility = profit_floor_feasibility(self.config, account.equity)
+        if not self.feasibility.get("feasible"):
+            log_event(
+                "STARTUP",
+                f"profit objective is UNREACHABLE at current equity: {self.feasibility['reason']}",
+                severity="error",
+                **{k: v for k, v in self.feasibility.items() if k != "reason"},
+            )
+
         self.startup_complete = True
         log_event(
             "STARTUP",
             "startup sequence complete — trading permitted",
+            mode=self.config.mode.value,
             demo=verification.verified,
             positions=report.checked_positions,
             adopted=len(report.adopted_orphans),
+            profit_floor_feasible=self.feasibility.get("feasible"),
         )
         return {
             "ok": True,
@@ -740,6 +754,20 @@ class Orchestrator:
                 return {"ok": False, "error": f"{component} health probe failed: {exc}"[:300]}
 
         components = {
+            "mode": {
+                "ok": True,
+                "value": self.config.mode.value,
+                "paper": self.config.is_paper,
+                "description": (
+                    "orders are simulated against live prices; nothing reaches the broker"
+                    if self.config.is_paper
+                    else "real orders are placed on the TradeLocker DEMO account"
+                ),
+            },
+            "profitObjective": {
+                "ok": bool(self.feasibility.get("feasible", True)),
+                **self.feasibility,
+            },
             "database": {
                 "ok": database_ok,
                 "backend": self.repos.db.backend,
@@ -763,5 +791,7 @@ class Orchestrator:
         return {
             "ok": critical_ok,
             "tradingPermitted": critical_ok and not kill.active and self.trading_enabled,
+            "mode": self.config.mode.value,
+            "paper": self.config.is_paper,
             "components": components,
         }

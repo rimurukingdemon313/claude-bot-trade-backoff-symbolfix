@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field, replace
+from enum import Enum
 from typing import Any, Mapping
 
 from .errors import ConfigError
@@ -28,6 +29,25 @@ from .errors import ConfigError
 #: The system refuses to trade unless the account is positively verified
 #: as DEMO. There is no env var for this by design (MASTER_MISSION §4).
 REQUIRE_DEMO = True
+
+class ExecutionMode(str, Enum):
+    """How an approved trade is executed.
+
+    PAPER simulates the fill against LIVE broker prices and never sends a
+    write to the broker. Everything upstream of the fill — market data, the
+    SMC engine, scoring, the risk engine, the execution intent, the
+    idempotency guard, position management — runs identically, so paper mode
+    exercises the real decision and execution path without touching the
+    account.
+
+    DEMO_LIVE places real orders on the TradeLocker DEMO account.
+
+    There is deliberately no third value. LIVE is not a mode this build has.
+    """
+
+    PAPER = "paper"
+    DEMO_LIVE = "demo_live"
+
 
 #: Hostname fragments that positively identify a TradeLocker demo API.
 DEMO_URL_MARKERS = ("demo.tradelocker.com", "demo-api", "/demo")
@@ -147,15 +167,62 @@ class RiskConfig:
 
 @dataclass(frozen=True, slots=True)
 class OpportunityConfig:
-    """The "$50+" objective. Expressed as a target, never as a mandate:
-    if a setup cannot reach it inside the risk limits, the answer is
-    NO TRADE — the system never inflates size or shrinks the stop."""
+    """The profit objective. A FILTER, never a mandate: if a setup cannot
+    reach it inside the risk limits, the answer is NO TRADE — the system
+    never inflates size, widens leverage, or shrinks the stop to get there.
+
+    Two numbers, not one:
+
+      * `target_profit` is what the system aims for;
+      * `minimum_profit` is an ABSOLUTE FLOOR. No tier, no tolerance and no
+        configuration can take a trade whose expected profit at its
+        structural target is below it.
+
+    Note the arithmetic this imposes. With a 1:2 minimum R:R, a $40 floor
+    means at least $20 of risk per trade, which at the 0.5% base risk needs
+    roughly $4,000 of equity. Below that the floor is unreachable and the
+    system would simply never trade — so `profit_floor_feasibility()`
+    computes that explicitly and the health endpoint reports it, rather than
+    leaving a silent do-nothing bot.
+    """
 
     target_profit: float = 50.0
+    #: Hard floor on expected profit at the structural target.
+    minimum_profit: float = 40.0
     enabled: bool = True
-    #: Allow a trade whose expected profit falls slightly short when the
-    #: setup grade is top-tier; never below this fraction of the target.
+    #: A top-tier setup may clear the target at this fraction — but never
+    #: below `minimum_profit`.
     tolerance_fraction: float = 0.8
+
+    def required_profit(self, tier: str) -> float:
+        """The bar this tier must clear. Never below the absolute floor."""
+
+        required = self.target_profit
+        if tier == "A+":
+            required = self.target_profit * self.tolerance_fraction
+        return max(required, self.minimum_profit)
+
+
+@dataclass(frozen=True, slots=True)
+class PaperConfig:
+    """Fill modelling for paper mode.
+
+    Defaults are pessimistic on purpose: a paper run that fills at the mid
+    with no costs would report a performance the demo account could never
+    reproduce, which defeats the point of running it.
+    """
+
+    #: Starting equity. None = adopt the real broker balance on first boot,
+    #: so paper results are scaled to the account actually being validated.
+    starting_balance: float | None = None
+    #: Extra adverse slippage on entry, in instrument ticks, on top of
+    #: crossing the spread.
+    entry_slippage_ticks: float = 2.0
+    #: Adverse slippage when a stop is hit. Stops slip more than entries.
+    stop_slippage_ticks: float = 4.0
+    commission_per_lot: float = 7.0
+    #: Treat a stop and target both touched inside one candle as the STOP.
+    pessimistic_intrabar: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -277,9 +344,15 @@ class TradingConfig:
     storage: StorageConfig = field(default_factory=StorageConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
+    paper: PaperConfig = field(default_factory=PaperConfig)
+    mode: ExecutionMode = ExecutionMode.PAPER
     require_demo: bool = REQUIRE_DEMO
     dashboard_token: str | None = None
     trading_enabled_default: bool = True
+
+    @property
+    def is_paper(self) -> bool:
+        return self.mode is ExecutionMode.PAPER
 
     def validate(self) -> None:
         """Structural validation. Raises on anything that would make a
@@ -317,9 +390,66 @@ class TradingConfig:
         scoring = self.scoring
         if not (scoring.tier_b <= scoring.tier_a <= scoring.tier_a_plus):
             raise ConfigError("score tiers must be ordered B <= A <= A+")
+        if not isinstance(self.mode, ExecutionMode):
+            raise ConfigError(f"unknown execution mode {self.mode!r}")
+        if self.paper.starting_balance is not None and self.paper.starting_balance <= 0:
+            raise ConfigError("paper starting balance must be positive when set")
+        opportunity = self.opportunity
+        if opportunity.minimum_profit < 0:
+            raise ConfigError("minimum_profit cannot be negative")
+        if opportunity.enabled and opportunity.minimum_profit > opportunity.target_profit:
+            raise ConfigError(
+                f"minimum_profit (${opportunity.minimum_profit:g}) cannot exceed "
+                f"target_profit (${opportunity.target_profit:g}) — the floor would make the "
+                "target unreachable by definition"
+            )
 
     def with_overrides(self, **changes: Any) -> "TradingConfig":
         return replace(self, **changes)
+
+
+def profit_floor_feasibility(config: "TradingConfig", equity: float) -> dict[str, Any]:
+    """Can the profit floor be reached at all, at this equity?
+
+    Best case for the system is the largest risk it is ever allowed to take
+    multiplied by the best R:R it is willing to require. If even that falls
+    short of the floor, no setup can ever pass and the honest answer is to
+    say so loudly instead of returning NO TRADE forever.
+    """
+
+    opportunity = config.opportunity
+    if not opportunity.enabled:
+        return {"feasible": True, "reason": "profit objective disabled"}
+
+    max_risk = max(0.0, equity) * config.risk.max_risk_pct
+    best_case_profit = max_risk * config.risk.min_risk_reward
+    floor = opportunity.minimum_profit
+    feasible = best_case_profit >= floor
+
+    required_equity = (
+        floor / (config.risk.max_risk_pct * config.risk.min_risk_reward)
+        if config.risk.max_risk_pct > 0 and config.risk.min_risk_reward > 0
+        else None
+    )
+    return {
+        "feasible": feasible,
+        "equity": round(equity, 2),
+        "maxRiskPerTrade": round(max_risk, 2),
+        "bestCaseProfit": round(best_case_profit, 2),
+        "minimumProfit": floor,
+        "requiredEquity": round(required_equity, 2) if required_equity else None,
+        "reason": (
+            f"at ${equity:,.2f} equity the maximum allowed risk is ${max_risk:,.2f}, which at the "
+            f"minimum 1:{config.risk.min_risk_reward:g} R:R yields at best ${best_case_profit:,.2f} "
+            f"— below the ${floor:,.2f} profit floor. No setup can pass this filter until equity "
+            f"reaches about ${required_equity:,.2f}, or the floor / risk ceiling is changed."
+        )
+        if not feasible
+        else (
+            f"reachable: up to ${best_case_profit:,.2f} at the ${max_risk:,.2f} risk ceiling "
+            f"versus a ${floor:,.2f} floor"
+        ),
+    }
 
 
 DEFAULT_SYMBOLS = ("EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCHF", "XAUUSD")
@@ -365,6 +495,7 @@ def load_config(env: Mapping[str, str] | None = None) -> TradingConfig:
     )
     opportunity = OpportunityConfig(
         target_profit=_env_float("OPPORTUNITY_TARGET_PROFIT", 50.0, low=0.0, high=100000.0),
+        minimum_profit=_env_float("OPPORTUNITY_MINIMUM_PROFIT", 40.0, low=0.0, high=100000.0),
         enabled=_env_bool("OPPORTUNITY_ENABLED", True),
     )
     ai = AIConfig(
@@ -384,8 +515,29 @@ def load_config(env: Mapping[str, str] | None = None) -> TradingConfig:
         position_poll_seconds=_env_int("POSITION_POLL_SECONDS", 30, low=5, high=600),
         reconcile_interval_seconds=_env_int("RECONCILE_INTERVAL_SECONDS", 300, low=30, high=3600),
     )
+    raw_mode = (_env_str("TRADING_MODE", "paper") or "paper").lower()
+    try:
+        mode = ExecutionMode(raw_mode)
+    except ValueError as exc:
+        # An unrecognised mode must not fall through to placing real orders.
+        raise ConfigError(
+            f"TRADING_MODE={raw_mode!r} is not recognised. Use 'paper' or 'demo_live'."
+        ) from exc
+
+    paper_balance = os.environ.get("PAPER_STARTING_BALANCE")
     config = TradingConfig(
         symbols=_env_list("TRADED_SYMBOLS", DEFAULT_SYMBOLS),
+        mode=mode,
+        paper=PaperConfig(
+            starting_balance=(
+                _env_float("PAPER_STARTING_BALANCE", 10_000.0, low=1.0, high=10_000_000.0)
+                if paper_balance
+                else None
+            ),
+            entry_slippage_ticks=_env_float("PAPER_ENTRY_SLIPPAGE_TICKS", 2.0, low=0.0, high=100.0),
+            stop_slippage_ticks=_env_float("PAPER_STOP_SLIPPAGE_TICKS", 4.0, low=0.0, high=200.0),
+            commission_per_lot=_env_float("PAPER_COMMISSION_PER_LOT", 7.0, low=0.0, high=200.0),
+        ),
         broker=broker,
         risk=risk,
         opportunity=opportunity,

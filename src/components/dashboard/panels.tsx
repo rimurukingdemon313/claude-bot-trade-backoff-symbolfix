@@ -36,6 +36,47 @@ function guard<T>(envelope: Envelope<T> | undefined, render: (data: T) => ReactN
   return render(envelope.data);
 }
 
+/**
+ * The execution-mode banner.
+ *
+ * Paper mode must be impossible to mistake for live: a user who thinks the
+ * bot is trading their demo account when it is only simulating would draw
+ * the wrong conclusion from every number on this page.
+ */
+export function ModeBanner({ health }: { health: Health | undefined }) {
+  if (!health?.mode) return null;
+  const paper = health.paper;
+  return (
+    <div
+      className={cn(
+        'rounded-2xl border p-3 text-xs',
+        paper
+          ? 'border-sky-800 bg-sky-950/50 text-sky-200'
+          : 'border-amber-800 bg-amber-950/40 text-amber-200',
+      )}
+      role="status"
+    >
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge tone={paper ? 'info' : 'warn'}>
+          {paper ? 'PAPER MODE' : 'LIVE ON DEMO ACCOUNT'}
+        </Badge>
+        <span className="min-w-0">
+          {paper
+            ? 'Orders are simulated against live broker prices. Nothing is sent to TradeLocker.'
+            : 'Real orders are being placed on your TradeLocker DEMO account.'}
+        </span>
+      </div>
+      {paper && (
+        <p className="mt-1.5 text-[11px] text-sky-300/80">
+          Every other stage — market data, SMC, scoring, risk, execution intents, position
+          management — is the real path. Set <code>TRADING_MODE=demo_live</code> to place real
+          demo orders.
+        </p>
+      )}
+    </div>
+  );
+}
+
 // -- account ---------------------------------------------------------------
 
 export function AccountPanel({ account }: { account: Envelope<Account> }) {
@@ -352,8 +393,19 @@ export function RiskPanel({ risk }: { risk: Envelope<RiskState> }) {
               value={`${data.tradesToday}/${data.limits.maxTradesPerDay}`}
             />
             <Row label="Minimum R:R" value={`1:${fmt.number(data.limits.minRiskReward, 1)}`} />
-            <Row label="Profit objective" value={fmt.money(data.opportunityTarget)} />
+            <Row
+              label="Profit objective"
+              value={`${fmt.money(data.opportunityMinimum)} floor · ${fmt.money(
+                data.opportunityTarget,
+              )} target`}
+            />
           </div>
+          {data.profitObjective && !data.profitObjective.feasible && (
+            <p className="mt-3 rounded-lg border border-amber-900 bg-amber-950/40 p-2 text-xs text-amber-300">
+              <span className="font-semibold">Profit floor unreachable: </span>
+              {data.profitObjective.reason}
+            </p>
+          )}
           <p className="mt-3 text-[11px] text-slate-500">
             Risk is reduced by drawdown and losing streaks, never increased. The profit objective
             filters opportunities; it never raises position size.

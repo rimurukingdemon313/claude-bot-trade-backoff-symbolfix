@@ -17,7 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 
-from bot.config import load_config  # noqa: E402
+from bot.config import ExecutionMode, load_config  # noqa: E402
 from bot.service import BotService, serve  # noqa: E402
 from fakes import FakeBroker, aligned_htf, bullish_setup_m15  # noqa: E402
 
@@ -31,6 +31,7 @@ def main() -> None:
         ai=dataclasses.replace(config.ai, enabled=False),
         news=dataclasses.replace(config.news, enabled=False),
     )
+    print(f"[smoke] mode={config.mode.value}", flush=True)
 
     broker = FakeBroker()
     # Anchor the fixture to the current candle close so the staleness guard

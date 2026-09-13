@@ -17,7 +17,7 @@ from typing import Any
 
 from .analytics.performance import breakdown, compute_performance
 from .clock import utc_now
-from .config import TradingConfig
+from .config import TradingConfig, profit_floor_feasibility
 from .errors import BotError
 from .orchestrator import Orchestrator
 from .storage.repositories import Repositories
@@ -59,6 +59,8 @@ class DashboardApi:
                 "demoVerified": bool(demo and demo.verified),
                 "demoReason": demo.reason if demo else "not yet verified",
                 "environment": "DEMO" if demo and demo.verified else "UNVERIFIED",
+                "mode": self.config.mode.value,
+                "paper": self.config.is_paper,
             },
         }
 
@@ -153,6 +155,7 @@ class DashboardApi:
         health["uptimeSeconds"] = round((utc_now() - self.started_at).total_seconds())
         health["versions"] = version_stamp()
         health["symbols"] = list(self.config.symbols)
+        health["mode"] = self.config.mode.value
 
         def optional(name: str, probe: Any) -> Any:
             try:
@@ -191,6 +194,8 @@ class DashboardApi:
                     "minRiskReward": limits.min_risk_reward,
                 },
                 "opportunityTarget": self.config.opportunity.target_profit,
+                "opportunityMinimum": self.config.opportunity.minimum_profit,
+                "profitObjective": profit_floor_feasibility(self.config, state.equity),
             },
         }
 
@@ -225,6 +230,28 @@ class DashboardApi:
 
     def trigger_reconcile(self) -> dict[str, Any]:
         return self.orchestrator.reconcile().as_dict()
+
+    def reset_paper(self) -> dict[str, Any]:
+        """Wipe simulated state and start the paper run over.
+
+        Refused outside paper mode: there is nothing to reset on a real
+        account, and a command that silently did nothing would be worse than
+        one that says why.
+        """
+
+        if not self.config.is_paper:
+            return {
+                "ok": False,
+                "error": "not in paper mode — there is no simulated state to reset",
+            }
+        starting = self.config.paper.starting_balance
+        if starting is None:
+            try:
+                starting = self.orchestrator.broker.live.account_state().balance
+            except Exception:  # noqa: BLE001
+                starting = 10_000.0
+        self.repos.paper.reset(float(starting))
+        return {"ok": True, "startingBalance": round(float(starting), 2)}
 
 
 def _duration(row: dict[str, Any]) -> float | None:

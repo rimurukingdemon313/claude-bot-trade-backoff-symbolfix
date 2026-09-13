@@ -24,6 +24,7 @@ from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
 
 from .api import DashboardApi
+from .broker.paper import PaperBroker
 from .broker.tradelocker import TradeLockerBroker
 from .config import TradingConfig, load_config
 from .errors import BotError, ConfigError
@@ -40,7 +41,17 @@ class BotService:
         self.config = config or load_config()
         self.database = open_database(self.config.storage)
         self.repos = Repositories(self.database)
-        self.broker = broker or TradeLockerBroker(self.config)
+        live_broker = broker or TradeLockerBroker(self.config)
+        # Paper mode wraps the live connection rather than replacing it:
+        # reads still come from TradeLocker, only the writes are simulated.
+        # Composition (not inheritance) means no unoverridden method can
+        # reach the network by accident.
+        self.live_broker = live_broker
+        self.broker = (
+            PaperBroker(live_broker, self.config, self.repos)
+            if self.config.is_paper
+            else live_broker
+        )
         self.market_data = MarketDataProvider(self.broker, self.config)
         self.orchestrator = Orchestrator(
             self.config,
@@ -55,6 +66,16 @@ class BotService:
     # -- lifecycle -------------------------------------------------------
 
     def start(self) -> None:
+        log_event(
+            "STARTUP",
+            f"execution mode: {self.config.mode.value.upper()}"
+            + (
+                " — orders are SIMULATED against live prices; nothing is sent to the broker"
+                if self.config.is_paper
+                else " — real orders will be placed on the TradeLocker DEMO account"
+            ),
+            mode=self.config.mode.value,
+        )
         result = self.orchestrator.startup()
         if not result.get("ok"):
             # Start the API anyway: the dashboard must be able to SHOW the
@@ -244,6 +265,11 @@ def make_handler(service: BotService) -> type[BaseHTTPRequestHandler]:
                     self._send(200, api.trigger_scan())
                 elif parsed.path == "/api/control/reconcile":
                     self._send(200, api.trigger_reconcile())
+                elif parsed.path == "/api/control/reset-paper":
+                    if body.get("confirm") is not True:
+                        self._send(400, {"error": "send {\"confirm\": true} to reset paper state"})
+                    else:
+                        self._send(200, api.reset_paper())
                 else:
                     self._send(404, {"error": "not found"})
             except Exception as exc:  # noqa: BLE001

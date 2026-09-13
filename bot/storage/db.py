@@ -24,6 +24,11 @@ from typing import Any, Iterator, Sequence
 from ..errors import StorageError
 from ..observability import log_event
 
+#: Bump when ddl() changes. Every statement is CREATE ... IF NOT EXISTS, so
+#: migration stays idempotent and safe to run on every boot; the version is
+#: recorded so a deployment's schema generation is attributable.
+SCHEMA_VERSION = 2
+
 
 class Database:
     """Thin, thread-safe connection holder with an explicit transaction API."""
@@ -308,6 +313,41 @@ class Database:
                 created_at TEXT NOT NULL
             )
             """,
+            f"""
+            CREATE TABLE IF NOT EXISTS paper_positions (
+                position_id TEXT PRIMARY KEY,
+                execution_id TEXT,
+                symbol TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                quantity REAL NOT NULL,
+                entry_price REAL NOT NULL,
+                stop_loss REAL,
+                take_profit REAL,
+                contract_size REAL NOT NULL,
+                conversion_rate REAL NOT NULL DEFAULT 1,
+                commission REAL NOT NULL DEFAULT 0,
+                status TEXT NOT NULL,
+                exit_price REAL,
+                realized_pnl REAL,
+                exit_reason TEXT,
+                mark_price REAL,
+                opened_at TEXT NOT NULL,
+                closed_at TEXT,
+                updated_at TEXT NOT NULL
+            )
+            """,
+            f"""
+            CREATE TABLE IF NOT EXISTS paper_account (
+                id INTEGER PRIMARY KEY,
+                starting_balance REAL NOT NULL,
+                realized_pnl REAL NOT NULL DEFAULT 0,
+                commission_paid REAL NOT NULL DEFAULT 0,
+                currency TEXT NOT NULL DEFAULT 'USD',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_paper_status ON paper_positions(status)",
             "CREATE INDEX IF NOT EXISTS idx_trades_symbol_status ON trades(symbol, status)",
             "CREATE INDEX IF NOT EXISTS idx_trades_closed_at ON trades(closed_at)",
             "CREATE INDEX IF NOT EXISTS idx_decisions_scan ON decisions(scan_id)",
@@ -334,9 +374,9 @@ class Database:
                         else " ON CONFLICT(version) DO NOTHING"
                     )
                 ),
-                (1, utc_now().isoformat()),
+                (SCHEMA_VERSION, utc_now().isoformat()),
             )
-        log_event("STORAGE", "schema migrated", backend=self.backend)
+        log_event("STORAGE", "schema migrated", backend=self.backend, version=SCHEMA_VERSION)
 
 
 def open_database(config: Any) -> Database:

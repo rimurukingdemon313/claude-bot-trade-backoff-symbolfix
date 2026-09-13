@@ -52,6 +52,7 @@ bot/
 ├── observability.py     Structured JSON logging with secret redaction.
 ├── version.py           Component versions stamped onto every trade.
 ├── news.py              High-impact event filter (fails closed).
+├── doctor.py            Read-only live verification of the real account.
 ├── scheduler.py         Candle-aligned timers with overlap protection.
 ├── orchestrator.py      The scan pipeline. Wires everything together.
 ├── api.py               Dashboard projections (read-only).
@@ -68,6 +69,8 @@ bot/
 ├── broker/
 │   ├── http.py          Backoff + jitter + throttle + circuit breaker.
 │   ├── models.py        InstrumentSpec, Quote, Position, Order.
+│   ├── history.py       Candle endpoint DISCOVERY + permissive decoding.
+│   ├── paper.py         Live prices in, simulated fills out. No broker writes.
 │   └── tradelocker.py   Session, decoding, instruments, candles, writes.
 │
 ├── marketdata/

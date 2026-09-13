@@ -33,6 +33,8 @@ export type Account = {
   demoVerified: boolean;
   demoReason: string | null;
   environment: string;
+  mode: 'paper' | 'demo_live';
+  paper: boolean;
 };
 
 export type Position = {
@@ -157,11 +159,21 @@ export type RiskState = {
   killSwitch: { active: boolean; reason: string | null; detail: string | null; trippedAt: string | null };
   limits: Record<string, number>;
   opportunityTarget: number;
+  opportunityMinimum: number;
+  profitObjective: {
+    feasible: boolean;
+    reason: string;
+    bestCaseProfit?: number;
+    minimumProfit?: number;
+    requiredEquity?: number | null;
+  };
 };
 
 export type Health = {
   ok: boolean;
   tradingPermitted: boolean;
+  mode: 'paper' | 'demo_live';
+  paper: boolean;
   uptimeSeconds: number;
   symbols: string[];
   versions: Record<string, string>;
@@ -212,6 +224,11 @@ export const api = {
     }),
   triggerScan: () => request<Scan>("/api/control/scan", { method: "POST" }),
   reconcile: () => request<Record<string, unknown>>("/api/control/reconcile", { method: "POST" }),
+  resetPaper: () =>
+    request<{ ok: boolean; error?: string }>("/api/control/reset-paper", {
+      method: "POST",
+      body: JSON.stringify({ confirm: true }),
+    }),
 };
 
 /** Formatting helpers. `null` renders as an explicit dash, never as 0. */

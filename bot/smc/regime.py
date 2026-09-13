@@ -17,6 +17,11 @@ from .indicators import atr_series, percentile
 from .structure import StructureEvent
 
 
+#: Current ATR at this multiple of the window's MEDIAN ATR is treated as a
+#: volatility event to stand aside from, not a market to trade.
+EXTREME_ATR_MULTIPLE = 3.5
+
+
 @dataclass(frozen=True, slots=True)
 class Regime:
     trend: str        # trending | ranging | transitional
@@ -77,7 +82,16 @@ def classify_regime(
         ranked = sorted(history)
         position = sum(1 for value in ranked if value <= current_atr) / len(ranked)
         atr_percentile = position
-        if current_atr >= max(extreme_band * 1.6, high_band * 2.2):
+        # "Extreme" is judged against the MEDIAN, not against the upper
+        # percentiles of the same window. A flash crash lifts the ATR of
+        # every subsequent bar, so within a few bars the 95th percentile is
+        # itself elevated and a percentile test quietly reclassifies a
+        # violent market as merely "expanded" — which is how the engine
+        # would start trading structure breaks inside a crash. The median is
+        # robust to a spike: a handful of outliers barely move it.
+        median = percentile(history, 0.5)
+        extreme_by_median = median > 0 and current_atr >= median * EXTREME_ATR_MULTIPLE
+        if extreme_by_median or current_atr >= max(extreme_band * 1.6, high_band * 2.2):
             volatility = "extreme"
         elif current_atr >= high_band * 1.05:
             # The 5% margin matters: in a series with near-uniform ranges

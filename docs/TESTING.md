@@ -23,7 +23,19 @@ bugs and the *code* changed:
 - `/healthz` returned 500 instead of 503 when the database was down — the one
   endpoint that has to work when everything else is broken;
 - a perfectly flat market was classified as "expanded" volatility because
-  the upper quartile equalled the current value.
+  the upper quartile equalled the current value;
+- **break-even could place a stop already through the market** — found by the
+  paper simulator, which filled it instantly at a flattering price. A live
+  broker would have rejected it;
+- **a sustained volatility spike contaminated its own baseline**: because
+  "extreme" was judged against the upper percentiles of a window that already
+  contained the spike, a flash crash was reclassified as merely "expanded"
+  within a few bars, and the engine would have resumed trading structure
+  breaks inside a crash. Now judged against the window's median;
+- **a concurrency race escaped as a raw `sqlite3.IntegrityError`**: two
+  threads could both pass the intent existence check. The UNIQUE constraint
+  still prevented the duplicate order, but the losing thread crashed instead
+  of reporting DUPLICATE.
 
 **Scenarios are hand-built, not random.** A random walk proves nothing about
 whether a detector found the *right* swing. `tests/fakes.py` constructs each
@@ -34,7 +46,7 @@ retracement — so the correct answer is known by construction.
 network, not the engine. Risk, sizing, scoring, structure detection and the
 executor all run for real.
 
-## What is covered (280+ tests)
+## What is covered (379 tests)
 
 ### Safety
 DEMO verification passes only on positive proof and fails on absent,
@@ -151,6 +163,69 @@ Running these against real broker history is the necessary next step before
 any claim about edge. The synthetic fixtures prove the machinery is correct;
 they cannot prove the strategy is profitable, and the code says so where it
 reports results.
+
+### Live data integration (33 tests)
+Object bars, positional bars, every known envelope key, nested envelopes and
+bare-list responses all decode; a malformed bar is dropped rather than
+defaulted; a wick inconsistent by a rounding tick is clamped rather than
+discarded; overlapping pages deduplicate; bars come back chronological.
+Discovery finds the working endpoint shape and caches it; a 4xx skips to the
+next shape; **a transport failure aborts discovery instead of caching a wrong
+conclusion**; a learned shape that stops working is re-probed; the requested
+window over-fetches to survive weekends. The doctor renders, redacts secrets,
+and is structurally read-only (asserted by source inspection).
+
+### Paper trading (28 tests)
+**No write ever reaches the broker** — submitted, modified and closed lists
+all empty. The DEMO guard still applies, so paper-over-a-live-account is
+refused. A buy crosses the spread and pays slippage; a sell crosses the other
+way; commission reduces the balance. A fill landing outside the plan's levels
+is refused. Paper refuses what the live broker would refuse (non-positive
+quantity, missing stop or target, a stop already through the market). A stop
+closes worse than its price; a target closes exactly at the target; **the
+configured $40 profit floor is actually booked at target**; both levels in
+one window resolves as the stop; a level reached between polls is not missed;
+an unreadable price leaves the position open rather than closing it. Equity
+marks to live prices while balance moves only on a realised close; positions
+survive a restart; the starting balance adopts the real account when unset;
+partial closes reduce the position; order history is shaped like the broker's
+so the reconciler can read it. The whole pipeline runs in paper mode without
+touching the broker, the mode is visible in health, and reset is refused
+outside paper mode.
+
+### Stress and extreme conditions (39 tests)
+**Market:** a 20% flash crash makes the regime untradeable and produces no
+setup; a weekend gap is tolerated while a mid-week gap is not; a frozen
+market of identical candles yields no setup; zero and non-finite prices never
+enter the engine; a series of one repeated timestamp is refused; **a feed that
+stops updating goes stale rather than looking calm**.
+
+**Execution conditions:** a spread wider than the target is rejected; a news
+spread spike aborts before submission; a crossed quote is refused rather than
+averaged; a zero quote is refused.
+
+**Risk under extremes:** a nearly-wiped and a negative-balance account never
+trade; an enormous equity is still capped by the broker's max lot; **risk
+taken never exceeds risk approved across a sweep of five equities × three
+tiers**; an absurd conversion rate cannot produce an absurd position; a
+one-tick stop is refused; compound breaches all report their reasons; the
+profit floor reports as unreachable rather than silently never trading.
+
+**Infrastructure:** a rate-limit storm is bounded and never duplicates a
+write; the circuit breaker sheds load instead of burning the scan budget; a
+database failure mid-flight blocks the order; a broker reporting no position
+after a fill is ambiguous, not success; **a storm of ambiguous submissions
+never produces a second order**; every symbol failing leaves the scan intact
+and journalled; health stays answerable with everything broken and the kill
+switch fails closed.
+
+**Paper under stress:** a gap straight through the stop books the real loss
+(larger than planned risk, recorded honestly); a spread explosion prevents a
+fill; the paper ledger never diverges from `starting + realised − commission`;
+a broker outage mid-run does not lose the position or its protection.
+
+**Concurrency:** four simultaneous scans produce at most one order; five
+threads executing the same plan produce exactly one order.
 
 ## End-to-end smoke test
 

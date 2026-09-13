@@ -31,6 +31,18 @@ INTENT_STATES = (
 TRADE_STATES = ("PENDING", "OPEN", "CLOSED", "ORPHANED")
 
 
+def _is_unique_violation(exc: BaseException) -> bool:
+    """Backend-agnostic detection of a UNIQUE constraint failure.
+
+    Matching on the message rather than the exception class keeps this
+    working for sqlite3.IntegrityError and psycopg.errors.UniqueViolation
+    without importing either.
+    """
+
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return "unique" in text and ("constraint" in text or "violation" in text or "duplicate" in text)
+
+
 def _dumps(value: Any) -> str:
     return json.dumps(value, separators=(",", ":"), default=str)
 
@@ -103,14 +115,29 @@ class IntentRepository:
                 f"execution intent {idempotency_key} already exists with status "
                 f"{existing['status']} — refusing to create a duplicate"
             )
-        self.db.execute(
-            """
-            INSERT INTO execution_intents
-                (idempotency_key, symbol, direction, status, plan, created_at, updated_at)
-            VALUES (?, ?, ?, 'CREATED', ?, ?, ?)
-            """,
-            (idempotency_key, symbol, direction, _dumps(plan), now, now),
-        )
+        try:
+            self.db.execute(
+                """
+                INSERT INTO execution_intents
+                    (idempotency_key, symbol, direction, status, plan, created_at, updated_at)
+                VALUES (?, ?, ?, 'CREATED', ?, ?, ?)
+                """,
+                (idempotency_key, symbol, direction, _dumps(plan), now, now),
+            )
+        except Exception as exc:  # noqa: BLE001 - backend-specific integrity error
+            # The check above is not atomic with the insert: two threads (a
+            # timer and a manual trigger) can both pass it. The UNIQUE
+            # constraint is what actually prevents the duplicate order — this
+            # translates the backend's raw integrity error into the same
+            # classified StorageError the caller already handles, so the
+            # losing thread reports DUPLICATE instead of crashing with an
+            # unhandled sqlite3/psycopg exception.
+            if _is_unique_violation(exc):
+                raise StorageError(
+                    f"execution intent {idempotency_key} was created concurrently — "
+                    "refusing to create a duplicate"
+                ) from exc
+            raise
         return self.get(idempotency_key)  # type: ignore[return-value]
 
     def get(self, idempotency_key: str) -> dict[str, Any] | None:
@@ -618,6 +645,143 @@ class EquityRepository:
         )
 
 
+class PaperRepository:
+    """Simulated positions and account, persisted like the real thing.
+
+    Paper state lives in the database rather than in memory for the same
+    reason real state does: a redeploy must not erase an open simulated
+    position, or the paper run stops being a faithful rehearsal of the live
+    path.
+    """
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    # -- account ---------------------------------------------------------
+
+    def ensure_account(self, starting_balance: float, currency: str = "USD") -> dict[str, Any]:
+        row = self.db.query_one("SELECT * FROM paper_account WHERE id = 1")
+        if row is not None:
+            return row
+        now = utc_now().isoformat()
+        self.db.execute(
+            "INSERT INTO paper_account (id, starting_balance, currency, created_at, updated_at) "
+            "VALUES (1, ?, ?, ?, ?)",
+            (starting_balance, currency, now, now),
+        )
+        log_event(
+            "PAPER",
+            f"paper account opened with {starting_balance:.2f} {currency}",
+            starting_balance=starting_balance,
+        )
+        return self.db.query_one("SELECT * FROM paper_account WHERE id = 1")  # type: ignore[return-value]
+
+    def account(self) -> dict[str, Any] | None:
+        return self.db.query_one("SELECT * FROM paper_account WHERE id = 1")
+
+    def apply_realized(self, pnl: float, commission: float) -> None:
+        self.db.execute(
+            "UPDATE paper_account SET realized_pnl = realized_pnl + ?, "
+            "commission_paid = commission_paid + ?, updated_at = ? WHERE id = 1",
+            (pnl, commission, utc_now().isoformat()),
+        )
+
+    def reset(self, starting_balance: float, currency: str = "USD") -> None:
+        """Wipe simulated state. Only ever called explicitly by an operator."""
+
+        with self.db.transaction() as cursor:
+            cursor.execute(self.db._rewrite("DELETE FROM paper_positions"))
+            cursor.execute(self.db._rewrite("DELETE FROM paper_account"))
+        self.ensure_account(starting_balance, currency)
+        log_event("PAPER", "paper state reset", severity="warning")
+
+    # -- positions -------------------------------------------------------
+
+    def open_position(self, position: Mapping[str, Any]) -> None:
+        now = utc_now().isoformat()
+        self.db.execute(
+            """
+            INSERT INTO paper_positions (
+                position_id, execution_id, symbol, direction, quantity, entry_price,
+                stop_loss, take_profit, contract_size, conversion_rate, commission,
+                status, mark_price, opened_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?)
+            """,
+            (
+                position["position_id"],
+                position.get("execution_id"),
+                position["symbol"],
+                position["direction"],
+                position["quantity"],
+                position["entry_price"],
+                position.get("stop_loss"),
+                position.get("take_profit"),
+                position["contract_size"],
+                position.get("conversion_rate", 1.0),
+                position.get("commission", 0.0),
+                position["entry_price"],
+                position.get("opened_at") or now,
+                now,
+            ),
+        )
+
+    def open_positions(self) -> list[dict[str, Any]]:
+        return self.db.query(
+            "SELECT * FROM paper_positions WHERE status = 'OPEN' ORDER BY opened_at ASC"
+        )
+
+    def by_id(self, position_id: str) -> dict[str, Any] | None:
+        return self.db.query_one(
+            "SELECT * FROM paper_positions WHERE position_id = ?", (position_id,)
+        )
+
+    def update_protection(
+        self, position_id: str, *, stop_loss: float | None, take_profit: float | None
+    ) -> None:
+        self.db.execute(
+            "UPDATE paper_positions SET stop_loss = COALESCE(?, stop_loss), "
+            "take_profit = COALESCE(?, take_profit), updated_at = ? WHERE position_id = ?",
+            (stop_loss, take_profit, utc_now().isoformat(), position_id),
+        )
+
+    def update_mark(self, position_id: str, mark_price: float) -> None:
+        self.db.execute(
+            "UPDATE paper_positions SET mark_price = ?, updated_at = ? WHERE position_id = ?",
+            (mark_price, utc_now().isoformat(), position_id),
+        )
+
+    def reduce_quantity(self, position_id: str, remaining: float) -> None:
+        self.db.execute(
+            "UPDATE paper_positions SET quantity = ?, updated_at = ? WHERE position_id = ?",
+            (remaining, utc_now().isoformat(), position_id),
+        )
+
+    def close_position(
+        self,
+        position_id: str,
+        *,
+        exit_price: float,
+        realized_pnl: float,
+        exit_reason: str,
+    ) -> None:
+        now = utc_now().isoformat()
+        self.db.execute(
+            """
+            UPDATE paper_positions
+               SET status = 'CLOSED', exit_price = ?, realized_pnl = ?, exit_reason = ?,
+                   closed_at = ?, updated_at = ?
+             WHERE position_id = ?
+            """,
+            (exit_price, realized_pnl, exit_reason, now, now, position_id),
+        )
+
+    def closed_positions(self, limit: int = 200) -> list[dict[str, Any]]:
+        return self.db.query(
+            "SELECT * FROM paper_positions WHERE status = 'CLOSED' ORDER BY closed_at DESC LIMIT ?",
+            (limit,),
+        )
+
+
 class Repositories:
     """Bundle handed to every component that needs persistence."""
 
@@ -631,6 +795,7 @@ class Repositories:
         self.reconciliations = ReconciliationLog(db)
         self.daily = DailyStatsRepository(db)
         self.equity = EquityRepository(db)
+        self.paper = PaperRepository(db)
 
     @property
     def healthy(self) -> bool:

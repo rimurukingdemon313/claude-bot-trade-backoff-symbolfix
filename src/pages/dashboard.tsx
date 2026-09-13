@@ -29,6 +29,7 @@ import { api, fmt, type Snapshot } from "@/lib/api";
 import { Badge, Card, cn } from "@/components/dashboard/primitives";
 import {
   AccountPanel,
+  ModeBanner,
   HealthPanel,
   HistoryPanel,
   JournalPanel,
@@ -150,7 +151,9 @@ export default function Dashboard() {
             <div className="min-w-0">
               <h1 className="truncate text-sm font-semibold">SMC Trading Bot</h1>
               <p className="truncate text-[11px] text-slate-500">
-                {demoVerified ? "TradeLocker DEMO — verified" : "Environment not verified"}
+                {demoVerified
+                ? `TradeLocker DEMO · ${health?.paper ? "paper" : "live orders"}`
+                : "Environment not verified"}
               </p>
             </div>
           </div>
@@ -214,6 +217,8 @@ export default function Dashboard() {
             </div>
           </Card>
         )}
+
+        <ModeBanner health={health} />
 
         {tab === "overview" && (
           <>

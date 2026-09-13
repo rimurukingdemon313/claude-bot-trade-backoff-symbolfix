@@ -48,14 +48,47 @@ serving a dead trading process.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full map.
 
+## Execution modes
+
+| `TRADING_MODE` | Behaviour |
+| --- | --- |
+| `paper` (default) | Orders are **simulated** against live broker prices. Nothing is sent to TradeLocker. |
+| `demo_live` | Real orders on your TradeLocker **DEMO** account. |
+
+Paper mode is not a separate code path with its own bugs — it is the real
+path with the last inch replaced. Market data, the SMC engine, scoring, the
+risk engine, execution intents, the idempotency guard, position management
+and reconciliation all run identically, so a paper run is evidence about the
+live path. Fills are modelled pessimistically (cross the spread, pay
+slippage, stops slip further, both-levels-touched resolves as the stop,
+commission per lot).
+
+There is no third value. LIVE is not a mode this build has.
+
 ## Quick start
 
 ```sh
 npm install
 cp .env.example .env      # then fill in your TradeLocker DEMO credentials
-npm run build             # build the dashboard
-npm start                 # starts the bot + dashboard on :5000
+
+# 1. Verify the account BEFORE trading anything. Read-only.
+python3 -m bot.doctor
+
+# 2. Build and run (paper mode by default).
+npm run build
+npm start                 # bot + dashboard on :5000
 ```
+
+### Verify your account first
+
+`python3 -m bot.doctor` connects to your real DEMO account and reports, per
+check, exactly what it found: whether DEMO verification passes, which
+history endpoint shape your broker uses, whether each instrument exposes a
+usable contract size and lot step, whether the currency conversion path
+resolves, and whether the profit floor is reachable at your equity. It is
+read-only — it never places, modifies or closes an order.
+
+Run it before every deployment and after any broker-side change.
 
 Run the bot alone (no dashboard):
 
@@ -66,8 +99,15 @@ python3 -m bot.service
 Run the test suite:
 
 ```sh
-python3 -m pytest         # 280+ tests, no network required
+python3 -m pytest         # 379 tests, no network required
 npm run typecheck
+```
+
+Backtest and validate against your broker's own history:
+
+```sh
+python3 -m bot.backtest --symbol EURUSD --bars 3000 --monte-carlo
+python3 -m bot.backtest --symbol EURUSD --walk-forward --folds 3
 ```
 
 ## Documentation
@@ -79,6 +119,7 @@ npm run typecheck
 | [RISK_MANAGEMENT.md](docs/RISK_MANAGEMENT.md) | Position sizing maths, limits, the $50 objective |
 | [EXECUTION_ENGINE.md](docs/EXECUTION_ENGINE.md) | Idempotency, reconciliation, crash recovery |
 | [DEPLOYMENT.md](docs/DEPLOYMENT.md) | Railway setup, environment, persistence |
+| [PAPER_TRADING.md](docs/PAPER_TRADING.md) | Paper mode, the doctor, and the path to live demo orders |
 | [TESTING.md](docs/TESTING.md) | What is tested and how to extend it |
 | [SECURITY.md](docs/SECURITY.md) | Threat model and hardening |
 | [CLAUDE.md](CLAUDE.md) | Permanent project rules for anyone (human or AI) changing this code |

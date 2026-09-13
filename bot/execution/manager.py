@@ -45,6 +45,21 @@ class ManagementAction:
         }
 
 
+def _stop_is_behind_market(direction: str, stop: float, price: float, buffer: float) -> bool:
+    """Is this stop still on the protective side of the current price?
+
+    A broker rejects a stop that is already through the market, and a
+    simulator that accepts one closes the position instantly at what looks
+    like break-even. Either way the move is wrong: if price has retraced
+    back to entry after touching 1R, there is no valid break-even stop to
+    place and the correct action is to leave the original stop alone.
+    """
+
+    if direction == "BUY":
+        return stop < price - buffer
+    return stop > price + buffer
+
+
 #: R comparisons use a small tolerance. Price arithmetic in floating point
 #: makes an exact 1.0R land at 0.9999999999999556, which would silently
 #: skip the break-even move at precisely the level it is meant to fire.
@@ -99,7 +114,13 @@ def plan_actions(
                 or (position.direction == "SELL" and position.stop_loss <= entry)
             )
         )
-        if not already_safe:
+        # Only if the break-even level is still behind the market. Price can
+        # retrace to entry between polls, and a stop placed through the
+        # market is rejected live and fills instantly in simulation.
+        placeable = _stop_is_behind_market(
+            position.direction, target_stop, price, risk * 0.02
+        )
+        if not already_safe and placeable:
             actions.append(
                 ManagementAction(
                     "MOVE_STOP",
@@ -137,7 +158,9 @@ def plan_actions(
             (position.direction == "BUY" and trail_stop > position.stop_loss)
             or (position.direction == "SELL" and trail_stop < position.stop_loss)
         )
-        if improves:
+        if improves and _stop_is_behind_market(
+            position.direction, trail_stop, price, risk * 0.02
+        ):
             actions.append(
                 ManagementAction(
                     "MOVE_STOP",

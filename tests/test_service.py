@@ -433,3 +433,101 @@ def test_health_reports_the_closed_market_without_calling_it_a_fault(orchestrato
     assert market["ok"] is True
     assert market["open"] is not None
     assert health["marketClosed"] == (not market["open"])
+
+
+# -- the contract size lives behind a second call -------------------------
+#
+# A correctly configured GATESFX account produced "no symbol produced an
+# executable candidate" on every scan, with every symbol reporting
+# "instrument 'EURUSD.R' does not expose a contract size". The account was
+# fine: the account's instrument LIST is a directory — id, name, type,
+# routes — and carries no contract size at all. The size is one request
+# away, and sizing was reading only the directory.
+
+
+def directory_broker(config, *, with_size: bool, detail: dict | None = None):
+    """A broker whose instrument directory may or may not carry the size."""
+
+    broker = TradeLockerBroker(config)
+    broker._account_meta = {"currency": "USD"}
+    record = {
+        "name": "EURUSD.R",
+        "tradableInstrumentId": 278,
+        "routes": [{"id": 10, "type": "TRADE"}, {"id": 11, "type": "INFO"}],
+    }
+    if with_size:
+        record["contractSize"] = 100_000
+    broker._instruments_raw = [record]
+    broker._instrument_cache_at = float("inf")
+
+    calls: list[tuple[str, dict]] = []
+
+    def fake_get(path, query=None):
+        calls.append((path, dict(query or {})))
+        return {"d": detail or {}}
+
+    broker.get = fake_get  # type: ignore[assignment]
+    return broker, calls
+
+
+def test_the_contract_size_is_fetched_from_the_instrument_detail(config):
+    broker, calls = directory_broker(
+        config,
+        with_size=False,
+        detail={"contractSize": 100_000, "tickSize": 0.00001, "digits": 5},
+    )
+
+    spec = broker.instrument("EURUSD")
+
+    assert spec.contract_size == 100_000
+    assert spec.broker_name == "EURUSD.R"
+    assert calls, "the detail endpoint was never called"
+    path, query = calls[0]
+    assert path == "/trade/instruments/278"
+    assert query.get("routeId") == 11, "the INFO route identifies the instrument"
+
+
+def test_no_second_call_is_made_when_the_directory_already_has_the_size(config):
+    """One request per symbol is worth paying; two is not."""
+
+    broker, calls = directory_broker(config, with_size=True)
+    spec = broker.instrument("EURUSD")
+
+    assert spec.contract_size == 100_000
+    assert calls == [], "the detail call must be skipped when the size is already known"
+
+
+def test_a_size_still_missing_after_the_detail_call_is_refused(config):
+    """Guessing it would mis-size every order on the instrument."""
+
+    broker, _ = directory_broker(config, with_size=False, detail={"tickSize": 0.00001})
+    with pytest.raises(BrokerRejected, match="does not expose a contract size"):
+        broker.instrument("EURUSD")
+
+
+def test_the_refusal_names_the_fields_the_broker_actually_returned(config):
+    """The first version said only that the field was absent, which cost a
+    deploy cycle to diagnose — exactly as the DEMO guard's message did."""
+
+    broker, _ = directory_broker(
+        config, with_size=False, detail={"tickSize": 0.00001, "marginRate": 0.02}
+    )
+    with pytest.raises(BrokerRejected) as excinfo:
+        broker.instrument("EURUSD")
+    assert "marginRate" in str(excinfo.value)
+    assert "tickSize" in str(excinfo.value)
+
+
+def test_a_failed_detail_lookup_travels_with_the_refusal(config):
+    """Otherwise the symbol is skipped for a reason nobody can see."""
+
+    from bot.errors import BrokerError
+
+    broker, _ = directory_broker(config, with_size=False)
+
+    def failing_get(path, query=None):
+        raise BrokerError("route 11 rejected the lookup")
+
+    broker.get = failing_get  # type: ignore[assignment]
+    with pytest.raises(BrokerRejected, match="route 11 rejected the lookup"):
+        broker.instrument("EURUSD")

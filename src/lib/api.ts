@@ -249,7 +249,9 @@ export const api = {
   setup: () => request<SetupReport>("/api/setup"),
   doctor: () => request<DoctorReport>("/api/doctor"),
   journal: (limit = 60) =>
-    request<{ status: Status; data: any[]; histogram: any[] }>(`/api/journal?limit=${limit}`),
+    request<{ status: Status; data: any[]; histogram: any[]; blockers: any[] }>(
+      `/api/journal?limit=${limit}`,
+    ),
   setScanning: (enabled: boolean) =>
     request<{ enabled: boolean }>("/api/control/scanning", {
       method: "POST",

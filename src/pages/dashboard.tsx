@@ -33,6 +33,7 @@ import {
   DoctorPanel,
   HealthPanel,
   HistoryPanel,
+  BlockersPanel,
   JournalPanel,
   ModeBanner,
   PerformancePanel,
@@ -253,6 +254,7 @@ export default function Dashboard() {
             <HealthPanel health={health} />
             {setup.data?.ready && <ConfigurationPanel setup={setup.data} />}
             <DoctorPanel />
+            <BlockersPanel blockers={journal.data?.blockers ?? []} />
             <JournalPanel
               rows={journal.data?.data ?? []}
               histogram={journal.data?.histogram ?? []}

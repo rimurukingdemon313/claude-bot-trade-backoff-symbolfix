@@ -912,6 +912,57 @@ export function DoctorPanel() {
 
 // -- journal ---------------------------------------------------------------
 
+/**
+ * The ranked causes of NO TRADE.
+ *
+ * "Why is it not trading?" is the question every operator of a selective
+ * system eventually asks, and the honest answer is a measurement, not an
+ * opinion. A stage histogram says SMC/NO_SETUP and explains nothing; the
+ * top row here names the binding constraint, which is usually one thing
+ * and is usually fixable.
+ */
+export function BlockersPanel({ blockers }: { blockers: any[] }) {
+  return (
+    <Card
+      title="Why no trade"
+      subtitle="The last 7 days of rejections, ranked by cause"
+    >
+      {!blockers?.length ? (
+        <Empty>
+          Nothing rejected yet. Once the bot has scanned a few sessions, the reasons it stood
+          aside are counted here.
+        </Empty>
+      ) : (
+        <ul className="space-y-2">
+          {blockers.map((entry, index) => (
+            <li key={index}>
+              <div className="flex items-baseline justify-between gap-2 text-[11px]">
+                <span className="truncate text-slate-300">{entry.reason}</span>
+                <span className="shrink-0 tabular-nums text-slate-500">
+                  {entry.count} · {Math.round((entry.share ?? 0) * 100)}%
+                </span>
+              </div>
+              <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-slate-800">
+                <div
+                  className={cn("h-full rounded-full", index === 0 ? "bg-amber-500" : "bg-slate-600")}
+                  style={{ width: `${Math.max(2, Math.round((entry.share ?? 0) * 100))}%` }}
+                />
+              </div>
+              <p className="mt-0.5 text-[10px] uppercase tracking-wide text-slate-600">
+                {entry.stage}
+              </p>
+            </li>
+          ))}
+        </ul>
+      )}
+      <p className="mt-4 text-[11px] text-slate-500">
+        A high count is not a fault. NO TRADE is the expected result — this only shows which
+        filter is doing the work, so any change is made against evidence rather than a hunch.
+      </p>
+    </Card>
+  );
+}
+
 export function JournalPanel({ rows, histogram }: { rows: any[]; histogram: any[] }) {
   return (
     <Card

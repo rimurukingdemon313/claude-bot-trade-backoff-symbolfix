@@ -470,11 +470,17 @@ def profit_floor_feasibility(config: "TradingConfig", equity: float) -> dict[str
             f"close this gap."
         )
     elif demanding:
+        # Name the lever. An operator told only that setups are being
+        # filtered cannot tell whether that is the strategy or the
+        # configuration — and here it is the configuration, by arithmetic.
+        affordable = max_risk * min_rr
         reason = (
             f"reachable but demanding: at ${equity:,.2f} equity the ${max_risk:,.2f} risk ceiling "
             f"needs a setup worth 1:{required_rr:.1f} R:R to clear the ${floor:,.2f} floor, above "
-            f"the 1:{min_rr:g} minimum. Ordinary setups will be filtered out; expect NO TRADE most "
-            f"days until equity reaches about ${comfortable_equity:,.2f}."
+            f"the 1:{min_rr:g} minimum. Expect NO TRADE most days. Three honest ways out, and "
+            f"raising risk is not one of them: grow equity to about ${comfortable_equity:,.2f}, "
+            f"set OPPORTUNITY_MINIMUM_PROFIT to ${affordable:,.0f} or less to accept what this "
+            f"account can actually produce, or accept the low frequency as the cost of the floor."
         )
     else:
         reason = (
@@ -503,7 +509,29 @@ def profit_floor_feasibility(config: "TradingConfig", equity: float) -> dict[str
 #: base a feasibility promise on.
 ATTAINABLE_RISK_REWARD_CEILING = 10.0
 
-DEFAULT_SYMBOLS = ("EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCHF", "XAUUSD")
+#: The instruments scanned when TRADED_SYMBOLS is not set.
+#:
+#: Breadth is the one honest way to see more setups: each symbol is an
+#: independent chance for structure to line up, and none of it touches
+#: risk. Per-trade risk, the portfolio cap, the concurrent-position limit
+#: and the correlation check are unchanged and still bound total exposure
+#: — twenty symbols do not mean twenty positions.
+#:
+#: Everything here is liquid enough for the spread check to pass during
+#: London and New York. Exotics are deliberately absent: a wide spread
+#: eats a 1:2 setup before structure gets a say.
+DEFAULT_SYMBOLS = (
+    # Majors.
+    "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCHF", "USDCAD", "NZDUSD",
+    # EUR crosses.
+    "EURGBP", "EURJPY", "EURAUD", "EURCHF", "EURCAD",
+    # GBP crosses.
+    "GBPJPY", "GBPAUD", "GBPCAD", "GBPCHF",
+    # Commodity and JPY crosses.
+    "AUDJPY", "AUDCAD", "AUDNZD", "NZDJPY", "CADJPY", "CHFJPY",
+    # Metals.
+    "XAUUSD",
+)
 
 
 def load_config(env: Mapping[str, str] | None = None) -> TradingConfig:

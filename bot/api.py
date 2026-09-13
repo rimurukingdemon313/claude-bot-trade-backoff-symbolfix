@@ -158,6 +158,9 @@ class DashboardApi:
             "status": "LIVE",
             "data": self.repos.journal.recent(limit=limit, symbol=symbol),
             "histogram": self.repos.journal.rejection_histogram(days=30),
+            # Ranked causes, not stages. "Why is it not trading?" is the
+            # question actually being asked, and only this answers it.
+            "blockers": self.repos.journal.blocker_histogram(days=7),
         }
 
     # -- system ----------------------------------------------------------

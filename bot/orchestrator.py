@@ -201,7 +201,7 @@ class Orchestrator:
         self.last_demo = verification
         if not verification.verified:
             self.startup_error = f"DEMO verification failed: {verification.reason}"
-            self.kill_switch.trip("ENVIRONMENT_MISMATCH", verification.reason or "")
+            self._trip_for_failed_verification(verification)
             return {"ok": False, "error": self.startup_error, "demo": verification.as_dict()}
 
         if not self.repos.db.ping():
@@ -382,7 +382,7 @@ class Orchestrator:
             self.last_demo = verification
             result.demo = verification
             if not verification.verified:
-                self.kill_switch.trip("ENVIRONMENT_MISMATCH", verification.reason or "")
+                self._trip_for_failed_verification(verification)
                 result.skipped_reason = f"DEMO verification failed: {verification.reason}"
                 result.finished_at = utc_now().isoformat()
                 self.last_scan = result
@@ -604,6 +604,38 @@ class Orchestrator:
                 return None
             return AIValidation(False, (f"AI validation unavailable: {exc}",), None)
         return validate_ai_decision(decision, candidate, config)
+
+    def _trip_for_failed_verification(self, verification: DemoVerification) -> None:
+        """Block trading, and latch only when latching is warranted.
+
+        Every failure here stops trading — the caller returns before any
+        order path, and `health()` reports the system as not permitted to
+        trade. The question this answers is narrower: does a human have to
+        come and unlock it afterwards?
+
+        Only a contradiction earns that. "The broker says this is LIVE", or
+        "the configured URL is not a demo endpoint", is a misconfiguration
+        that must not be cleared by a passing retry, so it trips the
+        SAFETY-class ENVIRONMENT_MISMATCH which requires a force clear.
+
+        A broker we could not reach is a different thing entirely. Treating
+        it as a mismatch latched the kill switch through a transient
+        outage and kept the bot down long after the broker returned, with
+        a message accusing the account of being live when nobody had
+        managed to ask it. That failure is loud in health and in the
+        scan result; it does not need a human with a key.
+        """
+
+        if verification.contradicted:
+            self.kill_switch.trip("ENVIRONMENT_MISMATCH", verification.reason or "")
+            return
+        log_event(
+            "SAFETY",
+            f"DEMO status could not be verified, so no trade will be placed: "
+            f"{verification.reason}",
+            severity="critical",
+            **verification.as_dict(),
+        )
 
     def _ai_gate_status(self) -> dict[str, Any]:
         """Whether the AI stage can ever pass.

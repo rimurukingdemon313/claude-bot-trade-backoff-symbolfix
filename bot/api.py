@@ -20,6 +20,7 @@ from .clock import utc_now
 from .config import TradingConfig, profit_floor_feasibility
 from .errors import BotError
 from .orchestrator import Orchestrator
+from .smc.sessions import is_forex_weekend
 from .storage.repositories import Repositories
 from .version import version_stamp
 
@@ -33,11 +34,34 @@ class DashboardApi:
 
     # -- account ---------------------------------------------------------
 
+    def _offline(self, exc: BotError) -> dict[str, Any]:
+        """An unreadable value, with the most useful reason available.
+
+        Rule 6 forbids inventing the number, so the gap stays. But over a
+        weekend the broker's own error is "circuit open after 5 consecutive
+        failures", which reads like a system falling over when the truth is
+        that the market is shut. Naming that first turns an alarm into a
+        fact.
+        """
+
+        closed = is_forex_weekend(utc_now())
+        return {
+            "status": "OFFLINE",
+            "error": (
+                "the forex market is closed for the weekend, so the broker is not "
+                f"answering ({exc})"
+                if closed
+                else str(exc)
+            ),
+            "marketClosed": closed,
+            "data": None,
+        }
+
     def account(self) -> dict[str, Any]:
         try:
             state = self.orchestrator.broker.account_state()
         except BotError as exc:
-            return {"status": "OFFLINE", "error": str(exc), "data": None}
+            return self._offline(exc)
 
         daily = self.repos.daily.today()
         peak = self.repos.equity.peak_equity() or state.equity
@@ -70,7 +94,7 @@ class DashboardApi:
         try:
             positions = self.orchestrator.broker.positions()
         except BotError as exc:
-            return {"status": "OFFLINE", "error": str(exc), "data": []}
+            return {**self._offline(exc), "data": []}
         return {"status": "LIVE", "data": self.orchestrator.manager.track(positions)}
 
     def trade_history(self, limit: int = 100) -> dict[str, Any]:
@@ -175,7 +199,7 @@ class DashboardApi:
         try:
             state = self.orchestrator.build_account_state()
         except BotError as exc:
-            return {"status": "OFFLINE", "error": str(exc), "data": None}
+            return self._offline(exc)
         limits = self.config.risk
         return {
             "status": "LIVE",

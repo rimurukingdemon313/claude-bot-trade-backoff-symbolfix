@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import dataclasses
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 
-from bot.execution.manager import ManagementAction, plan_actions, r_multiple
+from bot.execution.manager import (
+    ManagementAction,
+    PositionManager,
+    plan_actions,
+    r_multiple,
+)
 from bot.marketdata.provider import MarketDataProvider
 from bot.scoring.scorer import WEIGHTS, SetupScorer, tier_rank
 from bot.smc.engine import SmcEngine
@@ -255,3 +260,110 @@ def test_trailing_never_proposes_a_stop_through_the_market(config):
     for action in actions:
         if action.kind == "MOVE_STOP" and action.stop_loss is not None:
             assert action.stop_loss < 1.1101
+
+
+# -- why a position has no live price -------------------------------------
+#
+# Over a weekend every open position reads "—" for the current price. That
+# is correct (rule 6: never invent a value) but it is indistinguishable
+# from a dead broker feed, and an operator watching a healthy bot on a
+# Sunday reasonably concludes it is broken. The gap has to say why.
+
+
+def open_position(**overrides):
+    from datetime import timezone
+
+    from bot.broker.models import BrokerPosition
+
+    defaults = dict(
+        position_id="p1",
+        symbol="AUDCHF",
+        instrument_id=1,
+        direction="BUY",
+        quantity=0.17,
+        entry_price=0.58559,
+        stop_loss=0.58430,
+        take_profit=0.58775,
+        unrealized_pnl=-9.57,
+        opened_at=datetime(2026, 9, 11, 23, 0, tzinfo=timezone.utc),
+    )
+    return BrokerPosition(**{**defaults, **overrides})
+
+
+class MuteBroker(FakeBroker):
+    """A broker that cannot price anything — a shut market, or a dead feed.
+
+    The two look identical from here, which is exactly the ambiguity the
+    status string has to resolve.
+    """
+
+    def quote(self, spec):
+        from bot.errors import BrokerError
+
+        raise BrokerError("instrument is not quoting")
+
+
+def test_a_weekend_gap_is_labelled_as_a_closed_market(config, repos):
+    from datetime import timezone
+
+    sunday = datetime(2026, 9, 13, 14, 4, tzinfo=timezone.utc)
+    assert sunday.strftime("%A") == "Sunday"
+
+    manager = PositionManager(config, MuteBroker(), repos)
+    row = manager.track([open_position()], now=sunday)[0]
+
+    assert row["currentPrice"] is None  # still never invented
+    assert row["priceStatus"] == "market closed for the weekend"
+
+
+def test_a_weekday_gap_is_labelled_as_a_broker_failure(config, repos):
+    from datetime import timezone
+
+    wednesday = datetime(2026, 9, 9, 14, 4, tzinfo=timezone.utc)
+    assert wednesday.strftime("%A") == "Wednesday"
+
+    manager = PositionManager(config, MuteBroker(), repos)
+    row = manager.track([open_position(symbol="EURUSD")], now=wednesday)[0]
+
+    assert row["currentPrice"] is None
+    assert "not quoting" in row["priceStatus"]
+    assert "weekend" not in row["priceStatus"]
+
+
+def test_a_priced_position_says_so(config, repos, broker):
+    from datetime import timezone
+
+    wednesday = datetime(2026, 9, 9, 14, 4, tzinfo=timezone.utc)
+    row = PositionManager(config, broker, repos).track(
+        [open_position(symbol="EURUSD")], now=wednesday
+    )[0]
+
+    assert row["currentPrice"] is not None
+    assert row["priceStatus"] == "live"
+
+
+def test_a_position_we_did_not_open_is_marked_untracked(config, repos, broker):
+    from datetime import timezone
+
+    wednesday = datetime(2026, 9, 9, 14, 4, tzinfo=timezone.utc)
+    row = PositionManager(config, broker, repos).track(
+        [open_position(symbol="EURUSD")], now=wednesday
+    )[0]
+
+    # No trade row of ours exists for it, so its blank risk/grade fields are
+    # explained rather than looking like data that failed to load.
+    assert row["tracked"] is False
+    assert row["riskAmount"] is None
+
+
+def test_tracking_reads_the_injected_clock_not_the_wall(config, repos, broker):
+    """Rule 10: pin the clock. Duration must follow `now`, not real time."""
+
+    from datetime import timezone
+
+    opened = datetime(2026, 9, 9, 12, 0, tzinfo=timezone.utc)
+    rows = PositionManager(config, broker, repos).track(
+        [open_position(symbol="EURUSD", opened_at=opened)],
+        now=datetime(2026, 9, 9, 14, 0, tzinfo=timezone.utc),
+    )
+    assert rows[0]["durationMinutes"] == pytest.approx(120.0)

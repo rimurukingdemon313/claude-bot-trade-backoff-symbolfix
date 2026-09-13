@@ -76,12 +76,22 @@ class DemoVerification:
     checked_at: str
     evidence: tuple[str, ...]
     reason: str | None = None
+    #: True when a source positively identified a LIVE environment, or the
+    #: URL is not a demo endpoint. False when verification simply could not
+    #: be performed — the broker was unreachable, or returned nothing.
+    #:
+    #: Both block trading. They must not be confused, because only the
+    #: first is evidence of a dangerous misconfiguration: a broker outage
+    #: that latches a safety trip needs a human to force-clear it, and the
+    #: bot then stays down long after the broker came back.
+    contradicted: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "verified": self.verified,
             "urlOk": self.url_ok,
             "accountOk": self.account_ok,
+            "contradicted": self.contradicted,
             "checkedAt": self.checked_at,
             "evidence": list(self.evidence),
             "reason": self.reason,
@@ -149,13 +159,16 @@ def _classify(
 def _broker_signal(
     account: Mapping[str, Any] | None,
     claims: Mapping[str, Any] | None,
-) -> tuple[bool, str]:
+) -> tuple[bool, str, bool]:
     """Signal 2: does the broker itself identify this as DEMO?
 
-    Positive evidence from either the account record or the signed access
-    token satisfies it. A LIVE marker in either one fails it outright,
-    even when the other says demo — a contradiction is resolved the safe
-    way, never the convenient one.
+    Returns `(ok, evidence, contradicted)`. Positive evidence from either
+    the account record or the signed access token satisfies it. A LIVE
+    marker in either one fails it outright, even when the other says demo —
+    a contradiction is resolved the safe way, never the convenient one.
+
+    `contradicted` separates "the broker says LIVE" from "the broker said
+    nothing". Both fail; only the first is a misconfiguration.
     """
 
     account_verdict, account_evidence = _classify(
@@ -163,16 +176,21 @@ def _broker_signal(
     )
     claims_verdict, claims_evidence = _classify("token", claims, _CLAIM_FIELDS)
 
-    for verdict, evidence in ((account_verdict, account_evidence), (claims_verdict, claims_evidence)):
+    sources = ((account_verdict, account_evidence), (claims_verdict, claims_evidence))
+    for verdict, evidence in sources:
         if verdict is False:
-            return False, evidence
-    for verdict, evidence in ((account_verdict, account_evidence), (claims_verdict, claims_evidence)):
+            return False, evidence, True
+    for verdict, evidence in sources:
         if verdict is True:
-            return True, evidence
+            return True, evidence, False
 
-    return False, (
-        "neither the account record nor the access token positively identifies this as a "
-        f"DEMO account ({account_evidence}; {claims_evidence})"
+    return (
+        False,
+        (
+            "neither the account record nor the access token positively identifies this as a "
+            f"DEMO account ({account_evidence}; {claims_evidence})"
+        ),
+        False,
     )
 
 
@@ -189,8 +207,11 @@ def verify_demo(
     from ..clock import utc_now
 
     url_ok, url_evidence = _url_signal(config.broker.base_url)
-    account_ok, account_evidence = _broker_signal(account, claims)
+    account_ok, account_evidence, account_contradicted = _broker_signal(account, claims)
     verified = bool(url_ok and account_ok and config.require_demo)
+    # A non-demo URL is our own misconfiguration and always a contradiction;
+    # an absent broker is not.
+    contradicted = bool(account_contradicted or not url_ok)
 
     reason = None
     if not verified:
@@ -208,6 +229,7 @@ def verify_demo(
         checked_at=(now_iso or utc_now().isoformat()),
         evidence=(url_evidence, account_evidence),
         reason=reason,
+        contradicted=contradicted and not verified,
     )
     log_event(
         "SAFETY",

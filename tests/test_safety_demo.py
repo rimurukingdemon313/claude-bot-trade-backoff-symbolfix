@@ -230,3 +230,79 @@ def test_operational_trips_clear_normally(repos):
     switch = KillSwitch(repos.state)
     switch.trip("DAILY_LOSS_LIMIT", "")
     assert switch.clear().active is False
+
+
+# -- a broker outage is not a misconfiguration ----------------------------
+#
+# Both stop trading. Only one should need a human with a key afterwards.
+# Conflating them latched ENVIRONMENT_MISMATCH through a transient outage
+# and kept the bot down long after the broker came back, under a message
+# accusing the account of being live when nobody had managed to ask it.
+
+
+def test_an_unreachable_broker_is_not_reported_as_a_contradiction(config):
+    verification = verify_demo(config, None, stage="test", claims=None)
+    assert verification.verified is False  # still fails closed
+    assert verification.contradicted is False
+
+
+def test_a_silent_account_record_is_not_a_contradiction(config):
+    verification = verify_demo(config, GATESFX_ACCOUNT, stage="test", claims={})
+    assert verification.verified is False
+    assert verification.contradicted is False
+
+
+@pytest.mark.parametrize(
+    "account", [{"accountType": "LIVE"}, {"type": "real"}, {"isDemo": False}]
+)
+def test_a_live_broker_answer_is_a_contradiction(config, account):
+    verification = verify_demo(config, account, stage="test")
+    assert verification.verified is False
+    assert verification.contradicted is True
+
+
+def test_a_non_demo_url_is_a_contradiction_whatever_the_broker_says(config):
+    """Our own misconfiguration, and never softened by a retry."""
+
+    unknown = dataclasses.replace(
+        config, broker=dataclasses.replace(config.broker, base_url="https://api.example.com/v1")
+    )
+    verification = verify_demo(unknown, {"accountType": "DEMO"}, stage="test")
+    assert verification.contradicted is True
+
+
+def test_a_broker_outage_does_not_latch_the_kill_switch(orchestrator, broker, repos):
+    """The bug this exists to prevent: an outage that needs a manual unlock."""
+
+    broker.metadata = None  # broker answered nothing
+    broker.claims = None
+    orchestrator.startup()
+
+    state = orchestrator.kill_switch.read()
+    assert state.active is False, f"latched on an outage: {state.reason}"
+    assert orchestrator.startup_complete is False  # and trading is still blocked
+
+
+def test_a_live_account_does_latch_the_kill_switch(orchestrator, broker):
+    broker.metadata = {"accountType": "LIVE"}
+    broker.claims = None
+    orchestrator.startup()
+
+    state = orchestrator.kill_switch.read()
+    assert state.active is True
+    assert state.reason == "ENVIRONMENT_MISMATCH"
+    # SAFETY class: a plain clear must not release it.
+    assert orchestrator.kill_switch.clear().active is True
+
+
+def test_the_bot_recovers_by_itself_once_the_broker_returns(orchestrator, broker):
+    """No human in the loop: the outage clears, the next startup succeeds."""
+
+    broker.metadata = None
+    orchestrator.startup()
+    assert orchestrator.startup_complete is False
+
+    broker.metadata = {"id": "1", "accNum": "1", "accountType": "DEMO", "currency": "USD"}
+    orchestrator.startup()
+    assert orchestrator.startup_complete is True
+    assert orchestrator.kill_switch.read().active is False

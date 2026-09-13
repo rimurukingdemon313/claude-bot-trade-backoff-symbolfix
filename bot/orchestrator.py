@@ -44,7 +44,7 @@ from .safety.demo_guard import DemoVerification, verify_demo
 from .safety.kill_switch import KillSwitch
 from .scoring.scorer import SetupScore, SetupScorer, tier_rank
 from .smc.engine import SetupCandidate, SmcEngine, SmcResult
-from .smc.sessions import classify_session
+from .smc.sessions import classify_session, is_forex_weekend
 from .storage.repositories import Repositories
 
 STATE_TRADING_ENABLED = "trading_enabled"
@@ -201,7 +201,7 @@ class Orchestrator:
         self.last_demo = verification
         if not verification.verified:
             self.startup_error = f"DEMO verification failed: {verification.reason}"
-            self.kill_switch.trip("ENVIRONMENT_MISMATCH", verification.reason or "")
+            self._trip_for_failed_verification(verification)
             return {"ok": False, "error": self.startup_error, "demo": verification.as_dict()}
 
         if not self.repos.db.ping():
@@ -372,6 +372,22 @@ class Orchestrator:
             self.last_scan = result
             return result
 
+        # Before anything touches the network. The risk engine and the SMC
+        # engine both refuse a closed market anyway, but they refuse it
+        # after a full round of broker calls — and a broker in weekend
+        # maintenance answers those with errors, five of which open the
+        # circuit and leave the dashboard reading OFFLINE all weekend for
+        # no reason. There is nothing to analyse on a shut market; asking
+        # is the bug.
+        if is_forex_weekend(moment):
+            result.skipped_reason = (
+                "the forex market is closed for the weekend (it reopens Sunday 22:00 UTC)"
+            )
+            result.finished_at = utc_now().isoformat()
+            self.last_scan = result
+            log_event("SCAN", result.skipped_reason, event_id=scan_id, source=source)
+            return result
+
         try:
             verification = verify_demo(
                 self.config,
@@ -382,7 +398,7 @@ class Orchestrator:
             self.last_demo = verification
             result.demo = verification
             if not verification.verified:
-                self.kill_switch.trip("ENVIRONMENT_MISMATCH", verification.reason or "")
+                self._trip_for_failed_verification(verification)
                 result.skipped_reason = f"DEMO verification failed: {verification.reason}"
                 result.finished_at = utc_now().isoformat()
                 self.last_scan = result
@@ -605,6 +621,38 @@ class Orchestrator:
             return AIValidation(False, (f"AI validation unavailable: {exc}",), None)
         return validate_ai_decision(decision, candidate, config)
 
+    def _trip_for_failed_verification(self, verification: DemoVerification) -> None:
+        """Block trading, and latch only when latching is warranted.
+
+        Every failure here stops trading — the caller returns before any
+        order path, and `health()` reports the system as not permitted to
+        trade. The question this answers is narrower: does a human have to
+        come and unlock it afterwards?
+
+        Only a contradiction earns that. "The broker says this is LIVE", or
+        "the configured URL is not a demo endpoint", is a misconfiguration
+        that must not be cleared by a passing retry, so it trips the
+        SAFETY-class ENVIRONMENT_MISMATCH which requires a force clear.
+
+        A broker we could not reach is a different thing entirely. Treating
+        it as a mismatch latched the kill switch through a transient
+        outage and kept the bot down long after the broker returned, with
+        a message accusing the account of being live when nobody had
+        managed to ask it. That failure is loud in health and in the
+        scan result; it does not need a human with a key.
+        """
+
+        if verification.contradicted:
+            self.kill_switch.trip("ENVIRONMENT_MISMATCH", verification.reason or "")
+            return
+        log_event(
+            "SAFETY",
+            f"DEMO status could not be verified, so no trade will be placed: "
+            f"{verification.reason}",
+            severity="critical",
+            **verification.as_dict(),
+        )
+
     def _ai_gate_status(self) -> dict[str, Any]:
         """Whether the AI stage can ever pass.
 
@@ -711,12 +759,21 @@ class Orchestrator:
         """
 
         moment = now or utc_now()
+        # A shut market cannot move a stop into profit or invalidate a
+        # structure, and it cannot be asked for a price either. Polling it
+        # every 30 seconds only feeds the circuit breaker.
+        if is_forex_weekend(moment):
+            return {
+                "ok": True,
+                "skipped": "the forex market is closed for the weekend",
+                "actions": [],
+            }
         try:
             positions = self.broker.positions()
         except BotError as exc:
             return {"ok": False, "error": str(exc)}
 
-        rows = self.manager.track(positions)
+        rows = self.manager.track(positions, now=moment)
         actions = []
         for position, row in zip(positions, rows):
             trade = self.repos.trades.by_position_id(position.position_id)
@@ -819,9 +876,20 @@ class Orchestrator:
             },
             "reconcile": self.last_reconcile.as_dict() if self.last_reconcile else None,
         }
+        market_closed = is_forex_weekend(utc_now())
+        components["market"] = {
+            "ok": True,  # a shut market is a schedule, never a fault
+            "open": not market_closed,
+            "note": (
+                "the forex market is closed for the weekend; it reopens Sunday 22:00 UTC"
+                if market_closed
+                else None
+            ),
+        }
         critical_ok = database_ok and components["broker"]["ok"] and demo_ok and self.startup_complete
         return {
             "ok": critical_ok,
+            "marketClosed": market_closed,
             "tradingPermitted": critical_ok and not kill.active and self.trading_enabled,
             "mode": self.config.mode.value,
             "paper": self.config.is_paper,

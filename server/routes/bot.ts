@@ -14,6 +14,9 @@ const router: IRouter = Router();
 
 const READ_ROUTES = [
   "/health",
+  // Read-only account verification, always masked. Given a longer budget
+  // than the other reads because it makes a few dozen broker calls.
+  "/doctor",
   "/account",
   "/positions",
   "/history",
@@ -35,13 +38,15 @@ function offlinePayload(path: string, error: unknown) {
   };
 }
 
+const SLOW_READS: Record<string, number> = { "/doctor": 180_000 };
+
 for (const path of READ_ROUTES) {
   router.get(`/api${path}`, async (req: Request, res: Response) => {
     const query = req.originalUrl.includes("?")
       ? `?${req.originalUrl.split("?").slice(1).join("?")}`
       : "";
     try {
-      return res.json(await botClient.get(`/api${path}${query}`));
+      return res.json(await botClient.get(`/api${path}${query}`, SLOW_READS[path]));
     } catch (error) {
       const status = error instanceof BotUnavailableError ? 503 : 502;
       req.log?.error?.({ err: error }, `bot proxy failed for ${path}`);

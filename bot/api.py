@@ -214,6 +214,45 @@ class DashboardApi:
             "generatedAt": utc_now().isoformat(),
         }
 
+    def doctor_report(self, *, symbols: list[str] | None = None) -> dict[str, Any]:
+        """Run the read-only account verification and return it masked.
+
+        Exposed so the report can be read from a browser — including a phone —
+        without a terminal. Always sanitized: balances, equity, margin and the
+        account identifier are masked, while the integration detail that
+        actually diagnoses a problem (history endpoint shape, instrument
+        specifications, suffix naming, conversion paths, candle validation) is
+        preserved.
+
+        Slow by nature: it makes a few dozen read calls to the broker.
+        """
+
+        from . import doctor
+
+        try:
+            # Reuse the live client so this does not open a second session.
+            # In paper mode `broker` is the wrapper, so unwrap to the real one.
+            live = getattr(self.orchestrator.broker, "live", self.orchestrator.broker)
+            report = doctor.run(
+                self.config, symbols or list(self.config.symbols)[:3], broker=live
+            )
+        except Exception as exc:  # noqa: BLE001 - a diagnostic must always answer
+            return {
+                "verdict": "FAIL",
+                "checks": [
+                    {
+                        "check": "doctor",
+                        "status": "FAIL",
+                        "detail": f"the verification itself failed to run: {exc}",
+                        "data": {},
+                    }
+                ],
+            }
+        payload = report.sanitized().as_dict()
+        payload["text"] = report.sanitized().render()
+        payload["failed"] = [check.name for check in report.failed]
+        return payload
+
     # -- commands --------------------------------------------------------
 
     def set_scanning(self, enabled: bool) -> dict[str, Any]:

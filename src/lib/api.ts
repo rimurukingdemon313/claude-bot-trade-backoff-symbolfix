@@ -182,6 +182,13 @@ export type Health = {
   upcomingNews: any;
 };
 
+export type DoctorReport = {
+  verdict: 'PASS' | 'WARN' | 'FAIL';
+  text: string;
+  failed: string[];
+  checks: Array<{ check: string; status: string; detail: string }>;
+};
+
 export type Snapshot = {
   account: Envelope<Account>;
   positions: Envelope<Position[]>;
@@ -210,6 +217,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   snapshot: () => request<Snapshot>("/api/snapshot"),
+  doctor: () => request<DoctorReport>("/api/doctor"),
   journal: (limit = 60) =>
     request<{ status: Status; data: any[]; histogram: any[] }>(`/api/journal?limit=${limit}`),
   setScanning: (enabled: boolean) =>

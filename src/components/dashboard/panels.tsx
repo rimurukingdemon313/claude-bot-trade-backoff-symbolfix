@@ -2,9 +2,11 @@
  * Dashboard panels. Presentation only — no calculation of trading values.
  */
 
-import { type ReactNode } from "react";
+import { type ReactNode, useState } from "react";
 import {
+  api,
   type Account,
+  type DoctorReport,
   type Envelope,
   type HistoryRow,
   type Health,
@@ -650,6 +652,97 @@ export function HealthPanel({ health }: { health: Health | undefined }) {
             ))}
           </ul>
         </div>
+      )}
+    </Card>
+  );
+}
+
+/**
+ * Broker verification, in the UI.
+ *
+ * The same read-only check as `python3 -m bot.doctor`, reachable without a
+ * terminal — which is the only way some operators can reach it at all. The
+ * report is masked server-side, so Copy produces something safe to share.
+ */
+export function DoctorPanel() {
+  const [report, setReport] = useState<DoctorReport | null>(null);
+  const [running, setRunning] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  const runCheck = async () => {
+    setRunning(true);
+    setError(null);
+    setCopied(false);
+    try {
+      setReport(await api.doctor());
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'verification failed');
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const copy = async () => {
+    if (!report?.text) return;
+    try {
+      await navigator.clipboard.writeText(report.text);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 4000);
+    } catch {
+      setError('Could not copy automatically — select the text below manually.');
+    }
+  };
+
+  const tone =
+    report?.verdict === 'PASS' ? 'good' : report?.verdict === 'WARN' ? 'warn' : 'bad';
+
+  return (
+    <Card
+      title="Verify broker account"
+      subtitle="Read-only. Never places an order. Balances are masked, so the report is safe to share."
+      action={report ? <Badge tone={tone}>{report.verdict}</Badge> : undefined}
+    >
+      <div className="flex flex-wrap gap-2">
+        <button
+          type="button"
+          onClick={runCheck}
+          disabled={running}
+          className="inline-flex min-h-[38px] items-center rounded-lg border border-slate-700 bg-slate-900 px-3 text-xs font-medium text-slate-200 hover:bg-slate-800 disabled:opacity-50"
+        >
+          {running ? 'Checking…' : 'Run verification'}
+        </button>
+        {report?.text && (
+          <button
+            type="button"
+            onClick={copy}
+            className="inline-flex min-h-[38px] items-center rounded-lg border border-sky-800 bg-sky-950 px-3 text-xs font-medium text-sky-200 hover:bg-sky-900"
+          >
+            {copied ? 'Copied' : 'Copy report'}
+          </button>
+        )}
+      </div>
+
+      {running && (
+        <p className="mt-3 text-[11px] text-slate-500">
+          This makes a few dozen read calls to the broker and can take up to a minute.
+        </p>
+      )}
+      {error && (
+        <p className="mt-3 rounded-lg border border-rose-900 bg-rose-950/50 p-2 text-xs text-rose-300">
+          {error}
+        </p>
+      )}
+      {report && report.failed.length > 0 && (
+        <p className="mt-3 rounded-lg border border-amber-900 bg-amber-950/40 p-2 text-xs text-amber-300">
+          <span className="font-semibold">Failing: </span>
+          {report.failed.join(', ')}
+        </p>
+      )}
+      {report?.text && (
+        <pre className="mt-3 max-h-96 overflow-auto rounded-lg border border-slate-800 bg-slate-950 p-3 text-[10px] leading-relaxed text-slate-300">
+          {report.text}
+        </pre>
       )}
     </Card>
   );

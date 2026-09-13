@@ -206,3 +206,42 @@ def test_graceful_shutdown_does_not_touch_positions(service, broker):
     service.shutdown()
     assert broker.closures == [], "a deploy must never close a live position"
     assert len(broker.positions()) == 1
+
+
+# -- the doctor over HTTP --------------------------------------------------
+
+
+def test_the_doctor_report_is_readable_over_http(base_url):
+    """Exposed so the account can be verified from a browser — including a
+    phone — without a terminal."""
+
+    status, payload = get(f"{base_url}/api/doctor")
+    assert status == 200
+    assert "verdict" in payload
+    assert "text" in payload, "a human-readable rendering must be included"
+    assert isinstance(payload.get("checks"), list)
+
+
+def test_the_doctor_endpoint_masks_account_figures(base_url, service, monkeypatch):
+    """It is a read endpoint, so it must never publish a balance."""
+
+    monkeypatch.setenv("TRADELOCKER_PASSWORD", "hunter2-very-secret-value")
+    _, payload = get(f"{base_url}/api/doctor")
+    body = json.dumps(payload)
+    assert "hunter2-very-secret-value" not in body
+    balance = service.broker.account_state().balance
+    # 10000.0 formatted any of the ways the report might render it.
+    for rendering in (f"{balance:.2f}", f"{balance:,.2f}", str(balance)):
+        assert rendering not in body, f"account balance leaked as {rendering!r}"
+
+
+def test_the_doctor_endpoint_answers_even_when_the_broker_is_broken(base_url, service):
+    from bot.errors import BrokerError
+
+    def explode(*args, **kwargs):
+        raise BrokerError("total outage")
+
+    service.orchestrator.broker.ensure_session = explode  # type: ignore[assignment]
+    status, payload = get(f"{base_url}/api/doctor")
+    assert status == 200, "a diagnostic must always answer"
+    assert payload["verdict"] == "FAIL"

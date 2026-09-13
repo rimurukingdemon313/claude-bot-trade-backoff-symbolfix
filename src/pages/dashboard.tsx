@@ -29,6 +29,7 @@ import { api, fmt, type Snapshot } from "@/lib/api";
 import { Badge, Card, cn } from "@/components/dashboard/primitives";
 import {
   AccountPanel,
+  DoctorPanel,
   ModeBanner,
   HealthPanel,
   HistoryPanel,
@@ -237,6 +238,7 @@ export default function Dashboard() {
         {tab === "system" && (
           <>
             <HealthPanel health={health} />
+            <DoctorPanel />
             <JournalPanel
               rows={journal.data?.data ?? []}
               histogram={journal.data?.histogram ?? []}

@@ -76,6 +76,9 @@ class BotService:
             ),
             mode=self.config.mode.value,
         )
+        if _env_flag("STARTUP_DOCTOR", default=True):
+            self._log_startup_verification()
+
         result = self.orchestrator.startup()
         if not result.get("ok"):
             # Start the API anyway: the dashboard must be able to SHOW the
@@ -108,6 +111,43 @@ class BotService:
         )
         self.scheduler.add("maintenance", 3600, self._safe(self._maintenance))
         self.scheduler.start()
+
+    def _log_startup_verification(self) -> None:
+        """Print the read-only account verification into the platform logs.
+
+        This exists because the people running this do not always have a
+        terminal: on a hosted deploy the logs are the only window. Everything
+        printed is masked, and a failure here never blocks startup — the
+        health endpoint remains the authority on whether trading is allowed.
+
+        Set STARTUP_DOCTOR=false to skip it.
+        """
+
+        if not self.config.broker.configured:
+            log_event(
+                "STARTUP",
+                "skipping account verification: TradeLocker credentials are not set",
+                severity="warning",
+            )
+            return
+        try:
+            report = self.api.doctor_report()
+        except Exception as exc:  # noqa: BLE001 - never block startup
+            log_event(
+                "STARTUP", f"account verification could not run: {exc}", severity="warning"
+            )
+            return
+
+        log_event(
+            "STARTUP",
+            f"account verification: {report.get('verdict')}",
+            severity="info" if report.get("verdict") == "PASS" else "error",
+            failed=report.get("failed", []),
+        )
+        # Plain lines, not JSON: this is meant to be read in a log viewer.
+        for line in str(report.get("text", "")).split("\n"):
+            if line.strip():
+                print(line, flush=True)
 
     def _reconcile_and_retry_startup(self) -> None:
         """Periodic reconcile, and a retry of startup if it never completed.
@@ -155,6 +195,13 @@ class BotService:
 # --------------------------------------------------------------------------
 # HTTP surface
 # --------------------------------------------------------------------------
+
+
+def _env_flag(name: str, *, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
 def make_handler(service: BotService) -> type[BaseHTTPRequestHandler]:
@@ -224,6 +271,9 @@ def make_handler(service: BotService) -> type[BaseHTTPRequestHandler]:
                 ),
                 "/api/risk": api.risk_state,
                 "/api/snapshot": api.snapshot,
+                "/api/doctor": lambda: api.doctor_report(
+                    symbols=[s for s in query.get("symbol", []) if s] or None
+                ),
             }
             handler = routes.get(parsed.path)
             if handler is None:

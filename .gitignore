@@ -49,11 +49,25 @@ Thumbs.db
 .local/
 
 # Runtime data — generated at runtime, never committed.
-# TradeLocker is the live account/trade data source now (no local
-# ledger); economic_calendar_cache.json is a runtime fetch cache.
+# data/ holds the SQLite fallback database and the news-feed cache.
+# Neither is source, and bot.db contains real account history.
+data/
+*.db
+*.db-wal
+*.db-shm
 economic_calendar_cache.json
 __pycache__/
 *.pyc
+.pytest_cache/
+
+# Secrets. Never commit a filled-in environment file.
+.env
+.env.*
+!.env.example
+
+# Output of scripts/setup.sh / bot.doctor. Masked with --safe, but it still
+# describes a specific account — not source.
+doctor-report.txt
 
 # Build output generated at container startup by index.js (esbuild bundles
 # server/index.ts into here) — not source, should not be committed.

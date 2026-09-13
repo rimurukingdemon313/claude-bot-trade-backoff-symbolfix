@@ -1,14 +1,20 @@
-# Live trading path: no third-party packages required.
-# market_data.py, risk_engine.py, tradelocker_client.py, tradelocker_state.py,
-# and analysis_engine/* use only the Python standard library (json, urllib,
-# dataclasses, datetime, etc).
+# The trading bot runs on the Python standard library alone. Everything in
+# bot/ — the broker client, SMC engine, risk engine, executor, scheduler and
+# HTTP service — uses only json, urllib, sqlite3, threading, dataclasses and
+# friends. That is deliberate: fewer dependencies means less to break on a
+# platform redeploy and a smaller supply-chain surface for a process that
+# holds broker credentials.
 #
-# The two packages below are used ONLY by
-# diagnose_tradelocker_connection.py — a one-time startup diagnostic (see
-# server/index.ts) that tries several HTTP approaches against TradeLocker
-# and logs which one gets past its Cloudflare protection. They are not
-# imported anywhere in the live trading path. Remove this file's pip
-# install step (and these two lines) once that Cloudflare-block issue is
-# confirmed fixed and the diagnostic is no longer needed.
-requests
-tradelocker
+# The one optional dependency:
+#
+#   psycopg  — required ONLY when DATABASE_URL is set (PostgreSQL
+#              persistence). Railway's filesystem is ephemeral, so the kill
+#              switch, daily-loss counters and execution intents must live
+#              in Postgres for a production deployment. If DATABASE_URL is
+#              set and this driver is missing, the bot refuses to start
+#              rather than silently downgrading to storage that cannot
+#              survive the next deploy.
+psycopg[binary]>=3.1,<4
+
+# Test-only. Not imported by anything in bot/.
+pytest>=8.0

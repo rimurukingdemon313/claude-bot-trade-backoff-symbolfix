@@ -1,3 +1,11 @@
+/**
+ * Production entry point.
+ *
+ * Builds the frontend if it is missing, bundles the TypeScript server, then
+ * hands over to server/index.ts — which starts the Python bot process and
+ * serves the dashboard.
+ */
+
 import { execFile } from "node:child_process";
 import { existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
@@ -12,10 +20,8 @@ const bundledServer = path.join(runtimeDirectory, "server.mjs");
 
 async function ensureFrontendBuilt() {
   if (existsSync(frontendEntry)) return;
-  await execFileAsync("npm", ["run", "build"], {
-    cwd: root,
-    maxBuffer: 4 * 1024 * 1024,
-  });
+  console.log("dist/ is missing; building the frontend...");
+  await execFileAsync("npm", ["run", "build"], { cwd: root, maxBuffer: 8 * 1024 * 1024 });
 }
 
 async function start() {
@@ -26,15 +32,16 @@ async function start() {
     bundle: true,
     format: "esm",
     platform: "node",
+    target: "node20",
     packages: "external",
     outfile: bundledServer,
     sourcemap: true,
-    logLevel: "info",
+    logLevel: "warning",
   });
   await import(`${bundledServer}?startup=${Date.now()}`);
 }
 
 start().catch((error) => {
-  console.error("Unable to start standalone paper-trading app:", error);
+  console.error("Unable to start the trading application:", error);
   process.exitCode = 1;
 });

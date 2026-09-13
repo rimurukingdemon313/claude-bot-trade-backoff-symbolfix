@@ -433,3 +433,210 @@ def test_health_reports_the_closed_market_without_calling_it_a_fault(orchestrato
     assert market["ok"] is True
     assert market["open"] is not None
     assert health["marketClosed"] == (not market["open"])
+
+
+# -- the contract size lives behind a second call -------------------------
+#
+# A correctly configured GATESFX account produced "no symbol produced an
+# executable candidate" on every scan, with every symbol reporting
+# "instrument 'EURUSD.R' does not expose a contract size". The account was
+# fine: the account's instrument LIST is a directory — id, name, type,
+# routes — and carries no contract size at all. The size is one request
+# away, and sizing was reading only the directory.
+
+
+def directory_broker(config, *, with_size: bool, detail: dict | None = None):
+    """A broker whose instrument directory may or may not carry the size."""
+
+    broker = TradeLockerBroker(config)
+    broker._account_meta = {"currency": "USD"}
+    record = {
+        "name": "EURUSD.R",
+        "tradableInstrumentId": 278,
+        "routes": [{"id": 10, "type": "TRADE"}, {"id": 11, "type": "INFO"}],
+    }
+    if with_size:
+        record["contractSize"] = 100_000
+    broker._instruments_raw = [record]
+    broker._instrument_cache_at = float("inf")
+
+    calls: list[tuple[str, dict]] = []
+
+    def fake_get(path, query=None):
+        calls.append((path, dict(query or {})))
+        return {"d": detail or {}}
+
+    broker.get = fake_get  # type: ignore[assignment]
+    return broker, calls
+
+
+def test_the_contract_size_is_fetched_from_the_instrument_detail(config):
+    broker, calls = directory_broker(
+        config,
+        with_size=False,
+        detail={"contractSize": 100_000, "tickSize": 0.00001, "digits": 5},
+    )
+
+    spec = broker.instrument("EURUSD")
+
+    assert spec.contract_size == 100_000
+    assert spec.broker_name == "EURUSD.R"
+    assert calls, "the detail endpoint was never called"
+    path, query = calls[0]
+    assert path == "/trade/instruments/278"
+    assert query.get("routeId") == 11, "the INFO route identifies the instrument"
+
+
+def test_no_second_call_is_made_when_the_directory_already_has_the_size(config):
+    """One request per symbol is worth paying; two is not."""
+
+    broker, calls = directory_broker(config, with_size=True)
+    spec = broker.instrument("EURUSD")
+
+    assert spec.contract_size == 100_000
+    assert calls == [], "the detail call must be skipped when the size is already known"
+
+
+def test_a_size_still_missing_after_the_detail_call_is_refused(config):
+    """Guessing it would mis-size every order on the instrument."""
+
+    broker, _ = directory_broker(config, with_size=False, detail={"tickSize": 0.00001})
+    with pytest.raises(BrokerRejected, match="does not expose a contract size"):
+        broker.instrument("EURUSD")
+
+
+def test_the_refusal_names_the_fields_the_broker_actually_returned(config):
+    """The first version said only that the field was absent, which cost a
+    deploy cycle to diagnose — exactly as the DEMO guard's message did."""
+
+    broker, _ = directory_broker(
+        config, with_size=False, detail={"tickSize": 0.00001, "marginRate": 0.02}
+    )
+    with pytest.raises(BrokerRejected) as excinfo:
+        broker.instrument("EURUSD")
+    assert "marginRate" in str(excinfo.value)
+    assert "tickSize" in str(excinfo.value)
+
+
+def test_a_failed_detail_lookup_travels_with_the_refusal(config):
+    """Otherwise the symbol is skipped for a reason nobody can see."""
+
+    from bot.errors import BrokerError
+
+    broker, _ = directory_broker(config, with_size=False)
+
+    def failing_get(path, query=None):
+        raise BrokerError("route 11 rejected the lookup")
+
+    broker.get = failing_get  # type: ignore[assignment]
+    with pytest.raises(BrokerRejected, match="route 11 rejected the lookup"):
+        broker.instrument("EURUSD")
+
+
+# -- brands rename the /trade/config panels -------------------------------
+#
+# working_orders and order_history failed on an account where
+# authentication, instruments and account state all worked. The code asked
+# for one spelling of a panel key and treated its absence as fatal, so a
+# single renamed key took out the whole table.
+
+
+def config_broker(config, trade_config: dict, payload: dict):
+    broker = TradeLockerBroker(config)
+    broker._account_meta = {"currency": "USD"}
+    broker._trade_config = trade_config
+
+    def fake_get(path, query=None):
+        return payload
+
+    broker.get = fake_get  # type: ignore[assignment]
+    return broker
+
+
+COLUMNS = {"columns": [{"id": "id"}, {"id": "side"}, {"id": "qty"}, {"id": "status"}]}
+
+
+def test_orders_decode_under_an_alternative_panel_name(config):
+    """openOrdersConfig is the same table by another name."""
+
+    broker = config_broker(
+        config,
+        {"openOrdersConfig": COLUMNS},
+        {"orders": [["1", "buy", 0.1, "working"]]},
+    )
+    orders = broker.orders()
+    assert len(orders) == 1
+    assert orders[0].order_id == "1"
+    assert orders[0].direction == "BUY"
+    assert orders[0].quantity == pytest.approx(0.1)
+
+
+def test_rows_that_already_name_their_fields_are_not_zipped(config):
+    """Zipping column names over a dict iterates its KEYS.
+
+    That produces confident nonsense — {"id": "qty", "qty": "side"} — which
+    every reader downstream would treat as real data.
+    """
+
+    broker = config_broker(
+        config,
+        {"ordersConfig": COLUMNS},
+        {"orders": [{"id": "77", "side": "sell", "qty": 0.25, "status": "working"}]},
+    )
+    orders = broker.orders()
+    assert orders[0].order_id == "77"
+    assert orders[0].direction == "SELL"
+    assert orders[0].quantity == pytest.approx(0.25)
+
+
+def test_an_undescribed_panel_names_what_the_broker_did_describe(config):
+    """So the next operator does not have to guess the brand's spelling."""
+
+    broker = config_broker(
+        config,
+        {"somethingElseConfig": COLUMNS, "positionsConfig": COLUMNS},
+        {"orders": [["1", "buy", 0.1, "working"]]},
+    )
+    with pytest.raises(Exception) as excinfo:
+        broker.orders()
+    message = str(excinfo.value)
+    assert "somethingElseConfig" in message and "positionsConfig" in message
+
+
+def test_an_empty_table_is_empty_not_an_error(config):
+    """No open orders is the normal case, not a decoding failure."""
+
+    broker = config_broker(config, {}, {"orders": []})
+    assert broker.orders() == []
+
+
+# -- the response envelope ------------------------------------------------
+
+
+def test_the_envelope_is_stripped_even_without_a_status_field():
+    """Requiring both keys left readers holding {"d": {...}}.
+
+    Every one of them then found none of the keys it wanted and reported
+    an empty table — indistinguishable from an account with nothing in it.
+    """
+
+    unwrap = TradeLockerBroker._unwrap
+    assert unwrap({"s": "ok", "d": {"orders": [1]}}) == {"orders": [1]}
+    assert unwrap({"d": {"orders": [1]}}) == {"orders": [1]}
+
+
+def test_a_payload_that_merely_contains_a_d_field_is_left_alone():
+    """Unwrapping it would discard the rest of a legitimate response."""
+
+    payload = {"d": 5, "orders": [1]}
+    assert TradeLockerBroker._unwrap(payload) == payload
+
+
+def test_a_non_ok_status_is_refused_rather_than_unwrapped():
+    with pytest.raises(BrokerRejected, match="returned status"):
+        TradeLockerBroker._unwrap({"s": "error", "d": {}, "errmsg": "rejected"})
+
+
+def test_a_plain_payload_passes_through():
+    assert TradeLockerBroker._unwrap({"orders": [1]}) == {"orders": [1]}
+    assert TradeLockerBroker._unwrap([1, 2]) == [1, 2]

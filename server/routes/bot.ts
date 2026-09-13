@@ -81,6 +81,25 @@ for (const [route, target] of Object.entries(COMMAND_ROUTES)) {
 }
 
 /**
+ * Does the token this browser holds actually work?
+ *
+ * The lock panel used to report UNLOCKED on the strength of having a
+ * string in localStorage, which it had never shown to anyone. A green
+ * badge over an unset server token is worse than no badge at all — the
+ * operator learns the truth from a failed scan, which is the moment they
+ * least want a surprise (project rule 6: never present a value that looks
+ * like information when it is not).
+ *
+ * Reaching here at all means commandAuth already accepted the request, so
+ * the answer is simply yes. A wrong token gets 401 and an unconfigured
+ * server gets 503, both from the middleware, and both are what the panel
+ * needs to distinguish.
+ */
+router.post("/api/control/verify", (_req: Request, res: Response) => {
+  return res.json({ ok: true });
+});
+
+/**
  * Container health. Reports the BOT's health, not merely "Express is up" —
  * a green check on a process that cannot trade would be worse than no
  * check at all.

@@ -25,7 +25,7 @@ from typing import Any, Mapping, Sequence
 
 from ..clock import from_epoch, utc_now
 from ..config import TradingConfig
-from ..errors import BrokerAuthError, BrokerError, BrokerRejected, ConfigError
+from ..errors import BotError, BrokerAuthError, BrokerError, BrokerRejected, ConfigError
 from ..observability import log_event
 from .history import HistoryFetcher, TIMEFRAME_MINUTES
 from .symbols import (
@@ -76,6 +76,35 @@ def normalize_symbol(raw: str) -> str:
     """
 
     return alphanumeric(raw)
+
+
+#: Top-level keys that mark a TradeLocker response envelope rather than
+#: data. A payload whose keys are all drawn from this set (plus "d") is
+#: the envelope and gets unwrapped; anything else is returned as-is.
+ENVELOPE_KEYS = frozenset({"s", "d", "errmsg", "errMsg", "errCode", "msg", "status"})
+
+
+#: `/trade/config` panel keys, by the name this code asks for.
+#:
+#: TradeLocker brands rename these. Asking for one spelling and treating
+#: its absence as a fatal error meant a single renamed key took out the
+#: whole table: working_orders and order_history failed on a GATESFX
+#: account where authentication, instruments and account state all worked.
+PANEL_ALIASES: dict[str, tuple[str, ...]] = {
+    "accountDetailsConfig": (
+        "accountDetailsConfig",
+        "accountDetailConfig",
+        "accountConfig",
+    ),
+    "positionsConfig": ("positionsConfig", "openPositionsConfig"),
+    "ordersConfig": ("ordersConfig", "openOrdersConfig", "workingOrdersConfig"),
+    "ordersHistoryConfig": (
+        "ordersHistoryConfig",
+        "orderHistoryConfig",
+        "ordersHistoryColumnConfig",
+        "historyConfig",
+    ),
+}
 
 
 #: Claim values larger than this are not environment markers; refusing
@@ -148,6 +177,7 @@ class TradeLockerBroker:
         self._trade_config: dict[str, Any] | None = None
         self._instrument_cache: dict[str, InstrumentSpec] = {}
         self._instrument_cache_at = 0.0
+        self._instrument_detail_error: str | None = None
         self._instruments_raw: list[dict[str, Any]] = []
         self._account_meta: dict[str, Any] | None = None
         self.instrument_cache_ttl = 3600.0
@@ -299,11 +329,26 @@ class TradeLockerBroker:
 
     @staticmethod
     def _unwrap(payload: Any) -> Any:
-        if isinstance(payload, Mapping) and "s" in payload and "d" in payload:
-            if payload.get("s") != "ok":
-                raise BrokerRejected(f"TradeLocker returned status {payload.get('s')}: {payload}")
-            return payload["d"]
-        return payload
+        """Strip TradeLocker's {"s": "ok", "d": ...} envelope.
+
+        Requiring BOTH keys was too strict: a brand that returns the
+        envelope without the status field left every reader looking at
+        {"d": {...}} and finding none of the keys it wanted — an empty
+        table indistinguishable from an account with nothing in it.
+
+        Unwrapping only when the remaining top-level keys are all envelope
+        metadata keeps a legitimate payload that happens to contain a field
+        called "d" from being mistaken for one.
+        """
+
+        if not isinstance(payload, Mapping) or "d" not in payload:
+            return payload
+        status = payload.get("s")
+        if status is not None and str(status).lower() != "ok":
+            raise BrokerRejected(f"TradeLocker returned status {status}: {payload}")
+        if set(payload) - ENVELOPE_KEYS:
+            return payload
+        return payload["d"]
 
     def get(self, path: str, query: Mapping[str, Any] | None = None) -> Any:
         self.ensure_session()
@@ -330,14 +375,54 @@ class TradeLockerBroker:
         return self._trade_config
 
     def _columns(self, panel: str) -> list[str]:
-        config = self.trade_config().get(panel, {})
-        return [str(column.get("id")) for column in config.get("columns", [])]
+        """Column ids for a panel, under whichever name this brand uses.
 
-    def _decode(self, rows: Sequence[Sequence[Any]], panel: str) -> list[dict[str, Any]]:
+        `/trade/config` describes each table's columns, and brands do not
+        agree on the keys. A hardcoded name that a brand happens not to use
+        takes down the whole table — which is what made working_orders and
+        order_history fail on an account where everything else worked.
+        """
+
+        config = self.trade_config()
+        for name in PANEL_ALIASES.get(panel, (panel,)):
+            panel_config = config.get(name)
+            if isinstance(panel_config, Mapping):
+                columns = [
+                    str(column.get("id"))
+                    for column in panel_config.get("columns", [])
+                    if isinstance(column, Mapping) and column.get("id")
+                ]
+                if columns:
+                    return columns
+        return []
+
+    def _decode(self, rows: Sequence[Any], panel: str) -> list[dict[str, Any]]:
+        """Turn positional rows into dictionaries.
+
+        Some brands return objects here instead of arrays. Zipping column
+        names over a dictionary iterates its KEYS and produces confident
+        nonsense — a row of {"id": "qty", "qty": "side"} that every reader
+        downstream would treat as real. A row that already names its fields
+        is passed through untouched.
+        """
+
+        if not rows:
+            return []
+        if all(isinstance(row, Mapping) for row in rows):
+            return [dict(row) for row in rows]
+
         columns = self._columns(panel)
         if not columns:
-            raise BrokerError(f"TradeLocker /trade/config did not describe {panel}")
-        return [dict(zip(columns, row)) for row in rows]
+            described = ", ".join(sorted(str(key) for key in self.trade_config())) or "nothing"
+            raise BrokerError(
+                f"TradeLocker /trade/config did not describe {panel}. "
+                f"It described: {described}. This account's brand uses different panel "
+                "names; the alias list in PANEL_ALIASES needs the one it uses."
+            )
+        return [
+            dict(zip(columns, row)) if not isinstance(row, Mapping) else dict(row)
+            for row in rows
+        ]
 
     # -- account ---------------------------------------------------------
 
@@ -432,6 +517,61 @@ class TradeLockerBroker:
         self._instrument_cache[key] = spec
         return spec
 
+    def _instrument_details(
+        self, raw: Mapping[str, Any], route_id: int | None
+    ) -> dict[str, Any]:
+        """The instrument's full specification.
+
+        The account's instrument LIST is a directory — id, name, type,
+        routes — and on TradeLocker it carries no contract size at all.
+        Sizing read from it alone found nothing and skipped every symbol,
+        which is how a correctly configured account produced "no symbol
+        produced an executable candidate" on every scan.
+
+        The size lives behind a second call, per instrument. It is fetched
+        once and cached with the spec, so this costs one request per symbol
+        per cache period rather than one per scan.
+
+        A failure here is never swallowed: a guessed contract size
+        mis-sizes every order on the instrument, which is worse than
+        skipping it.
+        """
+
+        self._instrument_detail_error = None
+        instrument_id = int(_num(_first(raw, "tradableInstrumentId", "id", default=0), 0) or 0)
+        if not instrument_id:
+            return dict(raw.get("details") or {})
+
+        query: dict[str, Any] = {"locale": "en"}
+        if route_id:
+            query["routeId"] = route_id
+        try:
+            response = self.get(f"/trade/instruments/{instrument_id}", query=query) or {}
+        except BotError as exc:
+            # Not swallowed: the caller reports "no contract size" and the
+            # reason the lookup failed travels with it, so this never
+            # becomes a symbol that is silently skipped for an unrelated
+            # cause. Broad on purpose — a missing credential and a rejected
+            # request both leave sizing unknowable, and unknowable is the
+            # thing the caller must refuse to guess past.
+            self._instrument_detail_error = str(exc)[:200]
+            log_event(
+                "BROKER",
+                f"instrument details unavailable for {raw.get('name')}: {exc}",
+                severity="warning",
+            )
+            return dict(raw.get("details") or {})
+
+        # TradeLocker wraps a single record in "d"; some brands do not.
+        payload = response.get("d") if isinstance(response.get("d"), Mapping) else response
+        if not isinstance(payload, Mapping):
+            return dict(raw.get("details") or {})
+        merged = dict(payload)
+        nested = merged.get("details")
+        if isinstance(nested, Mapping):
+            merged = {**merged, **nested}
+        return merged
+
     def _build_spec(self, symbol: str, raw: Mapping[str, Any]) -> InstrumentSpec:
         routes = raw.get("routes", []) or []
         trade_route = next((r for r in routes if str(r.get("type")).upper() == "TRADE"), None)
@@ -439,10 +579,36 @@ class TradeLockerBroker:
         if trade_route is None:
             raise BrokerRejected(f"instrument {symbol!r} exposes no TRADE route")
 
-        details = raw.get("details") or raw
-        contract_size = _num(
-            _first(details, "contractSize", "lotSize", "unitsPerLot", default=None), None
-        )
+        details: dict[str, Any] = {
+            **{k: v for k, v in raw.items() if k != "routes"},
+            **(raw.get("details") or {}),
+        }
+
+        def read_contract_size(source: Mapping[str, Any]) -> float | None:
+            return _num(
+                _first(
+                    source,
+                    "contractSize",
+                    "lotSize",
+                    "unitsPerLot",
+                    "contract_size",
+                    "lotsize",
+                    "unitSize",
+                    "notionalPerLot",
+                    default=None,
+                ),
+                None,
+            )
+
+        contract_size = read_contract_size(details)
+        if contract_size is None or contract_size <= 0:
+            # Only now is the second call worth making. Brands that put the
+            # size in the directory cost nothing extra; GATESFX does not,
+            # and without this every symbol was skipped for want of a field
+            # that exists one request away.
+            info_route_id = int(_num((info_route or {}).get("id"), 0) or 0) or None
+            details.update(self._instrument_details(raw, info_route_id))
+            contract_size = read_contract_size(details)
         tick_size = _num(_first(details, "tickSize", "minPriceIncrement", "pipSize", default=None), None)
         digits_raw = _first(details, "digits", "precision", "pricePrecision", default=None)
         digits = int(_num(digits_raw, 5) or 5)
@@ -452,9 +618,20 @@ class TradeLockerBroker:
         if contract_size is None or contract_size <= 0:
             # Refusing to guess is the whole point: an assumed contract
             # size silently mis-sizes every order on this instrument.
+            # Name what WAS returned. The previous message said only that
+            # the field was absent, which cost a full deploy cycle to
+            # diagnose — exactly as the DEMO guard's did.
+            seen = ", ".join(sorted(str(key) for key in details)) or "no fields"
+            why = getattr(self, "_instrument_detail_error", None)
             raise BrokerRejected(
-                f"instrument {symbol!r} does not expose a contract size; "
-                "position sizing cannot be computed safely and this symbol will be skipped"
+                f"instrument {symbol!r} does not expose a contract size; position sizing "
+                f"cannot be computed safely and this symbol will be skipped. "
+                + (
+                    f"The detail lookup failed: {why}. "
+                    if why
+                    else ""
+                )
+                + f"Fields the broker returned: {seen}"
             )
 
         broker_name = str(raw.get("name", symbol))

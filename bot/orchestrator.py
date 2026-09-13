@@ -986,7 +986,17 @@ class Orchestrator:
                 "backend": self.repos.db.backend,
                 "error": self.repos.db.last_error,
             },
-            "broker": {"ok": bool(broker_health.get("connected")), **broker_health},
+            "broker": {
+                "ok": bool(broker_health.get("connected")),
+                # A cooldown is the broker asking us to wait, not a fault.
+                "note": (
+                    f"rate limited by the broker; requests resume in "
+                    f"{broker_health['rateLimitedFor']:.0f}s"
+                    if broker_health.get("rateLimitedFor")
+                    else None
+                ),
+                **broker_health,
+            },
             "demo": {"ok": demo_ok, **(self.last_demo.as_dict() if self.last_demo else {})},
             "marketData": safe("marketData", lambda: {"ok": True, **self.market_data.health()}),
             "ai": safe("ai", lambda: {**self.ai.health(), **self._ai_gate_status()}),

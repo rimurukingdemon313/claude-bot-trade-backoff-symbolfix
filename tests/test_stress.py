@@ -438,7 +438,7 @@ def test_a_rate_limit_storm_is_bounded_and_never_hangs(monkeypatch):
 
     monkeypatch.setattr("urllib.request.urlopen", always_429)
     transport = HttpTransport(
-        timeout=1.0, max_attempts=4, throttle=Throttle(min_interval=0.0), sleeper=lambda _s: None
+        timeout=1.0, max_attempts=4, throttle=Throttle(min_interval=0.0, sleeper=lambda _s: None), sleeper=lambda _s: None
     )
     with pytest.raises(BrokerRateLimited):
         transport.request("GET", "http://x")
@@ -454,7 +454,7 @@ def test_a_rate_limit_storm_never_duplicates_a_write(monkeypatch):
 
     monkeypatch.setattr("urllib.request.urlopen", always_429)
     transport = HttpTransport(
-        timeout=1.0, max_attempts=6, throttle=Throttle(min_interval=0.0), sleeper=lambda _s: None
+        timeout=1.0, max_attempts=6, throttle=Throttle(min_interval=0.0, sleeper=lambda _s: None), sleeper=lambda _s: None
     )
     with pytest.raises(BrokerRateLimited):
         transport.request("POST", "http://x", body={"qty": 1})
@@ -470,7 +470,7 @@ def test_the_circuit_breaker_stops_a_scan_burning_its_budget(monkeypatch):
         timeout=1.0,
         max_attempts=1,
         circuit=CircuitBreaker(failure_threshold=3, reset_seconds=60),
-        throttle=Throttle(min_interval=0.0),
+        throttle=Throttle(min_interval=0.0, sleeper=lambda _s: None),
         sleeper=lambda _s: None,
     )
     for _ in range(3):

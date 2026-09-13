@@ -105,8 +105,12 @@ class BacktestResult:
         final = self.equity_curve[-1] if self.equity_curve else self.starting_balance
         stats["startingBalance"] = self.starting_balance
         stats["finalBalance"] = round(final, 2)
-        stats["returnPct"] = round(
-            (final - self.starting_balance) / self.starting_balance * 100, 2
+        # A percentage return on nothing is not zero, it is undefined —
+        # and dividing by it raised instead of saying so.
+        stats["returnPct"] = (
+            round((final - self.starting_balance) / self.starting_balance * 100, 2)
+            if self.starting_balance > 0
+            else None
         )
         stats["barsProcessed"] = self.bars_processed
         stats["setupsConsidered"] = self.setups_considered

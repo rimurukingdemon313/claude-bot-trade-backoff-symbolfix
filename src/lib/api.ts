@@ -229,17 +229,55 @@ export type Snapshot = {
   generatedAt: string;
 };
 
+/**
+ * The dashboard token, held only in this browser.
+ *
+ * It authenticates the controls that can resume or start trading. It is
+ * never sent anywhere but this deployment's own origin, and never logged.
+ * Storage can throw (private windows, blocked site data), so every access
+ * is guarded — a dashboard that crashes because it cannot read a
+ * preference is worse than one that simply asks again.
+ */
+const TOKEN_KEY = "dashboard_token";
+
+export function readToken(): string | null {
+  try {
+    return window.localStorage.getItem(TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function storeToken(token: string | null): void {
+  try {
+    if (token) window.localStorage.setItem(TOKEN_KEY, token);
+    else window.localStorage.removeItem(TOKEN_KEY);
+  } catch {
+    /* a session-only unlock is still better than refusing to work */
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const token = readToken();
   const response = await fetch(path, {
     ...init,
-    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { "X-Dashboard-Token": token } : {}),
+      ...(init?.headers ?? {}),
+    },
   });
   const text = await response.text();
   const payload = text ? JSON.parse(text) : {};
   if (!response.ok) {
-    const message =
-      (payload as { error?: string }).error ?? `${path} failed with ${response.status}`;
-    throw new Error(message);
+    const body = payload as { error?: string; code?: string };
+    const message = body.error ?? `${path} failed with ${response.status}`;
+    const error = new Error(message) as Error & { code?: string; status?: number };
+    // Carried so the caller can offer the unlock instead of only showing
+    // the refusal.
+    error.code = body.code;
+    error.status = response.status;
+    throw error;
   }
   return payload as T;
 }

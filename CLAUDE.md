@@ -173,3 +173,26 @@ which one runs. What may never vary with that selection:
 
 Record the strategy on every trade. Two modes with different targets and
 different frequencies must never be averaged into one performance number.
+
+## 15. The public layer is the one that needs the lock
+
+`DASHBOARD_TOKEN` is checked by the Node proxy, not only by the Python
+service behind it. Checking it solely on the internal hop protects nothing:
+the proxy is on the internet and was adding the token to every forwarded
+request, so knowing the hostname was enough to force-clear a SAFETY kill
+switch or start a scan that places a real order. Hostnames are not secrets
+— every certificate issued for one is published in a transparency log.
+
+The split is by DIRECTION, never by endpoint:
+
+- controls that can only reduce activity — trip the kill switch, pause
+  scanning — are never locked. An operator must be able to stop the bot
+  from any device, having lost anything, including the token.
+- controls that can resume, widen, or initiate require it.
+
+With no token configured, the second group is refused rather than left
+open, and the refusal names the variable. `tests/server/command-auth.test.mjs`
+drives this over real HTTP; it is not a claim about the source.
+
+Closed CORS is not a substitute. It stops a website driving the controls
+through a visitor's browser and does nothing about a direct request.

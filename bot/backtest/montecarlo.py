@@ -74,6 +74,13 @@ def monte_carlo(
     values = [float(value) for value in pnls]
     if len(values) < 10:
         return None
+    # `runs` reaches here from a CLI flag. Zero produced no samples at all
+    # and then crashed on max() of an empty sequence — a traceback where
+    # the honest answer is "this asked for nothing, so there is nothing to
+    # report" (project rule 6: an unanswerable question returns None with
+    # a reason, it does not blow up).
+    if runs < 1:
+        return None
 
     rng = random.Random(seed)
     ruin_level = starting_balance * ruin_fraction

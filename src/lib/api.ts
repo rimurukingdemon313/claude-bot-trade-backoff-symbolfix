@@ -305,6 +305,22 @@ export const api = {
     request<{ status: Status; data: any[]; histogram: any[]; blockers: any[] }>(
       `/api/journal?limit=${limit}`,
     ),
+  /**
+   * Ask the server whether the token this browser holds is accepted.
+   *
+   * Resolves to "ok" only on a real 200. "unset" means the deployment has
+   * no token configured, which is a different problem with a different
+   * fix than "wrong token", and the operator needs to be told which.
+   */
+  verifyToken: async (): Promise<"ok" | "wrong" | "unset"> => {
+    try {
+      await request<{ ok: boolean }>("/api/control/verify", { method: "POST", body: "{}" });
+      return "ok";
+    } catch (error) {
+      const code = (error as { code?: string }).code;
+      return code === "NO_TOKEN_CONFIGURED" ? "unset" : "wrong";
+    }
+  },
   strategy: () => request<{ status: Status; data: StrategyStatus }>("/api/strategy"),
   setStrategy: (strategy: string) =>
     request<{ status: Status; data: StrategyStatus }>("/api/control/strategy", {

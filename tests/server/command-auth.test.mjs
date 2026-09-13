@@ -118,6 +118,20 @@ describe("command surface authentication", () => {
     }
   });
 
+  it("answers the verify probe only for a good token", async () => {
+    // The lock panel reported UNLOCKED on the strength of holding a
+    // string it had never shown to anyone, over a deployment that had no
+    // token at all. This is the question it should have been asking.
+    const good = await post("/api/control/verify", {}, { "X-Dashboard-Token": TOKEN });
+    const bad = await post("/api/control/verify", {}, { "X-Dashboard-Token": "nope" });
+    const none = await post("/api/control/verify", {});
+
+    assert.equal(good.status, 200);
+    assert.equal(good.body.ok, true);
+    assert.equal(bad.status, 401);
+    assert.equal(none.status, 401);
+  });
+
   it("accepts the correct token, by either header", async () => {
     const bearer = await post("/api/control/scan", {}, { Authorization: `Bearer ${TOKEN}` });
     const direct = await post("/api/control/scan", {}, { "X-Dashboard-Token": TOKEN });
@@ -153,6 +167,17 @@ describe("with no token configured", () => {
     assert.equal(response.status, 503);
     assert.equal(body.code, "NO_TOKEN_CONFIGURED");
     assert.match(body.error, /DASHBOARD_TOKEN/, "the message must name the fix");
+  });
+
+  it("tells the probe the SERVER has no token, not that the token is wrong", async () => {
+    const response = await fetch(`${bareOrigin}/api/control/verify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Dashboard-Token": "anything" },
+      body: "{}",
+    });
+    const body = await response.json();
+    assert.equal(response.status, 503);
+    assert.equal(body.code, "NO_TOKEN_CONFIGURED");
   });
 
   it("still lets the operator stop the bot", async () => {

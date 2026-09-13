@@ -2,7 +2,7 @@
  * Dashboard panels. Presentation only — no calculation of trading values.
  */
 
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useState } from "react";
 import {
   api,
   type Account,
@@ -1099,25 +1099,70 @@ export function StrategyPanel({
  */
 export function UnlockPanel() {
   const [value, setValue] = useState("");
-  const [unlocked, setUnlocked] = useState(() => Boolean(readToken()));
+  const [state, setState] = useState<"checking" | "ok" | "wrong" | "unset" | "empty">(
+    () => (readToken() ? "checking" : "empty"),
+  );
   const [message, setMessage] = useState<string | null>(null);
+
+  // Asked of the server, never assumed. Holding a string is not the same
+  // as holding the right string, and the previous version could not tell
+  // the difference — it reported UNLOCKED over a deployment that had no
+  // token at all, and the operator found out from a failed scan.
+  const check = useCallback(async () => {
+    if (!readToken()) {
+      setState("empty");
+      return;
+    }
+    setState("checking");
+    setState(await api.verifyToken());
+  }, []);
+
+  useEffect(() => {
+    void check();
+  }, [check]);
+
+  const badge =
+    state === "ok"
+      ? { tone: "good" as const, label: "UNLOCKED" }
+      : state === "unset"
+        ? { tone: "bad" as const, label: "NO SERVER TOKEN" }
+        : state === "wrong"
+          ? { tone: "bad" as const, label: "WRONG TOKEN" }
+          : state === "checking"
+            ? { tone: "neutral" as const, label: "CHECKING" }
+            : { tone: "warn" as const, label: "LOCKED" };
 
   return (
     <Card
       title="Dashboard lock"
       subtitle="Controls that can start or resume trading need the deployment token"
-      action={<Badge tone={unlocked ? "good" : "warn"}>{unlocked ? "UNLOCKED" : "LOCKED"}</Badge>}
+      action={<Badge tone={badge.tone}>{badge.label}</Badge>}
     >
-      {unlocked ? (
+      {state === "unset" && (
+        <p className="mb-3 rounded-lg border border-rose-900 bg-rose-950/40 p-2 text-[11px] leading-snug text-rose-300">
+          This deployment has no <code>DASHBOARD_TOKEN</code> set, so no token can unlock it.
+          Add <code>DASHBOARD_TOKEN</code> to the environment and redeploy, then come back and
+          paste the same value here. Until then, every control that could start trading stays
+          disabled — which is the safe state, not a fault.
+        </p>
+      )}
+      {state === "wrong" && (
+        <p className="mb-3 rounded-lg border border-rose-900 bg-rose-950/40 p-2 text-[11px] leading-snug text-rose-300">
+          The server did not accept this token. Check it matches{" "}
+          <code>DASHBOARD_TOKEN</code> exactly, with no stray spaces.
+        </p>
+      )}
+
+      {state === "ok" ? (
         <>
           <p className="text-[11px] leading-snug text-slate-400">
-            This browser holds the token. Every control is available.
+            The server accepts this browser&rsquo;s token. Every control is available.
           </p>
           <button
             type="button"
             onClick={() => {
               storeToken(null);
-              setUnlocked(false);
+              setState("empty");
               setMessage("Token removed from this browser.");
             }}
             className="mt-3 min-h-[38px] w-full rounded-xl border border-slate-700 bg-slate-900 px-3 text-xs font-medium text-slate-200"
@@ -1139,8 +1184,8 @@ export function UnlockPanel() {
               if (!trimmed) return;
               storeToken(trimmed);
               setValue("");
-              setUnlocked(true);
-              setMessage("Unlocked on this device.");
+              setMessage(null);
+              void check();
             }}
           >
             <input
@@ -1154,9 +1199,10 @@ export function UnlockPanel() {
             />
             <button
               type="submit"
-              className="min-h-[38px] w-full rounded-xl border border-sky-700 bg-sky-950/60 px-3 text-xs font-semibold text-sky-200"
+              disabled={state === "checking"}
+              className="min-h-[38px] w-full rounded-xl border border-sky-700 bg-sky-950/60 px-3 text-xs font-semibold text-sky-200 disabled:opacity-60"
             >
-              Unlock
+              {state === "checking" ? "Checking…" : "Unlock"}
             </button>
           </form>
         </>

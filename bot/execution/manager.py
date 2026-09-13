@@ -22,6 +22,7 @@ from ..clock import ensure_utc, utc_now
 from ..config import TradingConfig
 from ..errors import BotError
 from ..observability import log_event
+from ..smc.sessions import is_forex_weekend
 from ..storage.repositories import Repositories
 
 
@@ -204,15 +205,18 @@ class PositionManager:
         self.broker = broker
         self.repos = repositories
 
-    def track(self, positions: Sequence[Any]) -> list[dict[str, Any]]:
+    def track(
+        self, positions: Sequence[Any], *, now: datetime | None = None
+    ) -> list[dict[str, Any]]:
         """Refresh excursions and return dashboard-ready position rows."""
 
+        moment = ensure_utc(now) if now is not None else utc_now()
         rows: list[dict[str, Any]] = []
         for position in positions:
             trade = self.repos.trades.by_position_id(position.position_id)
             entry = position.entry_price
             stop = (trade or {}).get("stop_loss") or position.stop_loss
-            price = self._current_price(position)
+            price, price_status = self._current_price(position, moment)
             current_r = (
                 r_multiple(direction=position.direction, entry=entry, stop=float(stop), price=price)
                 if stop and price
@@ -229,29 +233,51 @@ class PositionManager:
                 {
                     **position.as_dict(),
                     "currentPrice": price,
+                    "priceStatus": price_status,
                     "rMultiple": round(current_r, 3),
                     "riskAmount": (trade or {}).get("risk_amount"),
                     "setupGrade": (trade or {}).get("setup_grade"),
                     "executionId": (trade or {}).get("execution_id"),
-                    "durationMinutes": self._duration_minutes(position),
+                    "durationMinutes": self._duration_minutes(position, moment),
                     "orphaned": (trade or {}).get("status") == "ORPHANED",
+                    # A position with no row of ours is one we did not open
+                    # (or one from an earlier build). Without this it looks
+                    # identical to a tracked position whose fields failed to
+                    # load, and the operator cannot tell which.
+                    "tracked": trade is not None,
                 }
             )
         return rows
 
-    def _current_price(self, position: Any) -> float | None:
+    def _current_price(self, position: Any, moment: datetime) -> tuple[float | None, str]:
+        """Current price, and *why* when there isn't one.
+
+        Rule 6 forbids inventing a price, so a missing one shows as a gap —
+        but a gap with no explanation is its own problem. Over a weekend
+        every open position reads "—" and looks broken, when the honest
+        answer is that FX is shut. Distinguishing that from a broker that
+        cannot be reached is the difference between "wait" and "act".
+        """
+
         try:
             spec = self.broker.instrument(position.symbol)
             quote = self.broker.quote(spec)
-            return quote.bid if position.direction == "BUY" else quote.ask
-        except BotError:
-            return None
+            price = quote.bid if position.direction == "BUY" else quote.ask
+        except BotError as exc:
+            if is_forex_weekend(moment):
+                return None, "market closed for the weekend"
+            return None, f"no quote: {exc}"[:200]
+        if price is None:
+            if is_forex_weekend(moment):
+                return None, "market closed for the weekend"
+            return None, "broker returned no price"
+        return price, "live"
 
     @staticmethod
-    def _duration_minutes(position: Any) -> float | None:
+    def _duration_minutes(position: Any, moment: datetime) -> float | None:
         if position.opened_at is None:
             return None
-        return round((utc_now() - ensure_utc(position.opened_at)).total_seconds() / 60.0, 1)
+        return round((moment - ensure_utc(position.opened_at)).total_seconds() / 60.0, 1)
 
     def apply(self, actions: Sequence[ManagementAction]) -> list[dict[str, Any]]:
         """Execute management actions. Each failure is isolated."""

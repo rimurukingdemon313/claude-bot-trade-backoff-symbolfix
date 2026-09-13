@@ -162,6 +162,9 @@ export function PositionsPanel({ positions }: { positions: Envelope<Position[]> 
                     <Badge tone={tierTone(position.setupGrade)}>{position.setupGrade}</Badge>
                   )}
                   {position.orphaned && <Badge tone="warn">ADOPTED</Badge>}
+                  {position.tracked === false && !position.orphaned && (
+                    <Badge tone="neutral">UNTRACKED</Badge>
+                  )}
                   <span
                     className={cn(
                       "ml-auto text-sm font-semibold tabular-nums",
@@ -179,6 +182,14 @@ export function PositionsPanel({ positions }: { positions: Envelope<Position[]> 
                   <Field label="Lots" value={fmt.number(position.quantity, 2)} />
                   <Field label="R" value={fmt.number(position.rMultiple, 2)} />
                 </div>
+                {position.currentPrice == null && position.priceStatus && (
+                  // A bare "—" over a weekend reads as a broken feed. It is
+                  // not: rule 6 forbids inventing a price, so the gap is
+                  // correct — it just has to say why it is there.
+                  <p className="mt-2 text-[11px] text-slate-500">
+                    No live price · {position.priceStatus}
+                  </p>
+                )}
                 <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-slate-500">
                   <span>Risk {fmt.money(position.riskAmount)}</span>
                   <span>Open {fmt.duration(position.durationMinutes)}</span>

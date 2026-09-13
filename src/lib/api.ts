@@ -48,12 +48,16 @@ export type Position = {
   unrealizedPnl: number;
   openedAt: string | null;
   currentPrice: number | null;
+  /** Why there is no current price: "live", "market closed for the weekend", … */
+  priceStatus: string;
   rMultiple: number;
   riskAmount: number | null;
   setupGrade: string | null;
   executionId: string | null;
   durationMinutes: number | null;
   orphaned: boolean;
+  /** False when we hold no record of this position — we did not open it. */
+  tracked: boolean;
 };
 
 export type HistoryRow = {

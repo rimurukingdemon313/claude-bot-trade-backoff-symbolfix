@@ -150,10 +150,14 @@ def build_setup_report(config: TradingConfig, *, equity: float | None = None) ->
         )
     if "DASHBOARD_TOKEN" in missing_recommended:
         warnings.append(
-            "No DASHBOARD_TOKEN: anyone who can reach this URL can pause the bot or trip "
-            "the kill switch."
+            "No DASHBOARD_TOKEN: the controls that can START trading — clearing the kill "
+            "switch, resuming the scanner, switching strategy, running a manual scan — are "
+            "DISABLED, because this deployment is reachable by anyone who learns its "
+            "hostname and hostnames are published in certificate transparency logs. "
+            "Stopping the bot still works without it. Set DASHBOARD_TOKEN to any long "
+            "random string, then unlock the dashboard with the same value."
         )
-    # The silent-永-NO-TRADE trap: AI is required, no provider is configured,
+    # The silent never-trade trap: AI is required, no provider is configured,
     # and trading without AI is not permitted. Every candidate is then
     # rejected at the AI gate and the only trace is a line in the decision
     # journal. Failing closed is correct; failing closed SILENTLY is not.

@@ -35,6 +35,7 @@ import {
   HistoryPanel,
   BlockersPanel,
   StrategyPanel,
+  UnlockPanel,
   JournalPanel,
   ModeBanner,
   PerformancePanel,
@@ -292,6 +293,7 @@ export default function Dashboard() {
             <HealthPanel health={health} />
             {setup.data?.ready && <ConfigurationPanel setup={setup.data} />}
             <DoctorPanel />
+            <UnlockPanel />
             <StrategyPanel
               status={strategy.data?.data}
               onSelect={(key) => switchStrategy.mutate(key)}

@@ -405,3 +405,42 @@ def test_a_setup_genuinely_below_the_minimum_is_still_rejected(config, candidate
     )
     assert decision.approved is False
     assert any("below the minimum" in reason for reason in decision.reasons)
+
+
+def test_risk_never_rises_as_the_account_worsens_across_every_combination(config):
+    """Rule 2, checked exhaustively rather than at a few chosen points.
+
+    The existing test walks one dimension at a time. This crosses all of
+    them — tier, losing streak, drawdown and realised daily loss — because
+    the dangerous version of this bug is not "losses raise risk" (nobody
+    writes that) but a reduction applied in the wrong order, or a clamp
+    that lifts a floor, showing up only where two adverse conditions
+    coincide.
+    """
+
+    engine = RiskEngine(config)
+    healthy = {
+        tier: engine.risk_percentage(tier=tier, account=make_account())[0]
+        for tier in ("A+", "A", "B")
+    }
+
+    checked = 0
+    for tier in ("A+", "A", "B"):
+        for losses in range(0, 4):
+            for drawdown in (0.0, 0.02, 0.05, 0.08):
+                for daily in (0.0, -50.0, -150.0, -250.0):
+                    account = make_account(
+                        equity=10_000.0 * (1 - drawdown),
+                        consecutive_losses=losses,
+                        daily_realized_pnl=daily,
+                    )
+                    risk, _ = engine.risk_percentage(tier=tier, account=account)
+                    checked += 1
+                    assert risk <= healthy[tier] + 1e-12, (
+                        f"adverse state raised risk: tier={tier} losses={losses} "
+                        f"drawdown={drawdown} daily={daily} -> {risk} > {healthy[tier]}"
+                    )
+                    assert risk <= config.risk.max_risk_pct + 1e-12, (
+                        f"risk escaped the hard cap: {risk} > {config.risk.max_risk_pct}"
+                    )
+    assert checked == 192, "the sweep stopped covering what it claims to cover"

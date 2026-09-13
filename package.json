@@ -9,11 +9,12 @@
     "start": "node index.js",
     "typecheck": "tsc --noEmit",
     "bot": "python3 -m bot.service",
-    "test": "python3 -m pytest",
+    "test": "python3 -m pytest && node --test \"tests/server/*.test.mjs\"",
     "test:py": "python3 -m pytest",
     "verify": "npm run typecheck && npm run build && npm run test",
     "setup": "bash scripts/setup.sh",
-    "doctor": "python3 -m bot.doctor --safe"
+    "doctor": "python3 -m bot.doctor --safe",
+    "test:server": "node --test \"tests/server/*.test.mjs\""
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.3.3",

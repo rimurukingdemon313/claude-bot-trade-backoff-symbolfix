@@ -211,9 +211,20 @@ class Orchestrator:
 
     @property
     def strategy(self) -> strategies.Strategy:
-        self.strategy_key  # resolves and caches
-        assert self._strategy is not None
-        return self._strategy
+        """The strategy object for the mode in force.
+
+        Resolution happens in `strategy_key`, which always leaves
+        `_strategy` populated. The re-check is a real branch rather than an
+        assert: `python -O` strips asserts, and an invariant that vanishes
+        under an optimisation flag is not an invariant — it would surface
+        here as an AttributeError inside the scan loop instead.
+        """
+
+        key = self.strategy_key
+        strategy = self._strategy
+        if strategy is None:  # pragma: no cover - defensive
+            strategy = self._strategy = strategies.build(key, self.config)
+        return strategy
 
     def set_strategy(self, name: str) -> dict[str, Any]:
         """Switch mode. Refuses an unknown name instead of defaulting."""

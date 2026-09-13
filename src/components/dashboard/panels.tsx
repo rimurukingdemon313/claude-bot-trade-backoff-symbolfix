@@ -19,6 +19,8 @@ import {
   type ScanSymbol,
   type StrategyStatus,
   fmt,
+  readToken,
+  storeToken,
 } from "@/lib/api";
 import {
   Badge,
@@ -1081,6 +1083,88 @@ export function StrategyPanel({
         Switching takes effect on the next scan and survives a restart. Open positions are not
         touched — they keep the stop and target they were opened with. No win rate is claimed for
         either mode; the trade history is the only thing that can say.
+      </p>
+    </Card>
+  );
+}
+
+// -- unlock ----------------------------------------------------------------
+
+/**
+ * Unlocks the controls that can resume or start trading.
+ *
+ * The deployment sits on a public URL, so those controls need a secret.
+ * Stopping the bot deliberately does NOT — an operator must always be
+ * able to hit the brakes, from any device, having lost anything.
+ */
+export function UnlockPanel() {
+  const [value, setValue] = useState("");
+  const [unlocked, setUnlocked] = useState(() => Boolean(readToken()));
+  const [message, setMessage] = useState<string | null>(null);
+
+  return (
+    <Card
+      title="Dashboard lock"
+      subtitle="Controls that can start or resume trading need the deployment token"
+      action={<Badge tone={unlocked ? "good" : "warn"}>{unlocked ? "UNLOCKED" : "LOCKED"}</Badge>}
+    >
+      {unlocked ? (
+        <>
+          <p className="text-[11px] leading-snug text-slate-400">
+            This browser holds the token. Every control is available.
+          </p>
+          <button
+            type="button"
+            onClick={() => {
+              storeToken(null);
+              setUnlocked(false);
+              setMessage("Token removed from this browser.");
+            }}
+            className="mt-3 min-h-[38px] w-full rounded-xl border border-slate-700 bg-slate-900 px-3 text-xs font-medium text-slate-200"
+          >
+            Forget token on this device
+          </button>
+        </>
+      ) : (
+        <>
+          <p className="text-[11px] leading-snug text-slate-400">
+            Paste the value of <code className="text-slate-300">DASHBOARD_TOKEN</code> from the
+            deployment environment. It is stored in this browser only and never leaves this site.
+          </p>
+          <form
+            className="mt-3 space-y-2"
+            onSubmit={(event) => {
+              event.preventDefault();
+              const trimmed = value.trim();
+              if (!trimmed) return;
+              storeToken(trimmed);
+              setValue("");
+              setUnlocked(true);
+              setMessage("Unlocked on this device.");
+            }}
+          >
+            <input
+              type="password"
+              value={value}
+              onChange={(event) => setValue(event.target.value)}
+              autoComplete="off"
+              placeholder="DASHBOARD_TOKEN"
+              aria-label="Dashboard token"
+              className="min-h-[38px] w-full rounded-xl border border-slate-700 bg-slate-950 px-3 text-xs text-slate-100 placeholder:text-slate-600"
+            />
+            <button
+              type="submit"
+              className="min-h-[38px] w-full rounded-xl border border-sky-700 bg-sky-950/60 px-3 text-xs font-semibold text-sky-200"
+            >
+              Unlock
+            </button>
+          </form>
+        </>
+      )}
+      {message && <p className="mt-2 text-[11px] text-slate-500">{message}</p>}
+      <p className="mt-4 text-[11px] leading-snug text-slate-500">
+        Emergency stop and pause never require this. Stopping the bot must work even when nothing
+        else does.
       </p>
     </Card>
   );

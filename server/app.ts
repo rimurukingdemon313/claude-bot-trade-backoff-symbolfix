@@ -4,6 +4,7 @@ import pinoHttp from "pino-http";
 import path from "node:path";
 import router from "./routes";
 import { logger } from "./lib/logger";
+import { commandAuth } from "./middlewares/command-auth";
 
 const app: Express = express();
 
@@ -59,11 +60,38 @@ app.use((_req, res, next) => {
 const commandHits = new Map<string, { count: number; resetAt: number }>();
 const COMMAND_WINDOW_MS = 60_000;
 const COMMAND_LIMIT = 20;
+/**
+ * Ceiling on tracked addresses.
+ *
+ * An expired entry was only ever replaced when the SAME address came back,
+ * so the map grew by one per distinct caller and never shrank. On a public
+ * URL the distinct callers are the internet — every scanner that finds the
+ * host — and the rate limiter meant to protect the process became the way
+ * to exhaust its memory.
+ */
+const COMMAND_TRACKED_MAX = 5_000;
+
+function pruneExpired(now: number): void {
+  for (const [address, entry] of commandHits) {
+    if (entry.resetAt < now) commandHits.delete(address);
+  }
+}
 
 app.use((req, res, next) => {
   if (req.method !== "POST") return next();
   const key = req.ip ?? "unknown";
   const now = Date.now();
+
+  if (commandHits.size >= COMMAND_TRACKED_MAX) {
+    pruneExpired(now);
+    if (commandHits.size >= COMMAND_TRACKED_MAX && !commandHits.has(key)) {
+      // Every tracked window is still live: this is a distributed flood,
+      // not ordinary traffic. Refusing is correct, and refusing is also
+      // what keeps the map from growing past the ceiling.
+      return res.status(429).json({ error: "too many commands; slow down" });
+    }
+  }
+
   const entry = commandHits.get(key);
   if (!entry || entry.resetAt < now) {
     commandHits.set(key, { count: 1, resetAt: now + COMMAND_WINDOW_MS });
@@ -75,6 +103,11 @@ app.use((req, res, next) => {
   }
   return next();
 });
+
+// Ordered after the body parser (it inspects the payload to tell a
+// "stop" from a "start") and before the router, so no control runs
+// unauthenticated.
+app.use(commandAuth);
 
 app.use(router);
 

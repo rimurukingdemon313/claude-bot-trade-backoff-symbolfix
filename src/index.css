@@ -1,7 +1,5 @@
-@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&family=Sora:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&family=Share+Tech+Mono&display=swap');
 @import 'tailwindcss';
 @import 'tw-animate-css';
-@plugin "@tailwindcss/typography";
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
@@ -261,3 +259,58 @@
   51%, 100% { opacity: 0; }
 }
 .term-cursor { animation: term-cursor-kf 1s steps(1) infinite; }
+
+
+/* ---------------------------------------------------------------------
+   Mobile shell.
+   The bottom tab bar sits above the iPhone home indicator, and the sticky
+   header clears the notch, via the safe-area insets. Tap targets are kept
+   at 38px+ so the controls are usable one-handed.
+   ------------------------------------------------------------------- */
+:root {
+  color-scheme: dark;
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+  background-color: #020617;
+}
+
+body {
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-size-adjust: 100%;
+  overscroll-behavior-y: none;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
+}
+
+header.sticky {
+  padding-top: env(safe-area-inset-top);
+}
+
+nav.fixed {
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+/* Horizontal scroll is confined to the tables that genuinely need it. */
+main {
+  overflow-x: hidden;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

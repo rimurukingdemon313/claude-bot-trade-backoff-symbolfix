@@ -37,25 +37,23 @@ function toError(value: unknown): Error {
 
 function DefaultFallback({ error, resetError }: ErrorFallbackProps) {
   return (
-    <div className="min-h-screen w-full flex items-center justify-center bg-gray-50 p-6">
-      <div className="max-w-lg w-full text-center">
-        <h1 className="text-xl font-semibold text-gray-900">
-          Something went wrong
-        </h1>
-        <p className="mt-2 text-sm text-gray-600">
-          This part of the app hit an error. The rest of the app is still
-          running.
+    <div className="flex min-h-screen w-full items-center justify-center bg-slate-950 p-6">
+      <div className="w-full max-w-lg text-center text-slate-100">
+        <h1 className="text-lg font-semibold">The dashboard hit an error</h1>
+        <p className="mt-2 text-xs text-slate-400">
+          This is a display fault only. The trading process runs in a separate
+          process and is unaffected by it.
         </p>
         {/* Dev only: messages can carry API responses and other internals. */}
         {import.meta.env.DEV ? (
-          <pre className="mt-4 overflow-x-auto rounded bg-gray-100 p-3 text-left text-xs text-gray-800">
+          <pre className="mt-4 overflow-x-auto rounded-lg bg-slate-900 p-3 text-left text-[11px] text-slate-300">
             {error.message || String(error)}
           </pre>
         ) : null}
         <button
           type="button"
           onClick={resetError}
-          className="mt-4 rounded bg-gray-900 px-4 py-2 text-sm text-white hover:bg-gray-700"
+          className="mt-4 rounded-lg border border-slate-700 bg-slate-900 px-4 py-2 text-xs font-medium hover:bg-slate-800"
         >
           Try again
         </button>

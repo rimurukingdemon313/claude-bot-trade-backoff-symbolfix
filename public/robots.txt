@@ -1,2 +1,4 @@
+# This dashboard exposes a private trading account's state. It should never
+# appear in a search index.
 User-agent: *
-Allow: /
+Disallow: /

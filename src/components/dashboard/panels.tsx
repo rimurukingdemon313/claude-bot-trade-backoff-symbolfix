@@ -1,0 +1,642 @@
+/**
+ * Dashboard panels. Presentation only — no calculation of trading values.
+ */
+
+import { type ReactNode } from "react";
+import {
+  type Account,
+  type Envelope,
+  type HistoryRow,
+  type Health,
+  type Performance,
+  type Position,
+  type RiskState,
+  type Scan,
+  type ScanSymbol,
+  fmt,
+} from "@/lib/api";
+import {
+  Badge,
+  Card,
+  Empty,
+  Meter,
+  Row,
+  Stat,
+  Unavailable,
+  cn,
+  pnlTone,
+  tierTone,
+} from "./primitives";
+
+function guard<T>(envelope: Envelope<T> | undefined, render: (data: T) => ReactNode): ReactNode {
+  if (!envelope) return <Unavailable status="LOADING" />;
+  if (envelope.status !== "LIVE" || envelope.data === null) {
+    return <Unavailable status={envelope.status} error={envelope.error} hint={envelope.hint} />;
+  }
+  return render(envelope.data);
+}
+
+// -- account ---------------------------------------------------------------
+
+export function AccountPanel({ account }: { account: Envelope<Account> }) {
+  return (
+    <Card
+      title="Account"
+      action={guard(account, (data) => (
+        <Badge tone={data.demoVerified ? "good" : "bad"}>
+          {data.demoVerified ? "DEMO VERIFIED" : "UNVERIFIED"}
+        </Badge>
+      ))}
+    >
+      {guard(account, (data) => (
+        <>
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+            <Stat label="Balance" value={fmt.money(data.balance, data.currency)} />
+            <Stat label="Equity" value={fmt.money(data.equity, data.currency)} />
+            <Stat
+              label="Daily P/L"
+              value={fmt.money(data.dailyPnl, data.currency)}
+              tone={pnlTone(data.dailyPnl)}
+              hint={`realised ${fmt.money(data.dailyRealizedPnl, data.currency)}`}
+            />
+            <Stat
+              label="Total P/L"
+              value={fmt.money(data.totalPnl, data.currency)}
+              tone={pnlTone(data.totalPnl)}
+            />
+          </div>
+          <div className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-4">
+            <Stat label="Margin used" value={fmt.money(data.marginUsed, data.currency)} />
+            <Stat label="Margin free" value={fmt.money(data.marginAvailable, data.currency)} />
+            <Stat
+              label="Drawdown"
+              value={fmt.pct(data.drawdownPct)}
+              tone={data.drawdownPct > 5 ? "warn" : "neutral"}
+              hint={`peak ${fmt.money(data.peakEquity, data.currency)}`}
+            />
+            <Stat label="Trades today" value={data.tradesToday} />
+          </div>
+          {!data.demoVerified && (
+            <p className="mt-3 rounded-lg border border-rose-900 bg-rose-950/50 p-2 text-xs text-rose-300">
+              Trading is blocked: {data.demoReason ?? "the account could not be verified as DEMO."}
+            </p>
+          )}
+        </>
+      ))}
+    </Card>
+  );
+}
+
+// -- positions -------------------------------------------------------------
+
+export function PositionsPanel({ positions }: { positions: Envelope<Position[]> }) {
+  return (
+    <Card
+      title="Open positions"
+      subtitle="Live from the broker, refreshed every poll"
+      action={guard(positions, (rows) => <Badge>{rows.length} open</Badge>)}
+    >
+      {guard(positions, (rows) =>
+        rows.length === 0 ? (
+          <Empty>
+            No open positions. Standing aside is a valid result — this system is built to wait.
+          </Empty>
+        ) : (
+          <ul className="space-y-3">
+            {rows.map((position) => (
+              <li
+                key={position.positionId}
+                className="rounded-xl border border-slate-800 bg-slate-950/50 p-3"
+              >
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-sm font-semibold text-slate-100">{position.symbol}</span>
+                  <Badge tone={position.direction === "BUY" ? "good" : "bad"}>
+                    {position.direction}
+                  </Badge>
+                  {position.setupGrade && (
+                    <Badge tone={tierTone(position.setupGrade)}>{position.setupGrade}</Badge>
+                  )}
+                  {position.orphaned && <Badge tone="warn">ADOPTED</Badge>}
+                  <span
+                    className={cn(
+                      "ml-auto text-sm font-semibold tabular-nums",
+                      position.unrealizedPnl >= 0 ? "text-emerald-400" : "text-rose-400",
+                    )}
+                  >
+                    {fmt.money(position.unrealizedPnl)}
+                  </span>
+                </div>
+                <div className="mt-3 grid grid-cols-3 gap-2 text-xs sm:grid-cols-6">
+                  <Field label="Entry" value={fmt.price(position.entryPrice)} />
+                  <Field label="Now" value={fmt.price(position.currentPrice)} />
+                  <Field label="Stop" value={fmt.price(position.stopLoss)} />
+                  <Field label="Target" value={fmt.price(position.takeProfit)} />
+                  <Field label="Lots" value={fmt.number(position.quantity, 2)} />
+                  <Field label="R" value={fmt.number(position.rMultiple, 2)} />
+                </div>
+                <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-slate-500">
+                  <span>Risk {fmt.money(position.riskAmount)}</span>
+                  <span>Open {fmt.duration(position.durationMinutes)}</span>
+                  <span className="truncate">Position {position.positionId}</span>
+                  {position.executionId && (
+                    <span className="truncate">Exec {position.executionId.slice(0, 12)}</span>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ul>
+        ),
+      )}
+    </Card>
+  );
+}
+
+function Field({ label, value }: { label: string; value: ReactNode }) {
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-wide text-slate-500">{label}</div>
+      <div className="tabular-nums text-slate-200">{value}</div>
+    </div>
+  );
+}
+
+// -- setup / SMC -----------------------------------------------------------
+
+export function SetupPanel({ scan }: { scan: Envelope<Scan> }) {
+  return (
+    <Card
+      title="Current analysis"
+      subtitle={guard(scan, (data) => `Scan ${data.scanId} · ${fmt.time(data.finishedAt)}`)}
+      action={guard(scan, (data) => (
+        <Badge tone={data.decision === "NO TRADE" ? "neutral" : "good"}>{data.decision}</Badge>
+      ))}
+    >
+      {guard(scan, (data) => (
+        <>
+          {data.skippedReason && (
+            <p className="mb-3 rounded-lg border border-amber-900 bg-amber-950/40 p-2 text-xs text-amber-300">
+              {data.skippedReason}
+            </p>
+          )}
+          {data.symbols.length === 0 ? (
+            <Empty>No symbols were analysed in this scan.</Empty>
+          ) : (
+            <div className="space-y-3">
+              {data.symbols.map((entry) => (
+                <SymbolCard key={entry.symbol} entry={entry} />
+              ))}
+            </div>
+          )}
+        </>
+      ))}
+    </Card>
+  );
+}
+
+function SymbolCard({ entry }: { entry: ScanSymbol }) {
+  const candidate = entry.candidate;
+  const score = entry.score;
+  return (
+    <div className="rounded-xl border border-slate-800 bg-slate-950/50 p-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-sm font-semibold text-slate-100">{entry.symbol}</span>
+        <Badge tone={entry.outcome === "CANDIDATE" ? "good" : "neutral"}>{entry.outcome}</Badge>
+        <span className="text-[11px] text-slate-500">stage {entry.stage}</span>
+        {score && (
+          <span className="ml-auto flex items-center gap-2">
+            <Badge tone={tierTone(score.tier)}>{score.tier}</Badge>
+            <span className="text-xs tabular-nums text-slate-300">{score.total.toFixed(1)}/100</span>
+          </span>
+        )}
+      </div>
+
+      {entry.reason && <p className="mt-2 text-xs text-slate-400">{entry.reason}</p>}
+
+      {candidate && (
+        <>
+          <div className="mt-3 grid grid-cols-3 gap-2 text-xs sm:grid-cols-6">
+            <Field label="Direction" value={candidate.direction} />
+            <Field label="Entry" value={fmt.price(candidate.entry)} />
+            <Field label="Stop" value={fmt.price(candidate.stopLoss)} />
+            <Field label="Target" value={fmt.price(candidate.takeProfit)} />
+            <Field label="R:R" value={`1:${fmt.number(candidate.riskReward, 2)}`} />
+            <Field label="Session" value={candidate.session?.name ?? "—"} />
+          </div>
+          <div className="mt-3 flex flex-wrap gap-1.5">
+            <Badge tone="info">H4 {candidate.htfBias}</Badge>
+            <Badge tone="info">H1 {candidate.h1Bias}</Badge>
+            <Badge tone="info">M15 {candidate.m15Bias}</Badge>
+            <Badge tone={candidate.alignment === "aligned" ? "good" : "warn"}>
+              {candidate.alignment}
+            </Badge>
+            {candidate.sweep && (
+              <Badge tone="good">sweep {Number(candidate.sweep.quality).toFixed(2)}</Badge>
+            )}
+            {candidate.structureEvent && (
+              <Badge tone="good">
+                {candidate.structureEvent.type} {candidate.structureEvent.direction}
+              </Badge>
+            )}
+            {candidate.displacement && (
+              <Badge tone="good">
+                disp {Number(candidate.displacement.atrMultiple).toFixed(1)}×
+              </Badge>
+            )}
+            {candidate.pointOfInterest && (
+              <Badge tone="info">{candidate.pointOfInterest.kind}</Badge>
+            )}
+            {candidate.dealingRange && (
+              <Badge tone="neutral">{candidate.dealingRange.zone}</Badge>
+            )}
+            {candidate.regime && (
+              <Badge tone="neutral">
+                {candidate.regime.trend}/{candidate.regime.volatility}
+              </Badge>
+            )}
+          </div>
+        </>
+      )}
+
+      {score && (
+        <div className="mt-3 space-y-1.5">
+          {Object.entries(score.components).map(([name, value]) => (
+            <div key={name} className="flex items-center gap-2">
+              <span className="w-28 shrink-0 text-[11px] capitalize text-slate-500">
+                {name.replace(/_/g, " ")}
+              </span>
+              <Meter
+                value={value}
+                max={score.maxima[name] ?? 1}
+                tone={value / (score.maxima[name] || 1) > 0.6 ? "good" : "warn"}
+              />
+              <span className="w-14 shrink-0 text-right text-[11px] tabular-nums text-slate-400">
+                {value.toFixed(1)}/{(score.maxima[name] ?? 0).toFixed(0)}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {entry.ai && (
+        <p className="mt-3 rounded-lg border border-slate-800 bg-slate-900/60 p-2 text-[11px] text-slate-400">
+          <span className="font-semibold text-slate-300">AI review:</span>{" "}
+          {(entry.ai.reasons ?? []).join(" · ")}
+        </p>
+      )}
+
+      {entry.risk && (
+        <p className="mt-2 text-[11px] text-slate-500">
+          <span className="font-semibold text-slate-400">Risk:</span>{" "}
+          {(entry.risk.reasons ?? []).join(" · ")}
+        </p>
+      )}
+    </div>
+  );
+}
+
+// -- risk ------------------------------------------------------------------
+
+export function RiskPanel({ risk }: { risk: Envelope<RiskState> }) {
+  return (
+    <Card
+      title="Risk"
+      subtitle="One engine, one authority — nothing else sizes a trade"
+      action={guard(risk, (data) => (
+        <Badge tone={data.killSwitch.active ? "bad" : "good"}>
+          {data.killSwitch.active ? "KILL SWITCH ACTIVE" : "ARMED"}
+        </Badge>
+      ))}
+    >
+      {guard(risk, (data) => (
+        <>
+          {data.killSwitch.active && (
+            <p className="mb-3 rounded-lg border border-rose-900 bg-rose-950/50 p-2 text-xs text-rose-300">
+              No new trades: {data.killSwitch.reason}
+              {data.killSwitch.detail ? ` — ${data.killSwitch.detail}` : ""}
+            </p>
+          )}
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+            <Stat
+              label="Daily P/L"
+              value={fmt.money(data.dailyPnl)}
+              tone={pnlTone(data.dailyPnl)}
+              hint={`limit ${fmt.money(-data.balance * (data.limits.maxDailyLossPct ?? 0))}`}
+            />
+            <Stat
+              label="Drawdown"
+              value={fmt.pct(data.drawdownPct)}
+              tone={data.drawdownPct > 5 ? "warn" : "neutral"}
+              hint={`limit ${fmt.percent(data.limits.maxDrawdownPct)}`}
+            />
+            <Stat
+              label="Loss streak"
+              value={data.consecutiveLosses}
+              tone={data.consecutiveLosses >= 2 ? "warn" : "neutral"}
+              hint={`stop at ${data.limits.maxConsecutiveLosses}`}
+            />
+            <Stat
+              label="Open positions"
+              value={`${data.openPositions}/${data.limits.maxOpenPositions}`}
+            />
+          </div>
+          <div className="mt-4 space-y-1">
+            <Row
+              label="Risk per trade"
+              value={`${fmt.percent(data.limits.baseRiskPct)} base · ${fmt.percent(
+                data.limits.maxRiskPct,
+              )} hard cap`}
+            />
+            <Row label="Portfolio cap" value={fmt.percent(data.limits.maxPortfolioRiskPct)} />
+            <Row
+              label="Trades today"
+              value={`${data.tradesToday}/${data.limits.maxTradesPerDay}`}
+            />
+            <Row label="Minimum R:R" value={`1:${fmt.number(data.limits.minRiskReward, 1)}`} />
+            <Row label="Profit objective" value={fmt.money(data.opportunityTarget)} />
+          </div>
+          <p className="mt-3 text-[11px] text-slate-500">
+            Risk is reduced by drawdown and losing streaks, never increased. The profit objective
+            filters opportunities; it never raises position size.
+          </p>
+        </>
+      ))}
+    </Card>
+  );
+}
+
+// -- performance -----------------------------------------------------------
+
+export function PerformancePanel({ performance }: { performance: Envelope<Performance> }) {
+  return (
+    <Card
+      title="Performance"
+      action={guard(performance, (data) => (
+        <Badge tone={data.sample === "adequate" ? "good" : "warn"}>
+          {data.sample === "adequate" ? "sample adequate" : "small sample"}
+        </Badge>
+      ))}
+    >
+      {guard(performance, (data) => (
+        <>
+          {data.trades === 0 ? (
+            <Empty>
+              No closed trades yet. Statistics stay empty rather than being computed from nothing.
+            </Empty>
+          ) : (
+            <>
+              <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+                <Stat label="Trades" value={data.trades} hint={`${data.wins}W / ${data.losses}L`} />
+                <Stat label="Win rate" value={fmt.percent(data.winRate)} />
+                <Stat
+                  label="Profit factor"
+                  value={data.profitFactor === null ? "—" : fmt.number(data.profitFactor, 2)}
+                  tone={(data.profitFactor ?? 0) > 1 ? "good" : "bad"}
+                />
+                <Stat
+                  label="Expectancy"
+                  value={fmt.money(data.expectancy)}
+                  tone={pnlTone(data.expectancy)}
+                />
+              </div>
+              <div className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-4">
+                <Stat label="Avg win" value={fmt.money(data.averageWin)} tone="good" />
+                <Stat label="Avg loss" value={fmt.money(data.averageLoss)} tone="bad" />
+                <Stat label="Avg R" value={fmt.number(data.averageR, 2)} />
+                <Stat label="Max drawdown" value={fmt.money(data.maxDrawdown)} tone="warn" />
+              </div>
+              <div className="mt-4 grid grid-cols-3 gap-4">
+                <Stat label="Today" value={fmt.money(data.dailyPnl)} tone={pnlTone(data.dailyPnl)} />
+                <Stat label="Week" value={fmt.money(data.weeklyPnl)} tone={pnlTone(data.weeklyPnl)} />
+                <Stat label="Month" value={fmt.money(data.monthlyPnl)} tone={pnlTone(data.monthlyPnl)} />
+              </div>
+              {data.sample === "insufficient" && (
+                <p className="mt-3 text-[11px] text-amber-400">
+                  Fewer than 20 closed trades. These numbers describe what happened; they are not
+                  yet evidence of an edge.
+                </p>
+              )}
+              <BreakdownTable title="By symbol" rows={data.bySymbol} />
+              <BreakdownTable title="By setup grade" rows={data.byGrade} />
+            </>
+          )}
+        </>
+      ))}
+    </Card>
+  );
+}
+
+function BreakdownTable({ title, rows }: { title: string; rows: Performance["bySymbol"] }) {
+  if (!rows?.length) return null;
+  return (
+    <div className="mt-4">
+      <h3 className="mb-1.5 text-xs font-semibold text-slate-400">{title}</h3>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[420px] text-left text-xs">
+          <thead className="text-[10px] uppercase tracking-wide text-slate-500">
+            <tr>
+              <th className="pb-1">Key</th>
+              <th className="pb-1 text-right">Trades</th>
+              <th className="pb-1 text-right">Win</th>
+              <th className="pb-1 text-right">P/L</th>
+              <th className="pb-1 text-right">Expectancy</th>
+            </tr>
+          </thead>
+          <tbody className="text-slate-300">
+            {rows.map((row) => (
+              <tr key={row.key} className="border-t border-slate-800/60">
+                <td className="py-1.5">{row.key}</td>
+                <td className="py-1.5 text-right tabular-nums">{row.trades}</td>
+                <td className="py-1.5 text-right tabular-nums">{fmt.percent(row.winRate)}</td>
+                <td
+                  className={cn(
+                    "py-1.5 text-right tabular-nums",
+                    row.totalPnl >= 0 ? "text-emerald-400" : "text-rose-400",
+                  )}
+                >
+                  {fmt.money(row.totalPnl)}
+                </td>
+                <td className="py-1.5 text-right tabular-nums">{fmt.money(row.expectancy)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// -- history ---------------------------------------------------------------
+
+export function HistoryPanel({ history }: { history: Envelope<HistoryRow[]> }) {
+  return (
+    <Card title="Trade history">
+      {guard(history, (rows) =>
+        rows.length === 0 ? (
+          <Empty>No closed trades yet.</Empty>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[760px] text-left text-xs">
+              <thead className="text-[10px] uppercase tracking-wide text-slate-500">
+                <tr>
+                  <th className="pb-1">Closed</th>
+                  <th className="pb-1">Symbol</th>
+                  <th className="pb-1">Side</th>
+                  <th className="pb-1 text-right">Entry</th>
+                  <th className="pb-1 text-right">Exit</th>
+                  <th className="pb-1 text-right">Lots</th>
+                  <th className="pb-1 text-right">Risk</th>
+                  <th className="pb-1 text-right">P/L</th>
+                  <th className="pb-1 text-right">R</th>
+                  <th className="pb-1">Grade</th>
+                  <th className="pb-1">Reason</th>
+                  <th className="pb-1 text-right">Held</th>
+                </tr>
+              </thead>
+              <tbody className="text-slate-300">
+                {rows.map((row) => (
+                  <tr key={row.executionId} className="border-t border-slate-800/60">
+                    <td className="py-1.5 whitespace-nowrap">{fmt.time(row.closedAt)}</td>
+                    <td className="py-1.5">{row.symbol}</td>
+                    <td className="py-1.5">{row.direction}</td>
+                    <td className="py-1.5 text-right tabular-nums">{fmt.price(row.entry)}</td>
+                    <td className="py-1.5 text-right tabular-nums">{fmt.price(row.exit)}</td>
+                    <td className="py-1.5 text-right tabular-nums">{fmt.number(row.quantity, 2)}</td>
+                    <td className="py-1.5 text-right tabular-nums">{fmt.money(row.riskAmount)}</td>
+                    <td
+                      className={cn(
+                        "py-1.5 text-right font-medium tabular-nums",
+                        (row.pnl ?? 0) >= 0 ? "text-emerald-400" : "text-rose-400",
+                      )}
+                    >
+                      {fmt.money(row.pnl)}
+                    </td>
+                    <td className="py-1.5 text-right tabular-nums">{fmt.number(row.rMultiple, 2)}</td>
+                    <td className="py-1.5">{row.setupGrade ?? "—"}</td>
+                    <td className="py-1.5 whitespace-nowrap">{row.exitReason ?? "—"}</td>
+                    <td className="py-1.5 text-right">{fmt.duration(row.durationMinutes)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ),
+      )}
+    </Card>
+  );
+}
+
+// -- health ----------------------------------------------------------------
+
+const COMPONENT_LABELS: Record<string, string> = {
+  database: "Database",
+  broker: "TradeLocker",
+  demo: "DEMO verification",
+  marketData: "Market data",
+  ai: "AI",
+  news: "News filter",
+  startup: "Startup sequence",
+  scanner: "Scanner",
+};
+
+export function HealthPanel({ health }: { health: Health | undefined }) {
+  if (!health) return <Card title="System health"><Unavailable status="LOADING" /></Card>;
+  const components = health.components ?? {};
+  return (
+    <Card
+      title="System health"
+      subtitle={`Uptime ${fmt.uptime(health.uptimeSeconds)} · ${health.symbols?.length ?? 0} symbols watched`}
+      action={<Badge tone={health.ok ? "good" : "bad"}>{health.ok ? "HEALTHY" : "DEGRADED"}</Badge>}
+    >
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+        {Object.entries(COMPONENT_LABELS).map(([key, label]) => {
+          const component = components[key] ?? {};
+          const ok = component.ok ?? component.enabled ?? false;
+          return (
+            <div
+              key={key}
+              className="flex items-center justify-between gap-2 rounded-lg border border-slate-800 bg-slate-950/40 px-3 py-2"
+            >
+              <span className="text-xs text-slate-300">{label}</span>
+              <Badge tone={ok ? "good" : "bad"}>{ok ? "OK" : "DOWN"}</Badge>
+            </div>
+          );
+        })}
+      </div>
+
+      {components.killSwitch?.active && (
+        <p className="mt-3 rounded-lg border border-rose-900 bg-rose-950/50 p-2 text-xs text-rose-300">
+          Kill switch active: {components.killSwitch.reason}
+        </p>
+      )}
+      {components.startup?.error && (
+        <p className="mt-3 rounded-lg border border-amber-900 bg-amber-950/40 p-2 text-xs text-amber-300">
+          {components.startup.error}
+        </p>
+      )}
+
+      <div className="mt-4 space-y-1">
+        <Row label="Last scan" value={fmt.time(components.scanner?.lastScan?.at)} />
+        <Row label="Scan decision" value={components.scanner?.lastScan?.decision ?? "—"} />
+        <Row label="Broker circuit" value={components.broker?.circuit ?? "—"} />
+        <Row label="AI calls" value={components.ai?.calls ?? 0} />
+        <Row label="Database" value={components.database?.backend ?? "—"} />
+        <Row label="Strategy version" value={health.versions?.smc ?? "—"} />
+        <Row label="Risk version" value={health.versions?.risk ?? "—"} />
+      </div>
+
+      {Array.isArray(health.upcomingNews) && health.upcomingNews.length > 0 && (
+        <div className="mt-4">
+          <h3 className="mb-1.5 text-xs font-semibold text-slate-400">Upcoming high-impact news</h3>
+          <ul className="space-y-1 text-[11px] text-slate-400">
+            {health.upcomingNews.slice(0, 5).map((event: any, index: number) => (
+              <li key={index} className="flex justify-between gap-2">
+                <span className="truncate">
+                  {event.country} · {event.title}
+                </span>
+                <span className="shrink-0 tabular-nums">in {event.minutesAway}m</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+// -- journal ---------------------------------------------------------------
+
+export function JournalPanel({ rows, histogram }: { rows: any[]; histogram: any[] }) {
+  return (
+    <Card
+      title="Decision journal"
+      subtitle="Why the system stood aside — the record that makes tuning evidence-based"
+    >
+      {histogram?.length > 0 && (
+        <div className="mb-4 flex flex-wrap gap-1.5">
+          {histogram.slice(0, 10).map((entry, index) => (
+            <Badge key={index} tone="neutral">
+              {entry.stage}/{entry.outcome}: {entry.count}
+            </Badge>
+          ))}
+        </div>
+      )}
+      {!rows?.length ? (
+        <Empty>No decisions recorded yet.</Empty>
+      ) : (
+        <ul className="space-y-2">
+          {rows.slice(0, 40).map((row, index) => (
+            <li key={index} className="rounded-lg border border-slate-800 bg-slate-950/40 p-2">
+              <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                <span className="font-semibold text-slate-200">{row.symbol}</span>
+                <Badge tone={row.outcome === "CANDIDATE" ? "good" : "neutral"}>{row.outcome}</Badge>
+                <span className="text-slate-500">{row.stage}</span>
+                <span className="ml-auto text-slate-600">{fmt.time(row.created_at)}</span>
+              </div>
+              {row.reason && <p className="mt-1 text-[11px] text-slate-400">{row.reason}</p>}
+            </li>
+          ))}
+        </ul>
+      )}
+    </Card>
+  );
+}

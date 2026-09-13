@@ -1,0 +1,240 @@
+"""HTTP transport: bounded retries, jitter, throttling, circuit breaker.
+
+Deliberate asymmetry between reads and writes:
+
+* Reads (GET) retry on 429/5xx/timeout with exponential backoff + full
+  jitter, bounded by `max_attempts`.
+* Writes (POST/PATCH/DELETE) NEVER retry inside this layer. TradeLocker
+  documents no client-supplied idempotency key, so a resent write can
+  create a second real order. A write whose outcome is unknown raises
+  AmbiguousExecution and the caller must reconcile against broker state.
+
+The circuit breaker exists so a broker outage degrades into "we stop
+calling for a minute" instead of "every scan spends its whole budget
+timing out".
+"""
+
+from __future__ import annotations
+
+import json
+import random
+import threading
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+from ..errors import (
+    AmbiguousExecution,
+    BrokerAuthError,
+    BrokerError,
+    BrokerRateLimited,
+    BrokerRejected,
+    CircuitOpen,
+)
+from ..observability import log_event
+
+BROWSER_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+)
+
+WRITE_METHODS = ("POST", "PUT", "PATCH", "DELETE")
+
+
+@dataclass
+class CircuitBreaker:
+    """Closed -> Open -> Half-open. Half-open lets exactly one probe through."""
+
+    failure_threshold: int = 5
+    reset_seconds: float = 60.0
+    _failures: int = 0
+    _opened_at: float = 0.0
+    _half_open: bool = False
+
+    def before_call(self) -> None:
+        if self._failures < self.failure_threshold:
+            return
+        elapsed = time.monotonic() - self._opened_at
+        if elapsed < self.reset_seconds:
+            raise CircuitOpen(
+                f"broker circuit open after {self._failures} consecutive failures; "
+                f"retry in {self.reset_seconds - elapsed:.0f}s"
+            )
+        self._half_open = True
+
+    def record_success(self) -> None:
+        self._failures = 0
+        self._half_open = False
+
+    def record_failure(self) -> None:
+        self._failures += 1
+        if self._failures >= self.failure_threshold:
+            self._opened_at = time.monotonic()
+        self._half_open = False
+
+    @property
+    def state(self) -> str:
+        if self._failures < self.failure_threshold:
+            return "closed"
+        return "half-open" if self._half_open else "open"
+
+
+class Throttle:
+    """Minimum spacing between outbound requests.
+
+    TradeLocker sits behind Cloudflare, which rate-limits bursts (HTTP
+    429 / error 1015). Spacing requests at the source is cheaper and more
+    reliable than absorbing 429s after the fact.
+    """
+
+    def __init__(self, min_interval: float = 0.12) -> None:
+        self.min_interval = min_interval
+        self._last = 0.0
+        self._lock = threading.Lock()
+
+    def wait(self) -> None:
+        with self._lock:
+            now = time.monotonic()
+            delay = self.min_interval - (now - self._last)
+            if delay > 0:
+                time.sleep(delay)
+            self._last = time.monotonic()
+
+
+class HttpTransport:
+    def __init__(
+        self,
+        *,
+        timeout: float = 20.0,
+        max_attempts: int = 4,
+        circuit: CircuitBreaker | None = None,
+        throttle: Throttle | None = None,
+        sleeper: Any = time.sleep,
+    ) -> None:
+        self.timeout = timeout
+        self.max_attempts = max(1, max_attempts)
+        self.circuit = circuit or CircuitBreaker()
+        self.throttle = throttle or Throttle()
+        self._sleep = sleeper
+        self.calls = 0
+        self.last_latency_ms: float | None = None
+
+    def _backoff(self, attempt: int, retry_after: float | None = None) -> float:
+        """Exponential backoff with FULL jitter (1s, 2s, 4s base).
+
+        Full jitter (uniform in [0, base]) rather than fixed sleeps keeps
+        several workers from re-colliding in lockstep after a shared 429.
+        """
+
+        if retry_after is not None:
+            return min(retry_after, 30.0)
+        base = min(2.0**attempt, 16.0)
+        return random.uniform(0.0, base)
+
+    def request(
+        self,
+        method: str,
+        url: str,
+        *,
+        headers: Mapping[str, str] | None = None,
+        body: Mapping[str, Any] | None = None,
+        query: Mapping[str, Any] | None = None,
+        idempotent: bool | None = None,
+    ) -> Any:
+        """Perform one API call.
+
+        `idempotent` defaults to False for write methods and True for
+        reads; a caller can only ever make something LESS retryable, and
+        the write path never sets it to True.
+        """
+
+        is_write = method.upper() in WRITE_METHODS
+        retryable = (not is_write) if idempotent is None else bool(idempotent and not is_write)
+
+        if query:
+            url = f"{url}?{urllib.parse.urlencode({k: v for k, v in query.items() if v is not None})}"
+        payload = json.dumps(body).encode("utf-8") if body is not None else None
+
+        attempts = self.max_attempts if retryable else 1
+        last_error: Exception | None = None
+
+        for attempt in range(attempts):
+            self.circuit.before_call()
+            self.throttle.wait()
+            request = urllib.request.Request(url, data=payload, method=method.upper())
+            request.add_header("User-Agent", BROWSER_UA)
+            request.add_header("Content-Type", "application/json")
+            request.add_header("Accept", "application/json")
+            request.add_header("Accept-Language", "en-US,en;q=0.9")
+            for key, value in (headers or {}).items():
+                request.add_header(key, value)
+
+            started = time.monotonic()
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                    raw = response.read().decode("utf-8")
+                self.calls += 1
+                self.last_latency_ms = (time.monotonic() - started) * 1000
+                self.circuit.record_success()
+                return json.loads(raw) if raw.strip() else {}
+            except urllib.error.HTTPError as exc:
+                detail = exc.read().decode("utf-8", errors="replace")[:500]
+                retry_after_header = exc.headers.get("Retry-After") if exc.headers else None
+                try:
+                    retry_after = float(retry_after_header) if retry_after_header else None
+                except ValueError:
+                    retry_after = None
+
+                if exc.code in (401, 403):
+                    self.circuit.record_success()  # an auth error is not an outage
+                    raise BrokerAuthError(f"{method} {url} unauthorized ({exc.code}): {detail}")
+                if exc.code == 429:
+                    last_error = BrokerRateLimited(f"{method} {url} rate limited: {detail}")
+                elif 500 <= exc.code < 600:
+                    last_error = BrokerError(f"{method} {url} server error ({exc.code}): {detail}")
+                else:
+                    self.circuit.record_success()
+                    raise BrokerRejected(f"{method} {url} rejected ({exc.code}): {detail}")
+
+                self.circuit.record_failure()
+                if retryable and attempt < attempts - 1:
+                    self._sleep(self._backoff(attempt, retry_after))
+                    continue
+                raise last_error
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                self.circuit.record_failure()
+                # A write that never got a response is the dangerous case:
+                # the order may or may not have reached the matching engine.
+                if is_write:
+                    raise AmbiguousExecution(
+                        f"{method} {url} outcome unknown (transport failure after the request "
+                        f"left this process): {exc}. Not retried — reconcile against broker state."
+                    ) from exc
+                last_error = BrokerError(f"{method} {url} unreachable: {exc}")
+                if retryable and attempt < attempts - 1:
+                    self._sleep(self._backoff(attempt))
+                    continue
+                raise last_error
+            except json.JSONDecodeError as exc:
+                self.circuit.record_failure()
+                if is_write:
+                    raise AmbiguousExecution(
+                        f"{method} {url} returned an unparseable body; outcome unknown: {exc}"
+                    ) from exc
+                last_error = BrokerError(f"{method} {url} returned malformed JSON: {exc}")
+                if retryable and attempt < attempts - 1:
+                    self._sleep(self._backoff(attempt))
+                    continue
+                raise last_error
+
+        raise last_error or BrokerError(f"{method} {url} failed after {attempts} attempts")
+
+    def health(self) -> dict[str, Any]:
+        return {
+            "circuit": self.circuit.state,
+            "calls": self.calls,
+            "lastLatencyMs": round(self.last_latency_ms, 1) if self.last_latency_ms else None,
+        }

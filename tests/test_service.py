@@ -1,0 +1,208 @@
+"""The HTTP surface the dashboard talks to, and the broker decoding layer."""
+
+from __future__ import annotations
+
+import dataclasses
+import json
+import urllib.error
+import urllib.request
+
+import pytest
+
+from bot.broker.models import InstrumentSpec
+from bot.broker.tradelocker import TradeLockerBroker, normalize_symbol, split_currencies
+from bot.errors import BrokerRejected, ConfigError
+from bot.service import BotService, make_handler, serve
+from fakes import SETUP_END
+
+
+# -- broker decoding ------------------------------------------------------
+
+
+def test_symbol_normalisation_handles_broker_suffixes():
+    assert normalize_symbol("EUR/USD") == "EURUSD"
+    assert normalize_symbol("EURUSD.r") == "EURUSDR"
+
+
+def test_currency_splitting():
+    assert split_currencies("GBPJPY") == ("GBP", "JPY")
+    assert split_currencies("XAUUSD") == ("XAU", "USD")
+    assert split_currencies("US500") == (None, None)
+
+
+def test_lot_rounding_never_rounds_up(monkeypatch):
+    spec = InstrumentSpec(
+        "EURUSD", "EURUSD", 1, 2, None, 100_000, 0.00001, None, 0.01, 0.01, 100,
+        "EUR", "USD", "USD", 5,
+    )
+    assert spec.round_lot(0.2789) == 0.27
+    assert spec.round_lot(0.999) == 0.99
+
+
+def test_an_ambiguous_symbol_is_refused_rather_than_guessed(config):
+    broker = TradeLockerBroker(config)
+    broker._account_meta = {"currency": "USD"}
+    broker._instruments_raw = [
+        {"name": "EURUSD.R", "tradableInstrumentId": 1, "routes": [{"id": 1, "type": "TRADE"}]},
+        {"name": "EURUSDX", "tradableInstrumentId": 2, "routes": [{"id": 2, "type": "TRADE"}]},
+    ]
+    broker._instrument_cache_at = float("inf")
+    with pytest.raises(BrokerRejected, match="matches multiple broker instruments"):
+        broker.instrument("EURUSD")
+
+
+def test_an_instrument_without_a_contract_size_is_refused(config):
+    """Guessing the contract size would mis-size every order on it."""
+
+    broker = TradeLockerBroker(config)
+    broker._account_meta = {"currency": "USD"}
+    broker._instruments_raw = [
+        {"name": "WEIRD", "tradableInstrumentId": 9, "routes": [{"id": 1, "type": "TRADE"}]}
+    ]
+    broker._instrument_cache_at = float("inf")
+    with pytest.raises(BrokerRejected, match="does not expose a contract size"):
+        broker.instrument("WEIRD")
+
+
+def test_an_instrument_without_a_trade_route_is_refused(config):
+    broker = TradeLockerBroker(config)
+    broker._account_meta = {"currency": "USD"}
+    broker._instruments_raw = [
+        {"name": "NOROUTE", "tradableInstrumentId": 9, "contractSize": 100, "routes": []}
+    ]
+    broker._instrument_cache_at = float("inf")
+    with pytest.raises(BrokerRejected, match="no TRADE route"):
+        broker.instrument("NOROUTE")
+
+
+def test_missing_credentials_are_reported_by_name(config):
+    stripped = dataclasses.replace(
+        config, broker=dataclasses.replace(config.broker, email=None, password=None)
+    )
+    broker = TradeLockerBroker(stripped)
+    with pytest.raises(ConfigError, match="TRADELOCKER_EMAIL"):
+        broker.login()
+
+
+# -- HTTP service ---------------------------------------------------------
+
+
+@pytest.fixture()
+def service(config, broker, repos, monkeypatch):
+    monkeypatch.setattr("bot.service.open_database", lambda _config: repos.db)
+    instance = BotService(config, broker=broker)
+    instance.orchestrator.startup()
+    return instance
+
+
+@pytest.fixture()
+def base_url(service):
+    server = serve(service, host="127.0.0.1", port=0)
+    yield f"http://127.0.0.1:{server.server_address[1]}"
+    server.shutdown()
+
+
+def get(url: str) -> tuple[int, dict]:
+    try:
+        with urllib.request.urlopen(url, timeout=5) as response:
+            return response.status, json.loads(response.read().decode())
+    except urllib.error.HTTPError as exc:
+        return exc.code, json.loads(exc.read().decode())
+
+
+def post(url: str, payload: dict, token: str | None = None) -> tuple[int, dict]:
+    request = urllib.request.Request(
+        url, data=json.dumps(payload).encode(), method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    if token:
+        request.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return response.status, json.loads(response.read().decode())
+    except urllib.error.HTTPError as exc:
+        return exc.code, json.loads(exc.read().decode())
+
+
+def test_health_endpoint_reports_ok_when_everything_works(base_url):
+    status, payload = get(f"{base_url}/healthz")
+    assert status == 200 and payload["status"] == "ok"
+
+
+def test_health_endpoint_reports_503_when_a_critical_component_is_down(base_url, service):
+    service.repos.db.close()
+    status, payload = get(f"{base_url}/healthz")
+    assert status == 503
+    assert payload["status"] == "degraded"
+
+
+def test_the_snapshot_endpoint_fills_the_whole_dashboard(base_url):
+    status, payload = get(f"{base_url}/api/snapshot")
+    assert status == 200
+    for section in ("account", "positions", "history", "performance", "scan", "risk", "health"):
+        assert section in payload
+
+
+def test_unknown_routes_404(base_url):
+    assert get(f"{base_url}/api/nope")[0] == 404
+
+
+def test_control_endpoints_pause_and_resume_scanning(base_url, service):
+    assert post(f"{base_url}/api/control/scanning", {"enabled": False})[1]["enabled"] is False
+    assert service.orchestrator.trading_enabled is False
+    assert post(f"{base_url}/api/control/scanning", {"enabled": True})[1]["enabled"] is True
+
+
+def test_a_bad_control_payload_is_rejected(base_url):
+    status, payload = post(f"{base_url}/api/control/scanning", {"enabled": "yes please"})
+    assert status == 400
+
+
+def test_the_kill_switch_can_be_tripped_and_cleared_over_http(base_url, service):
+    post(f"{base_url}/api/control/kill-switch", {"active": True, "reason": "manual"})
+    assert service.orchestrator.kill_switch.active is True
+    post(f"{base_url}/api/control/kill-switch", {"active": False})
+    assert service.orchestrator.kill_switch.active is False
+
+
+def test_a_safety_trip_cannot_be_cleared_over_http_without_force(base_url, service):
+    service.orchestrator.kill_switch.trip("ENVIRONMENT_MISMATCH", "live detected")
+    post(f"{base_url}/api/control/kill-switch", {"active": False})
+    assert service.orchestrator.kill_switch.active is True
+    post(f"{base_url}/api/control/kill-switch", {"active": False, "force": True})
+    assert service.orchestrator.kill_switch.active is False
+
+
+def test_commands_require_the_token_when_one_is_configured(config, broker, repos, monkeypatch):
+    monkeypatch.setattr("bot.service.open_database", lambda _c: repos.db)
+    secured = dataclasses.replace(config, dashboard_token="s3cret")
+    instance = BotService(secured, broker=broker)
+    instance.orchestrator.startup()
+    server = serve(instance, host="127.0.0.1", port=0)
+    url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        assert post(f"{url}/api/control/scanning", {"enabled": False})[0] == 401
+        assert post(f"{url}/api/control/scanning", {"enabled": False}, token="s3cret")[0] == 200
+        # Reads stay open so the dashboard can always display state.
+        assert get(f"{url}/healthz")[0] == 200
+    finally:
+        server.shutdown()
+
+
+def test_a_manual_scan_can_be_triggered_over_http(base_url, service, broker):
+    status, payload = post(f"{base_url}/api/control/scan", {})
+    assert status == 200
+    assert "decision" in payload
+
+
+def test_the_api_never_exposes_a_secret(base_url, monkeypatch):
+    monkeypatch.setenv("TRADELOCKER_PASSWORD", "hunter2-very-secret")
+    _, payload = get(f"{base_url}/api/snapshot")
+    assert "hunter2-very-secret" not in json.dumps(payload)
+
+
+def test_graceful_shutdown_does_not_touch_positions(service, broker):
+    broker.add_position(symbol="EURUSD")
+    service.shutdown()
+    assert broker.closures == [], "a deploy must never close a live position"
+    assert len(broker.positions()) == 1

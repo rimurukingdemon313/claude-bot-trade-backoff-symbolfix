@@ -153,6 +153,21 @@ def build_setup_report(config: TradingConfig, *, equity: float | None = None) ->
             "No DASHBOARD_TOKEN: anyone who can reach this URL can pause the bot or trip "
             "the kill switch."
         )
+    # The silent-永-NO-TRADE trap: AI is required, no provider is configured,
+    # and trading without AI is not permitted. Every candidate is then
+    # rejected at the AI gate and the only trace is a line in the decision
+    # journal. Failing closed is correct; failing closed SILENTLY is not.
+    ai = config.ai
+    if ai.enabled and not (ai.gemini_key or ai.groq_key) and not ai.allow_trade_without_ai:
+        warnings.append(
+            "AI_ENABLED=true but neither GEMINI_API_KEY nor GROQ_API_KEY is set, and "
+            "AI_ALLOW_TRADE_WITHOUT_AI=false. Every setup will be REJECTED at the AI "
+            "gate and the bot will never open a trade. Fix by one of: set "
+            "AI_ENABLED=false to run fully deterministically (recommended — AI is a "
+            "veto only, never a source of trades), set AI_ALLOW_TRADE_WITHOUT_AI=true, "
+            "or add an API key."
+        )
+
     if config.mode is ExecutionMode.DEMO_LIVE:
         warnings.append(
             "TRADING_MODE=demo_live: real orders will be placed on the DEMO account. "

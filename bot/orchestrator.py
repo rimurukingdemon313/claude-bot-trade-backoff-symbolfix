@@ -599,6 +599,32 @@ class Orchestrator:
             return AIValidation(False, (f"AI validation unavailable: {exc}",), None)
         return validate_ai_decision(decision, candidate, config)
 
+    def _ai_gate_status(self) -> dict[str, Any]:
+        """Whether the AI stage can ever pass.
+
+        Reported because the failure mode is invisible otherwise: AI enabled
+        with no provider and no permission to proceed without one rejects
+        every candidate, and the only evidence is a journal line.
+        """
+
+        ai = self.config.ai
+        blocking = (
+            ai.enabled
+            and not (ai.gemini_key or ai.groq_key)
+            and not ai.allow_trade_without_ai
+        )
+        return {
+            "ok": not blocking,
+            "blockingAllTrades": blocking,
+            "note": (
+                "AI is required but no provider is configured — every setup is rejected "
+                "at the AI gate. Set AI_ENABLED=false, or AI_ALLOW_TRADE_WITHOUT_AI=true, "
+                "or add an API key."
+            )
+            if blocking
+            else None,
+        }
+
     def _rate_lookup(self, base: str, quote: str) -> float | None:
         """Broker-sourced FX rate for cross-currency risk conversion."""
 
@@ -776,7 +802,7 @@ class Orchestrator:
             "broker": {"ok": bool(broker_health.get("connected")), **broker_health},
             "demo": {"ok": demo_ok, **(self.last_demo.as_dict() if self.last_demo else {})},
             "marketData": safe("marketData", lambda: {"ok": True, **self.market_data.health()}),
-            "ai": safe("ai", self.ai.health),
+            "ai": safe("ai", lambda: {**self.ai.health(), **self._ai_gate_status()}),
             "news": safe("news", self.news.health),
             "killSwitch": kill.as_dict(),
             "startup": {"ok": self.startup_complete, "error": self.startup_error},

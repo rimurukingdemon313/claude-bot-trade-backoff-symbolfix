@@ -309,3 +309,65 @@ def test_an_unreachable_profit_floor_is_warned_about(monkeypatch):
 
     report = build_setup_report(load_config(), equity=500.0)
     assert any("No setup can pass this filter" in warning for warning in report.warnings)
+
+
+def test_ai_enabled_without_a_provider_is_flagged_as_blocking(monkeypatch):
+    """The silent never-trade trap: AI required, no key, no permission to
+    proceed without one. Failing closed is correct; failing closed silently
+    is not."""
+
+    from bot.config import load_config
+    from bot.setup_status import build_setup_report
+
+    for name in ("GEMINI_API_KEY", "GROQ_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("AI_ENABLED", "true")
+    monkeypatch.setenv("AI_ALLOW_TRADE_WITHOUT_AI", "false")
+
+    report = build_setup_report(load_config())
+    assert any("never open a trade" in warning for warning in report.warnings), report.warnings
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"AI_ENABLED": "false"},
+        {"AI_ENABLED": "true", "AI_ALLOW_TRADE_WITHOUT_AI": "true"},
+        {"AI_ENABLED": "true", "GEMINI_API_KEY": "a-key"},
+    ],
+)
+def test_each_documented_fix_clears_the_ai_block(monkeypatch, env):
+    from bot.config import load_config
+    from bot.setup_status import build_setup_report
+
+    for name in ("GEMINI_API_KEY", "GROQ_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("AI_ALLOW_TRADE_WITHOUT_AI", "false")
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+
+    report = build_setup_report(load_config())
+    assert not any("never open a trade" in warning for warning in report.warnings)
+
+
+def test_health_reports_the_ai_gate_as_blocking(config, broker, repos, monkeypatch):
+    import dataclasses
+
+    from bot.marketdata.provider import MarketDataProvider
+    from bot.orchestrator import Orchestrator
+
+    blocked = dataclasses.replace(
+        config,
+        ai=dataclasses.replace(
+            config.ai, enabled=True, gemini_key=None, groq_key=None,
+            allow_trade_without_ai=False,
+        ),
+    )
+    orchestrator = Orchestrator(
+        blocked, broker=broker, repositories=repos,
+        market_data=MarketDataProvider(broker, blocked),
+    )
+    orchestrator.startup()
+    ai = orchestrator.health()["components"]["ai"]
+    assert ai["blockingAllTrades"] is True
+    assert "every setup is rejected" in ai["note"]

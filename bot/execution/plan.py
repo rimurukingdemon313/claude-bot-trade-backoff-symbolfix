@@ -45,10 +45,15 @@ class TradePlan:
     route_id: int
     created_at: str
     context: dict[str, Any]
+    #: Which strategy produced this trade (project rule 14). Two modes with
+    #: different targets and different frequencies must never be averaged
+    #: into one performance number, and after the fact the only way to
+    #: separate them is to have written it down at the time.
+    strategy: str = "smc"
 
     def as_dict(self) -> dict[str, Any]:
         data = asdict(self)
-        data["versions"] = version_stamp()
+        data["versions"] = {**version_stamp(), "strategy": self.strategy}
         return data
 
 
@@ -85,6 +90,7 @@ def build_plan(
     score: Any,
     ai_confidence: float | None,
     trigger_time: datetime | None = None,
+    strategy: str = "smc",
 ) -> TradePlan:
     moment = trigger_time or candidate.timestamp or utc_now()
     size = risk_decision.size
@@ -130,4 +136,5 @@ def build_plan(
             "scoreComponents": score.as_dict(),
             "sizing": size.as_dict(),
         },
+        strategy=strategy,
     )

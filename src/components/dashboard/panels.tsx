@@ -17,6 +17,7 @@ import {
   type RiskState,
   type Scan,
   type ScanSymbol,
+  type StrategyStatus,
   fmt,
 } from "@/lib/api";
 import {
@@ -912,6 +913,57 @@ export function DoctorPanel() {
 
 // -- journal ---------------------------------------------------------------
 
+/**
+ * The ranked causes of NO TRADE.
+ *
+ * "Why is it not trading?" is the question every operator of a selective
+ * system eventually asks, and the honest answer is a measurement, not an
+ * opinion. A stage histogram says SMC/NO_SETUP and explains nothing; the
+ * top row here names the binding constraint, which is usually one thing
+ * and is usually fixable.
+ */
+export function BlockersPanel({ blockers }: { blockers: any[] }) {
+  return (
+    <Card
+      title="Why no trade"
+      subtitle="The last 7 days of rejections, ranked by cause"
+    >
+      {!blockers?.length ? (
+        <Empty>
+          Nothing rejected yet. Once the bot has scanned a few sessions, the reasons it stood
+          aside are counted here.
+        </Empty>
+      ) : (
+        <ul className="space-y-2">
+          {blockers.map((entry, index) => (
+            <li key={index}>
+              <div className="flex items-baseline justify-between gap-2 text-[11px]">
+                <span className="truncate text-slate-300">{entry.reason}</span>
+                <span className="shrink-0 tabular-nums text-slate-500">
+                  {entry.count} · {Math.round((entry.share ?? 0) * 100)}%
+                </span>
+              </div>
+              <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-slate-800">
+                <div
+                  className={cn("h-full rounded-full", index === 0 ? "bg-amber-500" : "bg-slate-600")}
+                  style={{ width: `${Math.max(2, Math.round((entry.share ?? 0) * 100))}%` }}
+                />
+              </div>
+              <p className="mt-0.5 text-[10px] uppercase tracking-wide text-slate-600">
+                {entry.stage}
+              </p>
+            </li>
+          ))}
+        </ul>
+      )}
+      <p className="mt-4 text-[11px] text-slate-500">
+        A high count is not a fault. NO TRADE is the expected result — this only shows which
+        filter is doing the work, so any change is made against evidence rather than a hunch.
+      </p>
+    </Card>
+  );
+}
+
 export function JournalPanel({ rows, histogram }: { rows: any[]; histogram: any[] }) {
   return (
     <Card
@@ -944,6 +996,92 @@ export function JournalPanel({ rows, histogram }: { rows: any[]; histogram: any[
           ))}
         </ul>
       )}
+    </Card>
+  );
+}
+
+// -- strategy --------------------------------------------------------------
+
+/**
+ * The mode switch.
+ *
+ * Selecting a strategy changes which analysis runs — nothing else. The
+ * demo guard, the risk engine and the execution guards are the same code
+ * either way (project rule 11: presentation may make the system safer or
+ * ask it to look again; it may never open, size or close a trade).
+ *
+ * Each option states plainly whether it can actually trade at the current
+ * equity. A mode whose target is smaller than the profit floor will find
+ * setups and watch every one of them rejected, and that belongs at the
+ * switch rather than at the end of a silent week.
+ */
+export function StrategyPanel({
+  status,
+  onSelect,
+  pending,
+}: {
+  status: StrategyStatus | undefined;
+  onSelect: (key: string) => void;
+  pending: boolean;
+}) {
+  if (!status) {
+    return (
+      <Card title="Strategy">
+        <Unavailable status="LOADING" />
+      </Card>
+    );
+  }
+  return (
+    <Card
+      title="Strategy"
+      subtitle="Which analysis looks for trades. Risk, sizing and the demo guard never change."
+    >
+      <div className="space-y-2">
+        {status.options.map((option) => {
+          const active = option.key === status.active;
+          return (
+            <button
+              key={option.key}
+              type="button"
+              disabled={pending || active}
+              onClick={() => onSelect(option.key)}
+              className={cn(
+                "block w-full rounded-xl border p-3 text-left transition",
+                "min-h-[38px] disabled:cursor-default",
+                active
+                  ? "border-sky-700 bg-sky-950/40"
+                  : "border-slate-800 bg-slate-950/40 hover:border-slate-700",
+              )}
+            >
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-sm font-semibold text-slate-100">{option.name}</span>
+                {active ? (
+                  <Badge tone="good">ACTIVE</Badge>
+                ) : (
+                  <Badge tone="neutral">{pending ? "…" : "SWITCH"}</Badge>
+                )}
+                <span className="ml-auto shrink-0 text-[11px] tabular-nums text-slate-400">
+                  min 1:{option.minRiskReward}
+                </span>
+              </div>
+              <p className="mt-1.5 text-[11px] leading-snug text-slate-400">{option.description}</p>
+              <p className="mt-1 text-[11px] text-slate-500">
+                Expect {option.expectedFrequency}.
+              </p>
+              {option.note && (
+                <p className="mt-2 rounded-lg border border-amber-900 bg-amber-950/40 p-2 text-[11px] leading-snug text-amber-300">
+                  {option.note}
+                </p>
+              )}
+            </button>
+          );
+        })}
+      </div>
+      <p className="mt-4 text-[11px] leading-snug text-slate-500">
+        Switching takes effect on the next scan and survives a restart. Open positions are not
+        touched — they keep the stop and target they were opened with. No win rate is claimed for
+        either mode; the trade history is the only thing that can say.
+      </p>
     </Card>
   );
 }

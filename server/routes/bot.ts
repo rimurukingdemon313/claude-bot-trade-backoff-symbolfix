@@ -27,6 +27,7 @@ const READ_ROUTES = [
   "/scan",
   "/journal",
   "/risk",
+  "/strategy",
   "/snapshot",
 ] as const;
 
@@ -61,6 +62,7 @@ for (const path of READ_ROUTES) {
 const COMMAND_ROUTES: Record<string, { path: string; timeoutMs?: number }> = {
   "/api/control/scanning": { path: "/api/control/scanning" },
   "/api/control/kill-switch": { path: "/api/control/kill-switch" },
+  "/api/control/strategy": { path: "/api/control/strategy" },
   // A manual scan analyses every configured symbol and may place an
   // order, so it needs a far longer budget than a status read.
   "/api/control/scan": { path: "/api/control/scan", timeoutMs: 240_000 },

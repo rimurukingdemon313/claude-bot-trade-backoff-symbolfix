@@ -346,6 +346,9 @@ class TradingConfig:
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
     paper: PaperConfig = field(default_factory=PaperConfig)
     mode: ExecutionMode = ExecutionMode.PAPER
+    #: Starting strategy. The dashboard switch overrides it and persists
+    #: that choice, so this is the boot default, not the live value.
+    strategy: str = "smc"
     require_demo: bool = REQUIRE_DEMO
     dashboard_token: str | None = None
     trading_enabled_default: bool = True
@@ -470,11 +473,17 @@ def profit_floor_feasibility(config: "TradingConfig", equity: float) -> dict[str
             f"close this gap."
         )
     elif demanding:
+        # Name the lever. An operator told only that setups are being
+        # filtered cannot tell whether that is the strategy or the
+        # configuration — and here it is the configuration, by arithmetic.
+        affordable = max_risk * min_rr
         reason = (
             f"reachable but demanding: at ${equity:,.2f} equity the ${max_risk:,.2f} risk ceiling "
             f"needs a setup worth 1:{required_rr:.1f} R:R to clear the ${floor:,.2f} floor, above "
-            f"the 1:{min_rr:g} minimum. Ordinary setups will be filtered out; expect NO TRADE most "
-            f"days until equity reaches about ${comfortable_equity:,.2f}."
+            f"the 1:{min_rr:g} minimum. Expect NO TRADE most days. Three honest ways out, and "
+            f"raising risk is not one of them: grow equity to about ${comfortable_equity:,.2f}, "
+            f"set OPPORTUNITY_MINIMUM_PROFIT to ${affordable:,.0f} or less to accept what this "
+            f"account can actually produce, or accept the low frequency as the cost of the floor."
         )
     else:
         reason = (
@@ -497,13 +506,45 @@ def profit_floor_feasibility(config: "TradingConfig", equity: float) -> dict[str
     }
 
 
+#: Tolerance for comparing R-multiples.
+#:
+#: An R:R is a ratio of two floats, and a target constructed to sit EXACTLY
+#: on a floor recomputes as 1.4999999999999998 about as often as
+#: 1.5000000000000555. Without this, a setup priced precisely at the
+#: minimum is accepted or rejected by the last bit of a double — measured
+#: at 40 rejections in 600 on targets built to land on the floor. The same
+#: constant already guards the break-even trigger, for the same reason.
+R_EPSILON = 1e-6
+
 #: The largest risk:reward this build treats as attainable when judging
 #: whether the profit floor is reachable. Matches the upper clamp on
 #: `RISK_MIN_RR`; structural targets beyond it exist but are too rare to
 #: base a feasibility promise on.
 ATTAINABLE_RISK_REWARD_CEILING = 10.0
 
-DEFAULT_SYMBOLS = ("EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCHF", "XAUUSD")
+#: The instruments scanned when TRADED_SYMBOLS is not set.
+#:
+#: Breadth is the one honest way to see more setups: each symbol is an
+#: independent chance for structure to line up, and none of it touches
+#: risk. Per-trade risk, the portfolio cap, the concurrent-position limit
+#: and the correlation check are unchanged and still bound total exposure
+#: — twenty symbols do not mean twenty positions.
+#:
+#: Everything here is liquid enough for the spread check to pass during
+#: London and New York. Exotics are deliberately absent: a wide spread
+#: eats a 1:2 setup before structure gets a say.
+DEFAULT_SYMBOLS = (
+    # Majors.
+    "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCHF", "USDCAD", "NZDUSD",
+    # EUR crosses.
+    "EURGBP", "EURJPY", "EURAUD", "EURCHF", "EURCAD",
+    # GBP crosses.
+    "GBPJPY", "GBPAUD", "GBPCAD", "GBPCHF",
+    # Commodity and JPY crosses.
+    "AUDJPY", "AUDCAD", "AUDNZD", "NZDJPY", "CADJPY", "CHFJPY",
+    # Metals.
+    "XAUUSD",
+)
 
 
 def load_config(env: Mapping[str, str] | None = None) -> TradingConfig:
@@ -579,6 +620,7 @@ def load_config(env: Mapping[str, str] | None = None) -> TradingConfig:
     config = TradingConfig(
         symbols=_env_list("TRADED_SYMBOLS", DEFAULT_SYMBOLS),
         mode=mode,
+        strategy=(_env_str("TRADING_STRATEGY") or "smc").strip().lower(),
         paper=PaperConfig(
             starting_balance=(
                 _env_float("PAPER_STARTING_BALANCE", 10_000.0, low=1.0, high=10_000_000.0)

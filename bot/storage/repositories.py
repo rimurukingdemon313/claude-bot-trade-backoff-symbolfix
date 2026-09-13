@@ -9,6 +9,7 @@ records.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Iterable, Mapping
 
 from ..clock import trading_day, utc_now
@@ -406,6 +407,25 @@ class TradeRepository:
         return row
 
 
+#: Numbers inside a rejection reason are the instance, not the cause.
+#: Folding them keeps "R:R 1:2.13 is below the minimum 1:4" and
+#: "R:R 1:3.04 is below the minimum 1:4" as one row instead of two.
+#:
+#: The lookbehind matters: a digit attached to a letter or to another
+#: digit of the same token is part of a NAME,
+#: not a measurement. Without it "M15 has no structure" folds to "M# has
+#: no structure" and silently merges M15 with M5, H1 with H4 — destroying
+#: exactly the distinction the histogram exists to show.
+_NUMBER = re.compile(r"(?<![A-Za-z0-9])\d+(?:[.,]\d+)?%?")
+
+
+def _reason_stem(reason: str) -> str:
+    """The cause a rejection reason describes, without its instance."""
+
+    stem = _NUMBER.sub("#", reason.strip())
+    return stem[:160]
+
+
 class DecisionJournal:
     """Every decision — including NO TRADE — with its reason.
 
@@ -471,6 +491,51 @@ class DecisionJournal:
             """,
             (cutoff_iso,),
         )
+
+    def blocker_histogram(self, days: int = 7, limit: int = 15) -> list[dict[str, Any]]:
+        """What actually stopped the trades, ranked.
+
+        `rejection_histogram` groups by stage, which answers "where" but
+        never "why" — and "why" is the only version anyone can act on. Two
+        weeks of SMC/NO_SETUP tells you nothing; two weeks of "structural
+        R:R is 1:2.1, below the required 1:4" tells you the profit floor is
+        the binding constraint, not the strategy.
+
+        Reasons carry prices and symbols, so identical causes would each
+        appear once. They are folded to their stem first.
+        """
+
+        from datetime import datetime, timezone
+
+        cutoff = datetime.fromtimestamp(
+            utc_now().timestamp() - days * 86400, tz=timezone.utc
+        ).isoformat()
+        rows = self.db.query(
+            """
+            SELECT stage, reason, COUNT(*) AS count
+              FROM decisions
+             WHERE created_at >= ? AND outcome <> 'CANDIDATE' AND reason IS NOT NULL
+             GROUP BY stage, reason
+            """,
+            (cutoff,),
+        )
+
+        folded: dict[tuple[str, str], int] = {}
+        for row in rows:
+            key = (str(row.get("stage") or "?"), _reason_stem(str(row.get("reason") or "")))
+            folded[key] = folded.get(key, 0) + int(row.get("count") or 0)
+
+        ranked = sorted(folded.items(), key=lambda item: -item[1])[:limit]
+        total = sum(folded.values())
+        return [
+            {
+                "stage": stage,
+                "reason": reason,
+                "count": count,
+                "share": round(count / total, 4) if total else 0.0,
+            }
+            for (stage, reason), count in ranked
+        ]
 
     def latest_scan(self) -> list[dict[str, Any]]:
         row = self.db.query_one("SELECT scan_id FROM decisions ORDER BY created_at DESC LIMIT 1")

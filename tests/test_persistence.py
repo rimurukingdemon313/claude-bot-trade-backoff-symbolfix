@@ -194,3 +194,53 @@ def test_sql_placeholders_are_rewritten_for_postgres():
     )
     # A literal question mark inside a string must survive untouched.
     assert database._rewrite("SELECT 'why?' WHERE a = ?") == "SELECT 'why?' WHERE a = %s"
+
+
+# -- what is actually blocking the trades ---------------------------------
+
+
+def test_blockers_are_ranked_by_cause_not_by_stage(repos):
+    """A stage histogram says SMC/NO_SETUP and explains nothing."""
+
+    for _ in range(5):
+        repos.journal.record(
+            scan_id="s1", symbol="EURUSD", stage="SMC", outcome="NO_SETUP",
+            reason="M15 has no confirmed directional structure",
+        )
+    for _ in range(2):
+        repos.journal.record(
+            scan_id="s1", symbol="GBPUSD", stage="RISK", outcome="REJECTED",
+            reason="spread too wide",
+        )
+
+    blockers = repos.journal.blocker_histogram(days=7)
+    assert blockers[0]["reason"] == "M15 has no confirmed directional structure"
+    assert blockers[0]["count"] == 5
+    assert blockers[0]["share"] == pytest.approx(5 / 7, abs=1e-4)  # stored rounded for display
+    assert blockers[1]["count"] == 2
+
+
+def test_identical_causes_fold_despite_differing_numbers(repos):
+    """Otherwise the one real answer is scattered across a hundred rows."""
+
+    for rr in ("2.13", "2.44", "3.01"):
+        repos.journal.record(
+            scan_id="s1", symbol="EURUSD", stage="SMC", outcome="NO_SETUP",
+            reason=f"structural R:R is 1:{rr}, below the required 1:4",
+        )
+
+    blockers = repos.journal.blocker_histogram(days=7)
+    assert len(blockers) == 1
+    assert blockers[0]["count"] == 3
+    assert "#" in blockers[0]["reason"]
+
+
+def test_accepted_candidates_are_not_counted_as_blockers(repos):
+    repos.journal.record(
+        scan_id="s1", symbol="EURUSD", stage="SMC", outcome="CANDIDATE", reason="clean setup"
+    )
+    assert repos.journal.blocker_histogram(days=7) == []
+
+
+def test_a_blockerless_journal_returns_nothing_rather_than_failing(repos):
+    assert repos.journal.blocker_histogram(days=7) == []

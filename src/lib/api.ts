@@ -244,12 +244,35 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return payload as T;
 }
 
+export type StrategyOption = {
+  key: string;
+  name: string;
+  description: string;
+  minRiskReward: number;
+  expectedFrequency: string;
+  thesis: string;
+  active: boolean;
+  typicalProfitAtFloorRisk?: number;
+  clearsProfitFloor?: boolean;
+  note?: string | null;
+};
+
+export type StrategyStatus = { active: string; options: StrategyOption[] };
+
 export const api = {
   snapshot: () => request<Snapshot>("/api/snapshot"),
   setup: () => request<SetupReport>("/api/setup"),
   doctor: () => request<DoctorReport>("/api/doctor"),
   journal: (limit = 60) =>
-    request<{ status: Status; data: any[]; histogram: any[] }>(`/api/journal?limit=${limit}`),
+    request<{ status: Status; data: any[]; histogram: any[]; blockers: any[] }>(
+      `/api/journal?limit=${limit}`,
+    ),
+  strategy: () => request<{ status: Status; data: StrategyStatus }>("/api/strategy"),
+  setStrategy: (strategy: string) =>
+    request<{ status: Status; data: StrategyStatus }>("/api/control/strategy", {
+      method: "POST",
+      body: JSON.stringify({ strategy }),
+    }),
   setScanning: (enabled: boolean) =>
     request<{ enabled: boolean }>("/api/control/scanning", {
       method: "POST",

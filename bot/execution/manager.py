@@ -19,7 +19,7 @@ from datetime import datetime, timedelta
 from typing import Any, Sequence
 
 from ..clock import ensure_utc, utc_now
-from ..config import TradingConfig
+from ..config import R_EPSILON, TradingConfig
 from ..errors import BotError
 from ..observability import log_event
 from ..smc.sessions import is_forex_weekend
@@ -64,7 +64,7 @@ def _stop_is_behind_market(direction: str, stop: float, price: float, buffer: fl
 #: R comparisons use a small tolerance. Price arithmetic in floating point
 #: makes an exact 1.0R land at 0.9999999999999556, which would silently
 #: skip the break-even move at precisely the level it is meant to fire.
-R_EPSILON = 1e-6
+
 
 
 def r_multiple(*, direction: str, entry: float, stop: float, price: float) -> float:

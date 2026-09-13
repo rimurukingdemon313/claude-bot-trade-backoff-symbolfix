@@ -27,7 +27,7 @@ from typing import Any, Mapping, Sequence
 from ..broker.models import InstrumentSpec
 from ..broker.symbols import same_instrument
 from ..clock import trading_day, utc_now
-from ..config import TradingConfig
+from ..config import TradingConfig, R_EPSILON
 from ..observability import log_event
 from ..safety.kill_switch import KillSwitch
 from ..smc.engine import SetupCandidate
@@ -313,7 +313,7 @@ class RiskEngine:
                 False, candidate.symbol, candidate.direction,
                 ("SELL levels invalid: require target < entry < stop",), limits=limits_snapshot
             )
-        if candidate.risk_reward < self.limits.min_risk_reward:
+        if candidate.risk_reward < self.limits.min_risk_reward - R_EPSILON:
             return RiskDecision(
                 False, candidate.symbol, candidate.direction,
                 (

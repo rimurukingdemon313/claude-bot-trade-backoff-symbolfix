@@ -33,6 +33,8 @@ import {
   DoctorPanel,
   HealthPanel,
   HistoryPanel,
+  BlockersPanel,
+  StrategyPanel,
   JournalPanel,
   ModeBanner,
   PerformancePanel,
@@ -76,6 +78,14 @@ export default function Dashboard() {
     retry: 1,
   });
 
+  // Slow poll: the mode changes when a human changes it, never on its own.
+  const strategy = useQuery({
+    queryKey: ["strategy"],
+    queryFn: api.strategy,
+    refetchInterval: REFRESH_MS * 8,
+    retry: 1,
+  });
+
   const journal = useQuery({
     queryKey: ["journal"],
     queryFn: () => api.journal(60),
@@ -83,6 +93,17 @@ export default function Dashboard() {
     enabled: tab === "system",
     retry: 1,
   });
+
+  // The mode in force, for the header. Never guessed from config: the
+  // switch persists its choice, so only the bot can say what is running.
+  const activeStrategy = useMemo(() => {
+    const option = strategy.data?.data?.options?.find((item) => item.active);
+    if (!option) return null;
+    return {
+      name: option.name,
+      shortLabel: option.key === "smc" ? "SMC" : "REVERSION",
+    };
+  }, [strategy.data]);
 
   const invalidate = useCallback(() => {
     void queryClient.invalidateQueries({ queryKey: ["snapshot"] });
@@ -93,6 +114,18 @@ export default function Dashboard() {
     setNotice(message);
     window.setTimeout(() => setNotice(null), 6000);
   }, []);
+
+  const switchStrategy = useMutation({
+    mutationFn: (key: string) => api.setStrategy(key),
+    onSuccess: (result) => {
+      void queryClient.invalidateQueries({ queryKey: ["strategy"] });
+      invalidate();
+      const active = result?.data?.options?.find((option) => option.active);
+      announce(`Strategy switched to ${active?.name ?? result?.data?.active}.`);
+    },
+    onError: (error: unknown) =>
+      announce(error instanceof Error ? error.message : "Could not switch strategy."),
+  });
 
   const scanning = useMutation({
     mutationFn: (enabled: boolean) => api.setScanning(enabled),
@@ -161,7 +194,9 @@ export default function Dashboard() {
               <ShieldAlert className="h-5 w-5 shrink-0 text-rose-400" aria-hidden />
             )}
             <div className="min-w-0">
-              <h1 className="truncate text-sm font-semibold">SMC Trading Bot</h1>
+              <h1 className="truncate text-sm font-semibold">
+                {activeStrategy?.name ?? "Trading Bot"}
+              </h1>
               <p className="truncate text-[11px] text-slate-500">
                 {demoVerified
                 ? `TradeLocker DEMO · ${health?.paper ? "paper" : "live orders"}`
@@ -170,6 +205,10 @@ export default function Dashboard() {
             </div>
           </div>
           <div className="ml-auto flex flex-wrap items-center gap-1.5">
+            {/* Which strategy is looking for trades, at a glance. Buried in
+                a tab it was the one thing an operator could not answer
+                without hunting for it. */}
+            {activeStrategy && <Badge tone="info">{activeStrategy.shortLabel}</Badge>}
             <Badge tone={connectionState.tone}>{connectionState.label}</Badge>
             <Badge tone={killActive ? "bad" : scannerEnabled ? "good" : "warn"}>
               {killActive ? "STOPPED" : scannerEnabled ? "SCANNING" : "PAUSED"}
@@ -253,6 +292,12 @@ export default function Dashboard() {
             <HealthPanel health={health} />
             {setup.data?.ready && <ConfigurationPanel setup={setup.data} />}
             <DoctorPanel />
+            <StrategyPanel
+              status={strategy.data?.data}
+              onSelect={(key) => switchStrategy.mutate(key)}
+              pending={switchStrategy.isPending}
+            />
+            <BlockersPanel blockers={journal.data?.blockers ?? []} />
             <JournalPanel
               rows={journal.data?.data ?? []}
               histogram={journal.data?.histogram ?? []}

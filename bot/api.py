@@ -214,6 +214,22 @@ class DashboardApi:
             "generatedAt": utc_now().isoformat(),
         }
 
+    def setup_status(self) -> dict[str, Any]:
+        """Which configuration is present, and what to do next.
+
+        Answers before credentials exist — it is the screen to read when
+        nothing else works yet. Never includes a value, only presence.
+        """
+
+        from .setup_status import build_setup_report
+
+        equity: float | None = None
+        try:
+            equity = self.orchestrator.broker.account_state().equity
+        except Exception:  # noqa: BLE001 - unconfigured is the normal case here
+            equity = None
+        return build_setup_report(self.config, equity=equity).as_dict()
+
     def doctor_report(self, *, symbols: list[str] | None = None) -> dict[str, Any]:
         """Run the read-only account verification and return it masked.
 

@@ -245,3 +245,67 @@ def test_the_doctor_endpoint_answers_even_when_the_broker_is_broken(base_url, se
     status, payload = get(f"{base_url}/api/doctor")
     assert status == 200, "a diagnostic must always answer"
     assert payload["verdict"] == "FAIL"
+
+
+# -- configuration checklist -----------------------------------------------
+
+
+def test_the_setup_endpoint_answers_before_credentials_exist(base_url):
+    """This is the screen to read when nothing else works yet."""
+
+    status, payload = get(f"{base_url}/api/setup")
+    assert status == 200
+    for key in ("ready", "missingRequired", "settings", "warnings", "pasteBlock", "nextStep"):
+        assert key in payload
+    assert payload["nextStep"]
+
+
+def test_the_setup_endpoint_never_reveals_a_value(base_url, monkeypatch):
+    monkeypatch.setenv("TRADELOCKER_PASSWORD", "hunter2-very-secret-value")
+    monkeypatch.setenv("DASHBOARD_TOKEN", "token-abcdef-123456")
+    _, payload = get(f"{base_url}/api/setup")
+    body = json.dumps(payload)
+    assert "hunter2-very-secret-value" not in body
+    assert "token-abcdef-123456" not in body
+    # Presence is reported; the value is not.
+    names = {item["name"]: item for item in payload["settings"]}
+    assert names["TRADELOCKER_PASSWORD"]["present"] is True
+    assert "value" not in names["TRADELOCKER_PASSWORD"]
+
+
+def test_missing_required_settings_are_named(monkeypatch):
+    from bot.config import load_config
+    from bot.setup_status import build_setup_report
+
+    for name in ("TRADELOCKER_EMAIL", "TRADELOCKER_PASSWORD", "TRADELOCKER_SERVER", "TRADELOCKER_ACC_ID"):
+        monkeypatch.delenv(name, raising=False)
+    report = build_setup_report(load_config())
+    assert report.ready is False
+    assert "TRADELOCKER_SERVER" in report.missing_required
+    assert "TRADELOCKER_SERVER=" in report.paste_block
+
+
+def test_a_missing_database_url_is_warned_about(monkeypatch):
+    from bot.config import load_config
+    from bot.setup_status import build_setup_report
+
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    report = build_setup_report(load_config())
+    assert any("reset on every redeploy" in warning for warning in report.warnings)
+
+
+def test_demo_live_mode_is_warned_about(monkeypatch):
+    from bot.config import load_config
+    from bot.setup_status import build_setup_report
+
+    monkeypatch.setenv("TRADING_MODE", "demo_live")
+    report = build_setup_report(load_config())
+    assert any("real orders" in warning.lower() for warning in report.warnings)
+
+
+def test_an_unreachable_profit_floor_is_warned_about(monkeypatch):
+    from bot.config import load_config
+    from bot.setup_status import build_setup_report
+
+    report = build_setup_report(load_config(), equity=500.0)
+    assert any("No setup can pass this filter" in warning for warning in report.warnings)

@@ -76,6 +76,17 @@ class BotService:
             ),
             mode=self.config.mode.value,
         )
+        setup = self.api.setup_status()
+        if not setup["ready"]:
+            log_event(
+                "STARTUP",
+                f"configuration incomplete — {setup['nextStep']}",
+                severity="error",
+                missing_required=setup["missingRequired"],
+            )
+        for warning in setup["warnings"]:
+            log_event("STARTUP", warning, severity="warning")
+
         if _env_flag("STARTUP_DOCTOR", default=True):
             self._log_startup_verification()
 
@@ -271,6 +282,7 @@ def make_handler(service: BotService) -> type[BaseHTTPRequestHandler]:
                 ),
                 "/api/risk": api.risk_state,
                 "/api/snapshot": api.snapshot,
+                "/api/setup": api.setup_status,
                 "/api/doctor": lambda: api.doctor_report(
                     symbols=[s for s in query.get("symbol", []) if s] or None
                 ),

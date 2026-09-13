@@ -182,6 +182,24 @@ export type Health = {
   upcomingNews: any;
 };
 
+export type SetupSetting = {
+  name: string;
+  importance: 'required' | 'recommended' | 'optional';
+  purpose: string;
+  present: boolean;
+  example: string;
+};
+
+export type SetupReport = {
+  ready: boolean;
+  missingRequired: string[];
+  missingRecommended: string[];
+  settings: SetupSetting[];
+  warnings: string[];
+  pasteBlock: string;
+  nextStep: string;
+};
+
 export type DoctorReport = {
   verdict: 'PASS' | 'WARN' | 'FAIL';
   text: string;
@@ -217,6 +235,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   snapshot: () => request<Snapshot>("/api/snapshot"),
+  setup: () => request<SetupReport>("/api/setup"),
   doctor: () => request<DoctorReport>("/api/doctor"),
   journal: (limit = 60) =>
     request<{ status: Status; data: any[]; histogram: any[] }>(`/api/journal?limit=${limit}`),

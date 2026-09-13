@@ -7,6 +7,8 @@ import {
   api,
   type Account,
   type DoctorReport,
+  type SetupReport,
+  type SetupSetting,
   type Envelope,
   type HistoryRow,
   type Health,
@@ -651,6 +653,113 @@ export function HealthPanel({ health }: { health: Health | undefined }) {
               </li>
             ))}
           </ul>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+/**
+ * Configuration checklist.
+ *
+ * Shown whenever something required is missing, because the failure that
+ * actually strands people is a deployed service with one absent variable and
+ * no indication of which. Presence only — never a value.
+ */
+export function ConfigurationPanel({ setup }: { setup: SetupReport | undefined }) {
+  const [copied, setCopied] = useState(false);
+  if (!setup) return null;
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(setup.pasteBlock);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 4000);
+    } catch {
+      /* selection fallback: the block is rendered below */
+    }
+  };
+
+  const byImportance = (level: SetupSetting['importance']) =>
+    setup.settings.filter((item) => item.importance === level);
+
+  return (
+    <Card
+      title="Configuration"
+      subtitle="What this deployment has, and what it still needs. Values are never shown."
+      action={
+        <Badge tone={setup.ready ? 'good' : 'bad'}>
+          {setup.ready ? 'READY' : `${setup.missingRequired.length} MISSING`}
+        </Badge>
+      }
+    >
+      <p className="rounded-lg border border-slate-800 bg-slate-950/40 p-2 text-xs text-slate-300">
+        {setup.nextStep}
+      </p>
+
+      {setup.warnings.map((warning, index) => (
+        <p
+          key={index}
+          className="mt-2 rounded-lg border border-amber-900 bg-amber-950/40 p-2 text-[11px] text-amber-300"
+        >
+          {warning}
+        </p>
+      ))}
+
+      {(['required', 'recommended', 'optional'] as const).map((level) => {
+        const items = byImportance(level);
+        if (!items.length) return null;
+        return (
+          <div key={level} className="mt-4">
+            <h3 className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+              {level}
+            </h3>
+            <ul className="space-y-1">
+              {items.map((item) => (
+                <li
+                  key={item.name}
+                  className="flex items-start gap-2 rounded-lg border border-slate-800 bg-slate-950/40 px-2 py-1.5"
+                >
+                  <span
+                    className={cn(
+                      'mt-0.5 shrink-0 text-xs',
+                      item.present ? 'text-emerald-400' : level === 'required' ? 'text-rose-400' : 'text-amber-400',
+                    )}
+                    aria-hidden
+                  >
+                    {item.present ? '✓' : '✗'}
+                  </span>
+                  <span className="min-w-0">
+                    <span className="block font-mono text-[11px] text-slate-200">{item.name}</span>
+                    <span className="block text-[11px] text-slate-500">{item.purpose}</span>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        );
+      })}
+
+      {setup.pasteBlock && (
+        <div className="mt-4">
+          <div className="mb-1.5 flex items-center justify-between gap-2">
+            <h3 className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+              Paste into your host's environment variables
+            </h3>
+            <button
+              type="button"
+              onClick={copy}
+              className="inline-flex min-h-[32px] items-center rounded-lg border border-sky-800 bg-sky-950 px-2.5 text-[11px] font-medium text-sky-200 hover:bg-sky-900"
+            >
+              {copied ? 'Copied' : 'Copy'}
+            </button>
+          </div>
+          <pre className="overflow-x-auto rounded-lg border border-slate-800 bg-slate-950 p-3 text-[10px] leading-relaxed text-slate-300">
+            {setup.pasteBlock}
+          </pre>
+          <p className="mt-1.5 text-[11px] text-slate-500">
+            Fill the blanks in your host's settings — never in a chat, a file, or this page.
+          </p>
         </div>
       )}
     </Card>

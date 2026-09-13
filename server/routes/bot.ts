@@ -14,6 +14,9 @@ const router: IRouter = Router();
 
 const READ_ROUTES = [
   "/health",
+  // Configuration checklist. Answers before credentials exist, so it is the
+  // first thing a stuck deployment can read.
+  "/setup",
   // Read-only account verification, always masked. Given a longer budget
   // than the other reads because it makes a few dozen broker calls.
   "/doctor",

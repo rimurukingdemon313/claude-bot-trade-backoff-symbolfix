@@ -57,6 +57,22 @@ class Check:
         }
 
 
+#: Fields that identify the ACCOUNT rather than describe the integration.
+#: `--safe` masks these so the report can be shared without exposing a
+#: balance or an account number. Nothing here is needed to diagnose a
+#: field-mapping problem.
+SENSITIVE_KEYS = frozenset(
+    {
+        "balance", "equity", "marginUsed", "marginAvailable", "openPnl", "todayPnl",
+        "accountId", "accNum", "id", "name", "bestCaseProfit", "maxRiskPerTrade",
+        "requiredEquity",
+    }
+)
+
+#: Checks whose free-text detail quotes account figures.
+SENSITIVE_CHECKS = frozenset({"credentials", "account_state", "profit_objective", "demo_guard"})
+
+
 @dataclass
 class Report:
     checks: list[Check] = field(default_factory=list)
@@ -65,6 +81,32 @@ class Report:
         check = Check(name, status, detail, data)
         self.checks.append(check)
         return check
+
+    def sanitized(self) -> "Report":
+        """A copy with account figures masked, safe to paste anywhere.
+
+        Only balances, account identifiers and the numbers derived from them
+        are removed. Everything needed to diagnose the integration — the
+        history endpoint shape, instrument specifications, suffix naming,
+        conversion paths, candle validation — is preserved, because that is
+        the part worth sharing.
+        """
+
+        import re
+
+        masked = Report()
+        for check in self.checks:
+            detail = check.detail
+            if check.name in SENSITIVE_CHECKS:
+                # Replace bare numbers, keeping the surrounding words so the
+                # shape of the finding is still readable.
+                detail = re.sub(r"-?\d[\d,]*\.?\d*", "***", detail)
+            data = {
+                key: ("***" if key in SENSITIVE_KEYS else value)
+                for key, value in check.data.items()
+            }
+            masked.add(check.name, check.status, detail, **data)
+        return masked
 
     @property
     def failed(self) -> list[Check]:
@@ -373,6 +415,11 @@ def main(argv: list[str] | None = None) -> int:
         help="symbol to verify (repeatable). Defaults to the configured list.",
     )
     parser.add_argument("--json", action="store_true", help="machine-readable output")
+    parser.add_argument(
+        "--safe",
+        action="store_true",
+        help="mask account balances and identifiers so the report can be shared",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -383,12 +430,17 @@ def main(argv: list[str] | None = None) -> int:
 
     symbols = args.symbols or list(config.symbols)[:3]
     report = run(config, symbols)
+    failed = bool(report.failed)
+    if args.safe:
+        report = report.sanitized()
 
     if args.json:
         print(json.dumps(report.as_dict(), indent=2, default=str))
     else:
         print(report.render())
-    return 1 if report.failed else 0
+        if args.safe:
+            print(" Account figures masked (--safe). Integration details are intact.\n")
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

@@ -65,6 +65,10 @@ __pycache__/
 .env.*
 !.env.example
 
+# Output of scripts/setup.sh / bot.doctor. Masked with --safe, but it still
+# describes a specific account — not source.
+doctor-report.txt
+
 # Build output generated at container startup by index.js (esbuild bundles
 # server/index.ts into here) — not source, should not be committed.
 .runtime/

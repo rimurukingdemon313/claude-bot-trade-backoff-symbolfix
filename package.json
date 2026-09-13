@@ -11,7 +11,9 @@
     "bot": "python3 -m bot.service",
     "test": "python3 -m pytest",
     "test:py": "python3 -m pytest",
-    "verify": "npm run typecheck && npm run build && npm run test"
+    "verify": "npm run typecheck && npm run build && npm run test",
+    "setup": "bash scripts/setup.sh",
+    "doctor": "python3 -m bot.doctor --safe"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.3.3",

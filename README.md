@@ -77,17 +77,33 @@ There is no third value. LIVE is not a mode this build has.
 
 ## Quick start
 
+One command does everything — installs, prompts for your credentials
+locally, builds, tests, and verifies your broker account read-only:
+
+```sh
+bash scripts/setup.sh
+```
+
+Then:
+
+```sh
+npm start                 # bot + dashboard on :5000
+```
+
+It starts in **paper** mode, so nothing reaches your account until you set
+`TRADING_MODE=demo_live`.
+
+<details>
+<summary>Or do it manually</summary>
+
 ```sh
 npm install
 cp .env.example .env      # then fill in your TradeLocker DEMO credentials
-
-# 1. Verify the account BEFORE trading anything. Read-only.
-python3 -m bot.doctor
-
-# 2. Build and run (paper mode by default).
+python3 -m bot.doctor     # verify the account, read-only
 npm run build
-npm start                 # bot + dashboard on :5000
+npm start
 ```
+</details>
 
 ### Verify your account first
 
@@ -98,7 +114,9 @@ usable contract size and lot step, whether the currency conversion path
 resolves, and whether the profit floor is reachable at your equity. It is
 read-only — it never places, modifies or closes an order.
 
-Run it before every deployment and after any broker-side change.
+Run it before every deployment and after any broker-side change. Add
+`--safe` to mask balances and account identifiers so the report can be
+shared — the integration details that matter for diagnosis are preserved.
 
 Run the bot alone (no dashboard):
 

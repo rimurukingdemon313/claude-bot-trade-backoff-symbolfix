@@ -153,6 +153,22 @@ class DashboardApi:
             return {"status": "PENDING", "data": None, "message": "no scan has completed yet"}
         return {"status": "LIVE", "data": scan.as_dict(detail=detail)}
 
+    # -- strategy --------------------------------------------------------
+
+    def strategy(self) -> dict[str, Any]:
+        return {"status": "LIVE", "data": self.orchestrator.strategy_status()}
+
+    def set_strategy(self, name: str) -> dict[str, Any]:
+        """Switch mode.
+
+        Presentation cannot open, size or close a trade (project rule 11),
+        and this does none of those: it selects which analysis runs. Every
+        gate after it — the demo guard, the risk engine, the execution
+        guards — is untouched and still has to pass.
+        """
+
+        return {"status": "LIVE", "data": self.orchestrator.set_strategy(name)}
+
     def journal(self, limit: int = 100, symbol: str | None = None) -> dict[str, Any]:
         return {
             "status": "LIVE",

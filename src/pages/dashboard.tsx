@@ -34,6 +34,7 @@ import {
   HealthPanel,
   HistoryPanel,
   BlockersPanel,
+  StrategyPanel,
   JournalPanel,
   ModeBanner,
   PerformancePanel,
@@ -77,6 +78,14 @@ export default function Dashboard() {
     retry: 1,
   });
 
+  // Slow poll: the mode changes when a human changes it, never on its own.
+  const strategy = useQuery({
+    queryKey: ["strategy"],
+    queryFn: api.strategy,
+    refetchInterval: REFRESH_MS * 8,
+    retry: 1,
+  });
+
   const journal = useQuery({
     queryKey: ["journal"],
     queryFn: () => api.journal(60),
@@ -94,6 +103,18 @@ export default function Dashboard() {
     setNotice(message);
     window.setTimeout(() => setNotice(null), 6000);
   }, []);
+
+  const switchStrategy = useMutation({
+    mutationFn: (key: string) => api.setStrategy(key),
+    onSuccess: (result) => {
+      void queryClient.invalidateQueries({ queryKey: ["strategy"] });
+      invalidate();
+      const active = result?.data?.options?.find((option) => option.active);
+      announce(`Strategy switched to ${active?.name ?? result?.data?.active}.`);
+    },
+    onError: (error: unknown) =>
+      announce(error instanceof Error ? error.message : "Could not switch strategy."),
+  });
 
   const scanning = useMutation({
     mutationFn: (enabled: boolean) => api.setScanning(enabled),
@@ -254,6 +275,11 @@ export default function Dashboard() {
             <HealthPanel health={health} />
             {setup.data?.ready && <ConfigurationPanel setup={setup.data} />}
             <DoctorPanel />
+            <StrategyPanel
+              status={strategy.data?.data}
+              onSelect={(key) => switchStrategy.mutate(key)}
+              pending={switchStrategy.isPending}
+            />
             <BlockersPanel blockers={journal.data?.blockers ?? []} />
             <JournalPanel
               rows={journal.data?.data ?? []}

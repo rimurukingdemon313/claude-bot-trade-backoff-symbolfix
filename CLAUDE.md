@@ -152,3 +152,24 @@ until evidence justifies them.
 The backtester, walk-forward harness and Monte Carlo analysis exist to
 measure honestly, including labelling small samples as inconclusive. Report
 what the evidence supports and nothing more.
+
+## 14. A strategy proposes; risk disposes
+
+More than one strategy may look for trades, and the dashboard selects
+which one runs. What may never vary with that selection:
+
+- the demo guard, the risk engine, the AI veto and the execution guards
+  are the same code for every mode;
+- a strategy returns a priced `SetupCandidate` or a reason it found none.
+  It never computes a position size, a risk amount or a limit — rule 2
+  still holds, and a strategy that sized its own trade would be the second
+  source of truth that rule exists to prevent;
+- a `StrategyProfile` may choose a HIGHER risk:reward floor than the
+  build's, never a lower one. `StrategyProfile.__post_init__` asserts it
+  rather than trusting it;
+- an unknown strategy name is refused, never silently replaced with the
+  default. Silent substitution makes every past trade record a claim about
+  code that did not run.
+
+Record the strategy on every trade. Two modes with different targets and
+different frequencies must never be averaged into one performance number.

@@ -346,6 +346,9 @@ class TradingConfig:
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
     paper: PaperConfig = field(default_factory=PaperConfig)
     mode: ExecutionMode = ExecutionMode.PAPER
+    #: Starting strategy. The dashboard switch overrides it and persists
+    #: that choice, so this is the boot default, not the live value.
+    strategy: str = "smc"
     require_demo: bool = REQUIRE_DEMO
     dashboard_token: str | None = None
     trading_enabled_default: bool = True
@@ -503,6 +506,16 @@ def profit_floor_feasibility(config: "TradingConfig", equity: float) -> dict[str
     }
 
 
+#: Tolerance for comparing R-multiples.
+#:
+#: An R:R is a ratio of two floats, and a target constructed to sit EXACTLY
+#: on a floor recomputes as 1.4999999999999998 about as often as
+#: 1.5000000000000555. Without this, a setup priced precisely at the
+#: minimum is accepted or rejected by the last bit of a double — measured
+#: at 40 rejections in 600 on targets built to land on the floor. The same
+#: constant already guards the break-even trigger, for the same reason.
+R_EPSILON = 1e-6
+
 #: The largest risk:reward this build treats as attainable when judging
 #: whether the profit floor is reachable. Matches the upper clamp on
 #: `RISK_MIN_RR`; structural targets beyond it exist but are too rare to
@@ -607,6 +620,7 @@ def load_config(env: Mapping[str, str] | None = None) -> TradingConfig:
     config = TradingConfig(
         symbols=_env_list("TRADED_SYMBOLS", DEFAULT_SYMBOLS),
         mode=mode,
+        strategy=(_env_str("TRADING_STRATEGY") or "smc").strip().lower(),
         paper=PaperConfig(
             starting_balance=(
                 _env_float("PAPER_STARTING_BALANCE", 10_000.0, low=1.0, high=10_000_000.0)

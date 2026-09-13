@@ -374,3 +374,34 @@ def test_open_losses_count_toward_the_daily_limit(config):
     account = make_account(daily_realized_pnl=-150.0, open_pnl=-200.0)
     assert account.daily_pnl == pytest.approx(-350.0)
     assert RiskEngine(config).evaluate_kill_switch(account) == "DAILY_LOSS_LIMIT"
+
+
+def test_a_setup_priced_exactly_on_the_minimum_is_not_rejected_by_float_error(config, candidate):
+    """Measured: 40 rejections in 600 on targets built to land on the floor.
+
+    An R:R is a ratio of two doubles, so a target placed at exactly the
+    minimum recomputes as 1.4999999999999998 about as often as
+    1.5000000000000555. Without a tolerance, whether a trade is taken came
+    down to the last bit of a float — and the reversion strategy builds
+    EVERY target on its floor, which turned an intermittent bug into a
+    permanent one for that mode.
+    """
+
+    on_the_floor = dataclasses.replace(
+        candidate, risk_reward=config.risk.min_risk_reward - 1e-12
+    )
+    decision = RiskEngine(config).evaluate(
+        candidate=on_the_floor, tier="A", account=make_account(), spec=DEFAULT_SPEC, now=SETUP_END
+    )
+    assert not any("below the minimum" in reason for reason in decision.reasons), decision.reasons
+
+
+def test_a_setup_genuinely_below_the_minimum_is_still_rejected(config, candidate):
+    """The tolerance is for float noise, not for a real shortfall."""
+
+    short = dataclasses.replace(candidate, risk_reward=config.risk.min_risk_reward - 0.01)
+    decision = RiskEngine(config).evaluate(
+        candidate=short, tier="A", account=make_account(), spec=DEFAULT_SPEC, now=SETUP_END
+    )
+    assert decision.approved is False
+    assert any("below the minimum" in reason for reason in decision.reasons)

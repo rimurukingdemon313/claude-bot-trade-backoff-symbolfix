@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import threading
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Sequence
 
@@ -31,7 +31,7 @@ from .ai.validator import AIValidation, validate_ai_decision
 from .broker.models import InstrumentSpec
 from .clock import trading_day, utc_now
 from .config import TradingConfig, profit_floor_feasibility
-from .errors import AIError, BotError, DemoVerificationError, MarketDataError
+from .errors import AIError, BotError, ConfigError, DemoVerificationError, MarketDataError
 from .execution.executor import ExecutionResult, Executor
 from .execution.manager import PositionManager, plan_actions
 from .execution.plan import build_plan
@@ -44,12 +44,16 @@ from .safety.demo_guard import DemoVerification, verify_demo
 from .safety.kill_switch import KillSwitch
 from .scoring.scorer import SetupScore, SetupScorer, tier_rank
 from .smc.engine import SetupCandidate, SmcEngine, SmcResult
+from . import strategy as strategies
 from .smc.sessions import classify_session, is_forex_weekend
 from .storage.repositories import Repositories
 
 STATE_TRADING_ENABLED = "trading_enabled"
 STATE_LAST_SCAN = "last_scan"
 STATE_SESSION_COUNTS = "session_trade_counts"
+#: The selected strategy, persisted so a restart keeps running the mode
+#: the operator chose rather than silently reverting to the default.
+STATE_STRATEGY = "active_strategy"
 
 
 @dataclass
@@ -142,6 +146,9 @@ class Orchestrator:
         self.smc = smc or SmcEngine(config)
         self.scorer = scorer or SetupScorer(config)
         self.risk = risk or RiskEngine(config, self.kill_switch)
+        self._risk_injected = risk is not None
+        self._strategy_key = strategies.DEFAULT_STRATEGY
+        self._strategy: strategies.Strategy | None = None
         self.ai = ai or AIClient(config.ai)
         self.news = news or NewsFilter(config.news)
         self.executor = executor or Executor(config, broker, repositories)
@@ -156,6 +163,109 @@ class Orchestrator:
         self.startup_complete = False
         self.startup_error: str | None = None
         self.feasibility: dict[str, Any] = {}
+
+    # -- strategy selection ----------------------------------------------
+
+    @property
+    def strategy_key(self) -> str:
+        """The mode in force, read from storage so it survives a restart."""
+
+        try:
+            stored = self.repos.state.get(STATE_STRATEGY)
+        except Exception:  # noqa: BLE001 - storage is checked elsewhere
+            stored = None
+        try:
+            key = strategies.normalise(stored or self.config.strategy)
+        except ConfigError:
+            # A stored name this build no longer knows. Fall back to the
+            # default rather than refusing to trade at all, but say so —
+            # silence here would run a different strategy than the record
+            # of every past trade claims.
+            log_event(
+                "STRATEGY",
+                f"stored strategy {stored!r} is not available in this build; "
+                f"falling back to {strategies.DEFAULT_STRATEGY}",
+                severity="warning",
+            )
+            key = strategies.DEFAULT_STRATEGY
+        if key != self._strategy_key or self._strategy is None:
+            self._strategy_key = key
+            self._strategy = strategies.build(key, self.config)
+            if not self._risk_injected:
+                # The risk engine keeps its authority (project rule 2); it
+                # is simply given the floor that belongs to the mode now
+                # running. Nothing here can raise a limit: the profile sets
+                # min_risk_reward and cannot go below the build minimum,
+                # which StrategyProfile asserts on construction.
+                self.risk = RiskEngine(
+                    replace(
+                        self.config,
+                        risk=replace(
+                            self.config.risk,
+                            min_risk_reward=self._strategy.profile.min_risk_reward,
+                        ),
+                    ),
+                    self.kill_switch,
+                )
+        return self._strategy_key
+
+    @property
+    def strategy(self) -> strategies.Strategy:
+        self.strategy_key  # resolves and caches
+        assert self._strategy is not None
+        return self._strategy
+
+    def set_strategy(self, name: str) -> dict[str, Any]:
+        """Switch mode. Refuses an unknown name instead of defaulting."""
+
+        key = strategies.normalise(name)
+        previous = self.strategy_key
+        self.repos.state.set(STATE_STRATEGY, key)
+        self._strategy = None  # force a rebuild, including the risk floor
+        active = self.strategy_key
+        log_event(
+            "STRATEGY",
+            f"strategy switched from {previous} to {active}",
+            severity="info",
+            previous=previous,
+            active=active,
+        )
+        return self.strategy_status()
+
+    def strategy_status(self) -> dict[str, Any]:
+        """Every mode, which is active, and whether it can actually trade.
+
+        The last part matters: a mode whose targets are smaller than the
+        profit floor will never place a trade, and an operator switching to
+        it deserves to be told that at the switch rather than discovering
+        it over a silent week.
+        """
+
+        active = self.strategy_key
+        equity = float(self.feasibility.get("equity") or 0.0)
+        max_risk = float(self.feasibility.get("maxRiskPerTrade") or 0.0)
+        floor = float(self.config.opportunity.minimum_profit)
+
+        options = []
+        for profile in strategies.available():
+            payload = profile.as_dict()
+            payload["active"] = profile.key == active
+            if self.config.opportunity.enabled and max_risk > 0:
+                typical = max_risk * profile.min_risk_reward
+                payload["typicalProfitAtFloorRisk"] = round(typical, 2)
+                payload["clearsProfitFloor"] = typical >= floor
+                payload["note"] = (
+                    None
+                    if typical >= floor
+                    else (
+                        f"at ${equity:,.0f} equity this mode's 1:{profile.min_risk_reward:g} "
+                        f"target is worth about ${typical:,.0f}, under the ${floor:,.0f} profit "
+                        f"floor — it will find setups and the floor will reject them. Lower "
+                        f"OPPORTUNITY_MINIMUM_PROFIT or grow the account."
+                    )
+                )
+            options.append(payload)
+        return {"active": active, "options": options}
 
     # -- state -----------------------------------------------------------
 
@@ -518,8 +628,10 @@ class Orchestrator:
         except MarketDataError as exc:
             return SymbolOutcome(symbol, "DATA", "REJECTED", str(exc))
 
-        # 4. SMC.
-        smc_result = self.smc.analyze(symbol, series, now=now)
+        # 4. Strategy — SMC or the reversion mode, whichever is selected.
+        #    Everything after this point is identical either way: a
+        #    candidate is a candidate, and risk decides its fate.
+        smc_result = self.strategy.analyze(symbol, series, now=now)
         if smc_result.candidate is None:
             return SymbolOutcome(
                 symbol, "SMC", "NO_SETUP", smc_result.rejection, smc=smc_result

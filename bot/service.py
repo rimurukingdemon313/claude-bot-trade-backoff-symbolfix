@@ -281,6 +281,7 @@ def make_handler(service: BotService) -> type[BaseHTTPRequestHandler]:
                     symbol=query.get("symbol", [None])[0],
                 ),
                 "/api/risk": api.risk_state,
+                "/api/strategy": api.strategy,
                 "/api/snapshot": api.snapshot,
                 "/api/setup": api.setup_status,
                 "/api/doctor": lambda: api.doctor_report(
@@ -323,6 +324,18 @@ def make_handler(service: BotService) -> type[BaseHTTPRequestHandler]:
                         self._send(200, api.clear_kill_switch(force=bool(body.get("force"))))
                     else:
                         self._send(400, {"error": "active must be a boolean"})
+                elif parsed.path == "/api/control/strategy":
+                    name = body.get("strategy")
+                    if not isinstance(name, str) or not name.strip():
+                        self._send(400, {"error": "strategy must be a non-empty string"})
+                        return
+                    try:
+                        self._send(200, api.set_strategy(name))
+                    except ConfigError as exc:
+                        # An unknown name is the caller's mistake, not a
+                        # server fault, and must not silently select a
+                        # different strategy than the one asked for.
+                        self._send(400, {"error": str(exc)})
                 elif parsed.path == "/api/control/scan":
                     self._send(200, api.trigger_scan())
                 elif parsed.path == "/api/control/reconcile":

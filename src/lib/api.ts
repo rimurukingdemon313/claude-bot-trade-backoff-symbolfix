@@ -16,6 +16,17 @@ export type Envelope<T> = {
   hint?: string;
   /** True when the read failed only because FX is shut for the weekend. */
   marketClosed?: boolean;
+  /**
+   * When the bot last read this from the broker. The page never calls the
+   * broker itself — it would queue behind a scan on the shared throttle —
+   * so every served value carries its age and a value shown without one
+   * would be indistinguishable from a current reading.
+   */
+  asOf?: string | null;
+  ageSeconds?: number | null;
+  stale?: boolean;
+  /** Set when the last refresh attempt failed but a previous read stands. */
+  refreshError?: string | null;
 };
 
 export type Account = {

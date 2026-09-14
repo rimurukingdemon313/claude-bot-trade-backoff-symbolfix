@@ -218,15 +218,30 @@ class NewsFilter:
             )
         return NewsVerdict(False, None, (), self._feed_available)
 
-    def upcoming(self, symbols: Sequence[str], *, hours: int = 12, now: datetime | None = None) -> list[dict[str, Any]]:
-        """Events in the next `hours` for the traded symbols (dashboard)."""
+    def upcoming(
+        self,
+        symbols: Sequence[str],
+        *,
+        hours: int = 12,
+        now: datetime | None = None,
+        refresh: bool = True,
+    ) -> list[dict[str, Any]]:
+        """Events in the next `hours` for the traded symbols (dashboard).
+
+        `refresh=False` reads what is already held and never fetches. The
+        dashboard passes it: `refresh()` holds this filter's lock while it
+        talks to the calendar, so a slow or unreachable feed would block
+        the page — and the blackout check on every scan keeps the events
+        current anyway, which is the read this is projecting.
+        """
 
         moment = ensure_utc(now or utc_now())
         horizon = moment + timedelta(hours=hours)
         wanted: set[str] = set()
         for symbol in symbols:
             wanted.update(currencies_for(symbol))
-        self.refresh()
+        if refresh:
+            self.refresh()
         with self._lock:
             events = list(self._events)
         upcoming = []

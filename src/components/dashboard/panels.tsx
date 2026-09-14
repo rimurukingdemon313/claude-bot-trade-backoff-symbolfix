@@ -96,6 +96,29 @@ export function ModeBanner({ health }: { health: Health | undefined }) {
   );
 }
 
+/**
+ * How old the served reading is.
+ *
+ * The page is fed by what the bot last read, not by its own broker calls
+ * (see bot/broker/cache.py). Under a second old that distinction does not
+ * matter and the line would be noise; once a refresh is overdue or has
+ * failed, saying so is the difference between a number and a number you
+ * can act on.
+ */
+function Freshness({ envelope }: { envelope: Envelope<unknown> }) {
+  const age = envelope.ageSeconds;
+  if (age == null) return null;
+  if (!envelope.stale && !envelope.refreshError) return null;
+  const when =
+    age < 90 ? `${Math.round(age)}s ago` : `${Math.round(age / 60)} min ago`;
+  return (
+    <p className="mt-3 rounded-lg border border-amber-900 bg-amber-950/40 p-2 text-xs text-amber-300">
+      Last read from the broker {when}.
+      {envelope.refreshError ? ` Refresh is failing: ${envelope.refreshError}` : ""}
+    </p>
+  );
+}
+
 // -- account ---------------------------------------------------------------
 
 export function AccountPanel({ account }: { account: Envelope<Account> }) {
@@ -141,6 +164,7 @@ export function AccountPanel({ account }: { account: Envelope<Account> }) {
               Trading is blocked: {data.demoReason ?? "the account could not be verified as DEMO."}
             </p>
           )}
+          <Freshness envelope={account} />
         </>
       ))}
     </Card>
@@ -153,7 +177,7 @@ export function PositionsPanel({ positions }: { positions: Envelope<Position[]> 
   return (
     <Card
       title="Open positions"
-      subtitle="Live from the broker, refreshed every poll"
+      subtitle="As the bot last read them from the broker"
       action={guard(positions, (rows) => <Badge>{rows.length} open</Badge>)}
     >
       {guard(positions, (rows) =>
@@ -218,6 +242,7 @@ export function PositionsPanel({ positions }: { positions: Envelope<Position[]> 
           </ul>
         ),
       )}
+      <Freshness envelope={positions} />
     </Card>
   );
 }
@@ -486,6 +511,7 @@ export function RiskPanel({ risk }: { risk: Envelope<RiskState> }) {
             Risk is reduced by drawdown and losing streaks, never increased. The profit objective
             filters opportunities; it never raises position size.
           </p>
+          <Freshness envelope={risk} />
         </>
       ))}
     </Card>

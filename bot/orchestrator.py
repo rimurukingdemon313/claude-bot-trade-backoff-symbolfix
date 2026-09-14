@@ -28,6 +28,7 @@ from typing import Any, Sequence
 
 from .ai.client import AIClient
 from .ai.validator import AIValidation, validate_ai_decision
+from .broker.cache import CachedRead, LiveCache
 from .broker.models import InstrumentSpec
 from .clock import trading_day, utc_now
 from .config import TradingConfig, profit_floor_feasibility
@@ -159,6 +160,10 @@ class Orchestrator:
         self.repos = repositories
         self.market_data = market_data
         self.kill_switch = KillSwitch(repositories.state)
+        #: What the scan and the position poll last read from the broker.
+        #: The dashboard serves from this and never calls the broker
+        #: itself — see bot/broker/cache.py for why that had to change.
+        self.live = LiveCache()
         self.smc = smc or SmcEngine(config)
         self.scorer = scorer or SetupScorer(config)
         self.risk = risk or RiskEngine(config, self.kill_switch)
@@ -350,13 +355,28 @@ class Orchestrator:
 
         try:
             account = self.broker.account_state()
+            self.live.put("account", account)
             self.repos.equity.snapshot(
                 account.balance, account.equity, self.config.broker.account_id
             )
             self.repos.daily.today(start_balance=account.balance)
         except BotError as exc:
+            self.live.fail("account", str(exc))
             self.startup_error = f"could not read broker account state: {exc}"
             return {"ok": False, "error": self.startup_error}
+
+        # Seed the page before the first scheduled poll, which does not run
+        # until a whole interval has elapsed. Without this the dashboard is
+        # blank for the first 30 seconds of every deploy, which is exactly
+        # when somebody is watching it to see whether the deploy worked.
+        try:
+            self.refresh_live_positions(now=utc_now())
+        except BotError as exc:
+            log_event(
+                "STARTUP",
+                f"could not seed the dashboard's position view: {exc}",
+                severity="warning",
+            )
 
         report = self.reconciler.reconcile()
         self.last_reconcile = report
@@ -399,13 +419,93 @@ class Orchestrator:
     # -- account risk state ----------------------------------------------
 
     def build_account_state(self, *, now: datetime | None = None) -> AccountRiskState:
+        """Read the broker and compose the state the risk engine needs.
+
+        The two broker reads are also deposited in `self.live`, so the
+        dashboard can answer from them instead of repeating the calls on
+        its own thread and queueing behind a scan.
+        """
+
         moment = now or utc_now()
-        account = self.broker.account_state()
-        positions = self.broker.positions()
+        try:
+            account = self.broker.account_state()
+            positions = self.broker.positions()
+        except BotError as exc:
+            self.live.fail("account", str(exc))
+            self.live.fail("positions", str(exc))
+            raise
+        self.live.put("account", account, now=moment)
+        self.live.put("positions", positions, now=moment)
 
         self.repos.equity.snapshot(
             account.balance, account.equity, self.config.broker.account_id
         )
+        return self._compose_account_state(account, positions, now=moment)
+
+    def cached_account_state(
+        self, *, now: datetime | None = None
+    ) -> tuple[AccountRiskState, CachedRead] | None:
+        """The same state composed from the last broker read, or None.
+
+        Everything after the two broker calls is local: the database and
+        the clock. So the risk panel can be answered without touching the
+        network at all, which is what keeps the dashboard off the shared
+        throttle. The `CachedRead` is returned alongside so the caller can
+        say how old the broker half is — a number served without its age
+        would be exactly the fabrication rule 6 forbids.
+        """
+
+        account = self.live.get("account")
+        positions = self.live.get("positions")
+        if not account.present or not positions.present:
+            return None
+        # Report the age of the OLDER half: the state is only as current as
+        # its least current input.
+        oldest = account if account.at <= positions.at else positions
+        return (
+            self._compose_account_state(
+                account.value, positions.value, now=now or utc_now()
+            ),
+            oldest,
+        )
+
+    def refresh_live_positions(
+        self, *, now: datetime
+    ) -> tuple[list[Any], list[dict[str, Any]]]:
+        """Re-read positions, track them, and publish both for the page.
+
+        The single place that fills the position half of the read model,
+        so the poll and the scan cannot drift into filling it differently.
+        """
+
+        try:
+            positions = list(self.broker.positions())
+        except BotError as exc:
+            self.live.fail("positions", str(exc))
+            self.live.fail("position_rows", str(exc))
+            raise
+        self.live.put("positions", positions, now=now)
+        rows = self.manager.track(positions, now=now)
+        self.live.put("position_rows", rows, now=now)
+        return positions, rows
+
+    def _compose_account_state(
+        self,
+        account: Any,
+        positions: Sequence[Any],
+        *,
+        now: datetime,
+    ) -> AccountRiskState:
+        """Compose the risk state from two broker reads plus local data.
+
+        Everything here is the database and the clock, so the dashboard
+        can run it against a cached pair of reads. Writing the equity
+        snapshot stays in `build_account_state`: a page left open on a
+        phone must not fill that table with duplicates of whatever the
+        scan last saw and distort the series peak_equity is drawn from.
+        """
+
+        moment = now
         peak = self.repos.equity.peak_equity(self.config.broker.account_id) or account.equity
         daily = self.repos.daily.today(now=moment, start_balance=account.balance)
 
@@ -622,6 +722,19 @@ class Orchestrator:
             result.executed = self._execute(best, scan_id=scan_id)
             if result.executed is not None and result.executed.ok:
                 self._bump_session_count(moment)
+                # Show the new position now, not at the next poll. A trade
+                # that appears to have vanished for thirty seconds is the
+                # one thing an operator will not sit calmly through — and
+                # the positions cached at the top of this scan predate it.
+                try:
+                    self.refresh_live_positions(now=moment)
+                except BotError as exc:
+                    log_event(
+                        "SCAN",
+                        f"could not refresh positions after executing: {exc}",
+                        severity="warning",
+                        event_id=scan_id,
+                    )
             elif result.executed is not None:
                 self._record_event_time("execution_failure")
 
@@ -976,11 +1089,16 @@ class Orchestrator:
                 "actions": [],
             }
         try:
-            positions = self.broker.positions()
+            positions, rows = self.refresh_live_positions(now=moment)
         except BotError as exc:
             return {"ok": False, "error": str(exc)}
-
-        rows = self.manager.track(positions, now=moment)
+        # One request every poll, against five to seven per dashboard
+        # refresh before this. It keeps the balance on the page current
+        # between scans without the page ever asking the broker itself.
+        try:
+            self.live.put("account", self.broker.account_state(), now=moment)
+        except BotError as exc:
+            self.live.fail("account", str(exc))
         actions = []
         for position, row in zip(positions, rows):
             trade = self.repos.trades.by_position_id(position.position_id)

@@ -18,6 +18,7 @@ from typing import Any
 from .analytics.performance import breakdown, compute_performance
 from .clock import utc_now
 from .config import TradingConfig, profit_floor_feasibility
+from .broker.cache import CachedRead
 from .errors import BotError
 from .orchestrator import Orchestrator
 from .smc.sessions import is_forex_weekend
@@ -57,11 +58,74 @@ class DashboardApi:
             "data": None,
         }
 
+    #: How old a broker read may be before the page marks it stale. The
+    #: position poll refreshes every `position_poll_seconds`; twice that
+    #: plus a margin means an ordinary late poll does not flash a warning,
+    #: while a genuinely stuck refresh shows up within a minute or so.
+    def _stale_after(self) -> float:
+        return max(30.0, self.config.scheduler.position_poll_seconds * 2.5)
+
+    def _unread(self, read: CachedRead, what: str) -> dict[str, Any]:
+        """Nothing has ever been read, so there is nothing to show.
+
+        Rule 6: the gap stays visible. The reason matters — "not yet" on a
+        booting process is a different fact from "the broker refused", and
+        an operator who cannot tell them apart restarts a healthy bot.
+        """
+
+        closed = is_forex_weekend(utc_now())
+        if read.error:
+            return {
+                "status": "OFFLINE",
+                "error": (
+                    f"the forex market is closed for the weekend, so the broker is not "
+                    f"answering ({read.error})"
+                    if closed
+                    else read.error
+                ),
+                "marketClosed": closed,
+                "data": None,
+            }
+        return {
+            "status": "OFFLINE",
+            "error": f"no {what} has been read from the broker yet",
+            "hint": (
+                "The first position poll fills this within "
+                f"{self.config.scheduler.position_poll_seconds}s of startup."
+            ),
+            "marketClosed": closed,
+            "data": None,
+        }
+
+    def _freshness(self, read: CachedRead, *, now: Any = None) -> dict[str, Any]:
+        """The age of a served value, always attached to it.
+
+        A cached number shown without its age is indistinguishable from a
+        current one, which is the same failure rule 6 describes: it looks
+        like information. With the age attached it IS information.
+        """
+
+        age = read.age_seconds(now=now)
+        return {
+            "asOf": read.at.isoformat() if read.at else None,
+            "ageSeconds": round(age, 1) if age is not None else None,
+            "stale": bool(age is not None and age > self._stale_after()),
+            "refreshError": read.error,
+        }
+
     def account(self) -> dict[str, Any]:
-        try:
-            state = self.orchestrator.broker.account_state()
-        except BotError as exc:
-            return self._offline(exc)
+        """The account panel, from the last read the bot itself made.
+
+        This used to call the broker directly. On a shared throttle that
+        put every dashboard refresh in the same queue as the scan, so the
+        page could wait a minute for a number the bot already had —
+        see bot/broker/cache.py.
+        """
+
+        read = self.orchestrator.live.get("account")
+        if not read.present:
+            return self._unread(read, "account state")
+        state = read.value
 
         daily = self.repos.daily.today()
         peak = self.repos.equity.peak_equity(self.config.broker.account_id) or state.equity
@@ -72,6 +136,7 @@ class DashboardApi:
 
         return {
             "status": "LIVE",
+            **self._freshness(read),
             "data": {
                 **state.as_dict(),
                 "dailyRealizedPnl": round(float(daily.get("realized_pnl") or 0.0), 2),
@@ -91,11 +156,17 @@ class DashboardApi:
     # -- positions / trades ----------------------------------------------
 
     def open_positions(self) -> dict[str, Any]:
-        try:
-            positions = self.orchestrator.broker.positions()
-        except BotError as exc:
-            return {**self._offline(exc), "data": []}
-        return {"status": "LIVE", "data": self.orchestrator.manager.track(positions)}
+        """Position rows as the position poll last tracked them.
+
+        `manager.track()` fetches a quote per position, so running it here
+        made the cost of the page scale with the number of open trades —
+        on the one thread a 30-second proxy timeout was watching.
+        """
+
+        read = self.orchestrator.live.get("position_rows")
+        if not read.present:
+            return {**self._unread(read, "open positions"), "data": []}
+        return {"status": "LIVE", **self._freshness(read), "data": read.value}
 
     def trade_history(self, limit: int = 100) -> dict[str, Any]:
         rows = self.repos.trades.closed_trades(limit=limit)
@@ -210,18 +281,29 @@ class DashboardApi:
             "reconciliations", lambda: self.repos.reconciliations.recent(limit=10)
         )
         health["upcomingNews"] = optional(
-            "news", lambda: self.orchestrator.news.upcoming(self.config.symbols)
+            "news",
+            lambda: self.orchestrator.news.upcoming(self.config.symbols, refresh=False),
         )
         return health
 
     def risk_state(self) -> dict[str, Any]:
-        try:
-            state = self.orchestrator.build_account_state()
-        except BotError as exc:
-            return self._offline(exc)
+        """Risk limits against the account, composed without the network.
+
+        `build_account_state()` makes two broker calls, and this endpoint
+        was calling it on every dashboard refresh — duplicating the two
+        calls `account()` and `open_positions()` had just made on the same
+        request. Everything after those reads is local, so the cached pair
+        composes the identical state.
+        """
+
+        composed = self.orchestrator.cached_account_state()
+        if composed is None:
+            return self._unread(self.orchestrator.live.get("account"), "account state")
+        state, read = composed
         limits = self.config.risk
         return {
             "status": "LIVE",
+            **self._freshness(read),
             "data": {
                 **state.as_dict(),
                 "killSwitch": self.orchestrator.kill_switch.read().as_dict(),
@@ -266,11 +348,13 @@ class DashboardApi:
 
         from .setup_status import build_setup_report
 
-        equity: float | None = None
-        try:
-            equity = self.orchestrator.broker.account_state().equity
-        except Exception:  # noqa: BLE001 - unconfigured is the normal case here
-            equity = None
+        # From the cache, never the broker: this endpoint took 7.1 seconds
+        # on a queued throttle, and it is the FIRST thing the page asks
+        # for — so a slow answer here is what the operator sees as a dead
+        # dashboard. An unconfigured bot has no cached read and reports
+        # no equity, which is the same answer it gave before.
+        read = self.orchestrator.live.get("account")
+        equity = read.value.equity if read.present else None
         return build_setup_report(self.config, equity=equity).as_dict()
 
     def doctor_report(self, *, symbols: list[str] | None = None) -> dict[str, Any]:

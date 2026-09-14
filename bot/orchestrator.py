@@ -54,6 +54,10 @@ STATE_SESSION_COUNTS = "session_trade_counts"
 #: The selected strategy, persisted so a restart keeps running the mode
 #: the operator chose rather than silently reverting to the default.
 STATE_STRATEGY = "active_strategy"
+#: The broker account the stored state belongs to. A different one means
+#: the daily counters, losing streak and trade history describe somebody
+#: else's account, and saying so beats letting them be read as this one's.
+STATE_ACCOUNT_ID = "broker_account_id"
 
 
 @dataclass
@@ -325,6 +329,8 @@ class Orchestrator:
             self._trip_for_failed_verification(verification)
             return {"ok": False, "error": self.startup_error, "demo": verification.as_dict()}
 
+        self._note_account_identity()
+
         if not self.repos.db.ping():
             self.startup_error = "database is unreachable"
             log_event("STARTUP", self.startup_error, severity="critical")
@@ -332,7 +338,9 @@ class Orchestrator:
 
         try:
             account = self.broker.account_state()
-            self.repos.equity.snapshot(account.balance, account.equity)
+            self.repos.equity.snapshot(
+                account.balance, account.equity, self.config.broker.account_id
+            )
             self.repos.daily.today(start_balance=account.balance)
         except BotError as exc:
             self.startup_error = f"could not read broker account state: {exc}"
@@ -383,8 +391,10 @@ class Orchestrator:
         account = self.broker.account_state()
         positions = self.broker.positions()
 
-        self.repos.equity.snapshot(account.balance, account.equity)
-        peak = self.repos.equity.peak_equity() or account.equity
+        self.repos.equity.snapshot(
+            account.balance, account.equity, self.config.broker.account_id
+        )
+        peak = self.repos.equity.peak_equity(self.config.broker.account_id) or account.equity
         daily = self.repos.daily.today(now=moment, start_balance=account.balance)
 
         open_rows = []
@@ -743,6 +753,40 @@ class Orchestrator:
                 return None
             return AIValidation(False, (f"AI validation unavailable: {exc}",), None)
         return validate_ai_decision(decision, candidate, config)
+
+    def _note_account_identity(self) -> None:
+        """Say plainly when the configured account has changed.
+
+        Account-derived state — the daily loss counter, the losing streak,
+        the trade history — belongs to whichever account produced it.
+        Peak equity is scoped in storage so a drawdown limit can never be
+        computed against a different account's high-water mark, but the
+        rest is worth flagging rather than silently carrying over: a
+        losing streak from an account that no longer exists should not
+        reduce risk on a new one, and an operator who switched accounts
+        deserves to be told which numbers are now stale.
+        """
+
+        configured = str(self.config.broker.account_id or "")
+        try:
+            previous = self.repos.state.get(STATE_ACCOUNT_ID)
+        except Exception:  # noqa: BLE001 - storage health is checked elsewhere
+            return
+        if not configured:
+            return
+        if previous and str(previous) != configured:
+            log_event(
+                "STARTUP",
+                f"broker account changed from {previous} to {configured}. Peak equity is "
+                "tracked per account, so the drawdown limit starts fresh. Daily counters, "
+                "the losing streak and the trade history still describe the previous "
+                "account until they roll over.",
+                severity="warning",
+                previous_account=str(previous),
+                account=configured,
+            )
+        if str(previous or "") != configured:
+            self.repos.state.set(STATE_ACCOUNT_ID, configured)
 
     def _trip_for_failed_verification(self, verification: DemoVerification) -> None:
         """Block trading, and latch only when latching is warranted.

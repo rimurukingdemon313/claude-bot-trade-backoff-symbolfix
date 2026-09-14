@@ -27,7 +27,11 @@ from ..observability import log_event
 #: Bump when ddl() changes. Every statement is CREATE ... IF NOT EXISTS, so
 #: migration stays idempotent and safe to run on every boot; the version is
 #: recorded so a deployment's schema generation is attributable.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+
+#: (table, column, definition) added after the first release. Applied on
+#: every boot and safe to re-run: an existing column raises and is ignored.
+ADDED_COLUMNS = (("equity_snapshots", "account_id", "TEXT"),)
 
 
 class Database:
@@ -310,6 +314,11 @@ class Database:
                 id {serial},
                 balance REAL NOT NULL,
                 equity REAL NOT NULL,
+                -- Which broker account this reading belongs to. Peak equity
+                -- drives the drawdown limit, and a peak inherited from a
+                -- different account is not a drawdown, it is a different
+                -- account.
+                account_id TEXT,
                 created_at TEXT NOT NULL
             )
             """,
@@ -365,6 +374,16 @@ class Database:
         with self.transaction() as cursor:
             for statement in self.ddl():
                 cursor.execute(statement)
+            # Additive column migrations. CREATE TABLE IF NOT EXISTS does
+            # nothing to a table that already exists, so a column added
+            # after the first release needs this. Both backends accept
+            # ADD COLUMN; neither agrees on IF NOT EXISTS, so a duplicate
+            # is caught and ignored rather than guarded.
+            for table, column, definition in ADDED_COLUMNS:
+                try:
+                    cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+                except Exception:  # noqa: BLE001 - already present
+                    pass
             cursor.execute(
                 self._rewrite(
                     "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)"

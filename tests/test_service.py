@@ -640,3 +640,96 @@ def test_a_non_ok_status_is_refused_rather_than_unwrapped():
 def test_a_plain_payload_passes_through():
     assert TradeLockerBroker._unwrap({"orders": [1]}) == {"orders": [1]}
     assert TradeLockerBroker._unwrap([1, 2]) == [1, 2]
+
+
+# -- the diagnostic must not spend the budget the trading path needs ------
+
+
+def test_the_startup_verification_runs_after_the_startup_sequence(
+    config, broker, repos, monkeypatch
+):
+    """It ran first, and that is why the bot could not start.
+
+    The verification makes a few dozen broker calls, and TradeLocker sits
+    behind Cloudflare. Running it before the startup sequence spent the
+    rate-limit budget on a diagnostic and left the circuit open, so the
+    sequence that decides whether the bot may trade failed on "broker
+    circuit open after 5 consecutive failures" at an uptime of zero
+    minutes.
+    """
+
+    monkeypatch.setattr("bot.service.open_database", lambda _c: repos.db)
+    monkeypatch.setenv("STARTUP_DOCTOR", "true")
+
+    order: list[str] = []
+    service = BotService(config, broker=broker)
+    real_startup = service.orchestrator.startup
+
+    def traced_startup():
+        order.append("startup")
+        return real_startup()
+
+    service.orchestrator.startup = traced_startup  # type: ignore[assignment]
+    monkeypatch.setattr(
+        service, "_log_startup_verification", lambda: order.append("doctor")
+    )
+    service.start()
+    service.scheduler.stop(timeout=0.1)
+
+    assert order == ["startup", "doctor"], (
+        f"the diagnostic must never precede the startup sequence, got {order}"
+    )
+
+
+def test_the_startup_verification_is_skipped_when_the_circuit_is_open(
+    config, repos, monkeypatch, capsys
+):
+    """Adding calls to a broker that has stopped answering helps nothing."""
+
+    from bot.broker.http import CircuitBreaker
+    from bot.broker.tradelocker import TradeLockerBroker
+
+    live = TradeLockerBroker(config)
+    circuit = CircuitBreaker(failure_threshold=1)
+    circuit.record_failure()
+    live.transport.circuit = circuit
+    assert circuit.state != "closed"
+
+    monkeypatch.setattr("bot.service.open_database", lambda _c: repos.db)
+    service = BotService(config, broker=live)
+
+    called: list[str] = []
+    monkeypatch.setattr(
+        service.api, "doctor_report", lambda **_k: called.append("ran") or {}
+    )
+    service._log_startup_verification()
+
+    assert called == [], "the verification must stand down while the circuit is open"
+
+
+def test_the_scheduler_can_actually_stop_its_jobs():
+    """Graceful shutdown was broken outright, and silently.
+
+    PeriodicJob subclasses threading.Thread, which defines a PRIVATE
+    _stop() that join() calls internally. The scheduler shadowed it with
+    an Event, so every join raised TypeError: 'Event' object is not
+    callable. The scheduler could not wait for in-flight work, which on a
+    redeploy means the process can be killed mid-order — the exact state
+    the whole idempotency design exists to avoid.
+    """
+
+    import threading
+
+    from bot.scheduler import Scheduler
+
+    ran = threading.Event()
+    scheduler = Scheduler()
+    scheduler.add("probe", 0.05, ran.set)
+    scheduler.start()
+    assert ran.wait(timeout=3.0), "the job never ran"
+
+    scheduler.stop(timeout=2.0)  # must not raise
+
+    assert all(not job.is_alive() for job in scheduler._jobs), (
+        "stop() returned while jobs were still running"
+    )

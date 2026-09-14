@@ -64,7 +64,7 @@ class DashboardApi:
             return self._offline(exc)
 
         daily = self.repos.daily.today()
-        peak = self.repos.equity.peak_equity() or state.equity
+        peak = self.repos.equity.peak_equity(self.config.broker.account_id) or state.equity
         drawdown = max(0.0, (peak - state.equity) / peak) if peak else 0.0
         closed = self.repos.trades.closed_trades(limit=500)
         total_pnl = sum(float(trade.get("realized_pnl") or 0.0) for trade in closed)

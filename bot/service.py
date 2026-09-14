@@ -87,9 +87,6 @@ class BotService:
         for warning in setup["warnings"]:
             log_event("STARTUP", warning, severity="warning")
 
-        if _env_flag("STARTUP_DOCTOR", default=True):
-            self._log_startup_verification()
-
         result = self.orchestrator.startup()
         if not result.get("ok"):
             # Start the API anyway: the dashboard must be able to SHOW the
@@ -101,6 +98,18 @@ class BotService:
                 f"{result.get('error')}",
                 severity="critical",
             )
+
+        # The verification runs AFTER the startup sequence, never before it.
+        #
+        # It makes a few dozen broker calls, and TradeLocker sits behind
+        # Cloudflare: running it first spent the rate-limit budget on a
+        # diagnostic and left the circuit open, so the startup sequence —
+        # the thing that actually decides whether the bot can trade —
+        # failed on "broker circuit open after 5 consecutive failures"
+        # at an uptime of zero minutes. The diagnostic was preventing the
+        # thing it exists to diagnose.
+        if _env_flag("STARTUP_DOCTOR", default=True):
+            self._log_startup_verification()
 
         scheduler_config = self.config.scheduler
         self.scheduler.add(
@@ -134,6 +143,17 @@ class BotService:
         Set STARTUP_DOCTOR=false to skip it.
         """
 
+        circuit = getattr(getattr(self.broker, "transport", None), "circuit", None)
+        if circuit is not None and circuit.state != "closed":
+            # Adding a few dozen calls to a broker that has already stopped
+            # answering neither diagnoses anything nor helps it recover.
+            log_event(
+                "STARTUP",
+                "skipping account verification: the broker circuit is open. "
+                "Run it from the dashboard once the broker is answering again.",
+                severity="warning",
+            )
+            return
         if not self.config.broker.configured:
             log_event(
                 "STARTUP",
@@ -142,7 +162,10 @@ class BotService:
             )
             return
         try:
-            report = self.api.doctor_report()
+            # One symbol, not three. The path it proves — instrument,
+            # specification, quote, candles — is the same for each, and at
+            # boot the calls saved matter more than the breadth.
+            report = self.api.doctor_report(symbols=list(self.config.symbols)[:1])
         except Exception as exc:  # noqa: BLE001 - never block startup
             log_event(
                 "STARTUP", f"account verification could not run: {exc}", severity="warning"

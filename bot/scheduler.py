@@ -67,12 +67,17 @@ class PeriodicJob(threading.Thread):
         stop_event: threading.Event | None = None,
     ) -> None:
         super().__init__(name=f"job-{name}", daemon=True)
+        # NOT `_stop`: threading.Thread defines a private _stop() that
+        # join() calls internally. Shadowing it with an Event made every
+        # join raise TypeError, so the scheduler could not wait for
+        # in-flight work and a redeploy could kill the process mid-order —
+        # the exact state the idempotency design exists to avoid.
         self.state = JobState(name=name)
         self.interval_seconds = interval_seconds
         self._run = run
         self._aligned_to = aligned_to
         self._offset_seconds = offset_seconds
-        self._stop = stop_event or threading.Event()
+        self._stop_event = stop_event or threading.Event()
 
     def _next_delay(self) -> float:
         if self._aligned_to:
@@ -84,9 +89,9 @@ class PeriodicJob(threading.Thread):
         return self.interval_seconds
 
     def run(self) -> None:
-        while not self._stop.is_set():
+        while not self._stop_event.is_set():
             delay = self._next_delay()
-            if self._stop.wait(delay):
+            if self._stop_event.wait(delay):
                 break
             if self.state.running:
                 log_event(
@@ -116,13 +121,13 @@ class PeriodicJob(threading.Thread):
                 self.state.running = False
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_event.set()
 
 
 class Scheduler:
     def __init__(self) -> None:
         self._jobs: list[PeriodicJob] = []
-        self._stop = threading.Event()
+        self._stop_event = threading.Event()
 
     def add(
         self,
@@ -139,7 +144,7 @@ class Scheduler:
             run,
             aligned_to=aligned_to,
             offset_seconds=offset_seconds,
-            stop_event=self._stop,
+            stop_event=self._stop_event,
         )
         self._jobs.append(job)
         return job
@@ -156,7 +161,7 @@ class Scheduler:
         — a deploy must never close a live trade.
         """
 
-        self._stop.set()
+        self._stop_event.set()
         deadline = time.monotonic() + timeout
         for job in self._jobs:
             remaining = max(0.1, deadline - time.monotonic())

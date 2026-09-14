@@ -83,13 +83,21 @@ class Report:
         return check
 
     def sanitized(self) -> "Report":
-        """A copy with account figures masked, safe to paste anywhere.
+        """A copy with account FIGURES masked.
 
-        Only balances, account identifiers and the numbers derived from them
-        are removed. Everything needed to diagnose the integration — the
+        Balances, equity, P/L and the numbers derived from them are
+        removed. Everything needed to diagnose the integration — the
         history endpoint shape, instrument specifications, suffix naming,
         conversion paths, candle validation — is preserved, because that is
         the part worth sharing.
+
+        The `accounts` listing is deliberately NOT masked: its whole
+        purpose is to be read and copied when moving the bot to a different
+        account, and an id masked to *** helps nobody do that. An account
+        id is not a credential — logging in needs the email, the password
+        and the server — but it IS an identifier, so the check says plainly
+        that it is there rather than leaving someone to discover it after
+        pasting the report somewhere public.
         """
 
         import re
@@ -196,6 +204,48 @@ def run(
         report.add("authentication", FAIL, f"login failed: {exc}")
         return report
     report.add("authentication", OK, "authenticated and resolved the account number")
+
+    # 2b. Every account under this login, so switching to another one is a
+    #     matter of copying a number off this report rather than hunting
+    #     through the broker's app — which is not always navigable, and is
+    #     exactly the obstacle that makes an account switch hard.
+    accounts = getattr(broker, "available_accounts", [])
+    if accounts:
+        configured = str(config.broker.account_id or "")
+        lines = []
+        for account in accounts:
+            identifier = str(account.get("id", ""))
+            marker = "  <-- configured" if identifier == configured else ""
+            lines.append(
+                f"  id {identifier}"
+                f"  accNum {account.get('accNum', '?')}"
+                f"  {account.get('currency', '?')}"
+                f"  name {account.get('name', '?')}"
+                f"{marker}"
+            )
+        known = any(str(a.get("id", "")) == configured for a in accounts)
+        report.add(
+            "accounts",
+            OK if known else FAIL,
+            (
+                f"{len(accounts)} account(s) under this login:\n" + "\n".join(lines)
+                + ("" if known else
+                   f"\nTRADELOCKER_ACC_ID is set to {configured!r}, which is NOT in this list. "
+                   "Copy one of the ids above into it.")
+                + "\nThese ids are shown unmasked so they can be copied; balances are not. "
+                  "An id is not a credential, but it does identify the account."
+            ),
+            # Ids and account numbers only. Balances are masked elsewhere in
+            # this report and are not repeated here.
+            accounts=[
+                {
+                    "id": str(a.get("id", "")),
+                    "accNum": str(a.get("accNum", "")),
+                    "currency": str(a.get("currency", "")),
+                }
+                for a in accounts
+            ],
+        )
 
     # 3. DEMO verification ------------------------------------------------
     verification = verify_demo(

@@ -733,3 +733,86 @@ def test_the_scheduler_can_actually_stop_its_jobs():
     assert all(not job.is_alive() for job in scheduler._jobs), (
         "stop() returned while jobs were still running"
     )
+
+
+# -- switching accounts should not require the broker's own app -----------
+
+
+def fully_configured(config, account_id: str):
+    """The doctor returns at the credentials check unless all four are set."""
+
+    return dataclasses.replace(
+        config,
+        broker=dataclasses.replace(
+            config.broker,
+            email="x@example.test",
+            password="secret",
+            server="GATESFX",
+            account_id=account_id,
+        ),
+    )
+
+
+def test_the_doctor_lists_every_account_under_the_login(config, monkeypatch):
+    """Moving the bot to another account needs one thing: its id.
+
+    Finding that otherwise means navigating the broker's app, which is not
+    always possible — a second demo account can be awkward to reach in the
+    UI even when the API lists it plainly.
+    """
+
+    from bot import doctor
+
+    broker = TradeLockerBroker(config)
+    broker._account_meta = {"currency": "USD", "accountType": "DEMO"}
+    broker._available_accounts = [
+        {"id": "2475112", "accNum": "1", "currency": "USD", "name": "old"},
+        {"id": "9001234", "accNum": "2", "currency": "USD", "name": "new"},
+    ]
+    broker.ensure_session = lambda: None  # type: ignore[assignment]
+
+    configured = fully_configured(config, "9001234")
+    report = doctor.run(configured, ["EURUSD"], broker=broker)
+    listing = next(check for check in report.checks if check.name == "accounts")
+
+    assert "2475112" in listing.detail and "9001234" in listing.detail
+    assert "<-- configured" in listing.detail
+    assert listing.status == doctor.OK
+
+
+def test_the_doctor_says_when_the_configured_account_is_not_in_the_list(config):
+    """The exact state after a broker recreates an account under a new id."""
+
+    from bot import doctor
+
+    broker = TradeLockerBroker(config)
+    broker._account_meta = {"currency": "USD", "accountType": "DEMO"}
+    broker._available_accounts = [{"id": "9001234", "accNum": "2", "currency": "USD"}]
+    broker.ensure_session = lambda: None  # type: ignore[assignment]
+
+    configured = fully_configured(config, "2475112")
+    report = doctor.run(configured, ["EURUSD"], broker=broker)
+    listing = next(check for check in report.checks if check.name == "accounts")
+
+    assert listing.status == doctor.FAIL
+    assert "NOT in this list" in listing.detail
+
+
+def test_the_account_ids_survive_sanitising_because_they_must_be_copyable(config):
+    """A masked id helps nobody switch accounts.
+
+    Balances stay masked; this asserts the two are treated differently and
+    on purpose.
+    """
+
+    from bot import doctor
+
+    broker = TradeLockerBroker(config)
+    broker._account_meta = {"currency": "USD", "accountType": "DEMO"}
+    broker._available_accounts = [{"id": "9001234", "accNum": "2", "currency": "USD"}]
+    broker.ensure_session = lambda: None  # type: ignore[assignment]
+
+    configured = fully_configured(config, "9001234")
+    safe = doctor.run(configured, ["EURUSD"], broker=broker).sanitized()
+    listing = next(check for check in safe.checks if check.name == "accounts")
+    assert "9001234" in listing.detail

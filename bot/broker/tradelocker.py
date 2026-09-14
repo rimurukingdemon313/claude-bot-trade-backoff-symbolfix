@@ -178,6 +178,7 @@ class TradeLockerBroker:
         self._instrument_cache: dict[str, InstrumentSpec] = {}
         self._instrument_cache_at = 0.0
         self._instrument_detail_error: str | None = None
+        self._available_accounts: list[dict[str, Any]] = []
         self._instruments_raw: list[dict[str, Any]] = []
         self._account_meta: dict[str, Any] | None = None
         self.instrument_cache_ttl = 3600.0
@@ -267,6 +268,8 @@ class TradeLockerBroker:
 
         result = self._raw("GET", "/auth/jwt/all-accounts", authed_only=True)
         accounts = result.get("accounts", []) if isinstance(result, Mapping) else []
+        with self._lock:
+            self._available_accounts = [dict(a) for a in accounts if isinstance(a, Mapping)]
         match = next(
             (a for a in accounts if str(a.get("id")) == str(self.broker_config.account_id)), None
         )
@@ -283,6 +286,21 @@ class TradeLockerBroker:
         with self._lock:
             self._acc_num = str(match.get("accNum"))
             self._account_meta = dict(match)
+
+    @property
+    def available_accounts(self) -> list[dict[str, Any]]:
+        """Every account under this login, as the broker lists them.
+
+        Switching the bot to a different account needs one thing: its id.
+        Finding that id otherwise means navigating the broker's own app,
+        which is not always possible — a second demo account can be
+        awkward to reach in the UI even when the API lists it plainly.
+        Surfacing it here turns an account switch into copying a number
+        off the dashboard.
+        """
+
+        with self._lock:
+            return [dict(account) for account in self._available_accounts]
 
     @property
     def account_metadata(self) -> dict[str, Any] | None:

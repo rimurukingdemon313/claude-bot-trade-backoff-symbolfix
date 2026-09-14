@@ -366,6 +366,25 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_equity_created ON equity_snapshots(created_at)",
         ]
 
+    def _column_exists(self, cursor: Any, table: str, column: str) -> bool:
+        """Ask the catalogue rather than provoking an error.
+
+        Both backends can answer this; neither survives being asked the
+        wrong way. SQLite has no ALTER TABLE ... IF NOT EXISTS at all, and
+        PostgreSQL does but would still need the table to exist first.
+        """
+
+        if self.backend == "postgres":
+            cursor.execute(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_name = %s AND column_name = %s",
+                (table, column),
+            )
+        else:
+            cursor.execute(f"PRAGMA table_info({table})")
+            return any(str(row[1]) == column for row in cursor.fetchall())
+        return cursor.fetchone() is not None
+
     def migrate(self) -> None:
         """Idempotent schema creation. Safe to run on every boot."""
 
@@ -376,14 +395,20 @@ class Database:
                 cursor.execute(statement)
             # Additive column migrations. CREATE TABLE IF NOT EXISTS does
             # nothing to a table that already exists, so a column added
-            # after the first release needs this. Both backends accept
-            # ADD COLUMN; neither agrees on IF NOT EXISTS, so a duplicate
-            # is caught and ignored rather than guarded.
+            # after the first release needs this.
+            #
+            # The column is CHECKED first, never attempted-and-caught. In
+            # PostgreSQL any failed statement aborts the entire
+            # transaction — every command after it raises
+            # InFailedSqlTransaction — so "try it and ignore the error" is
+            # not a portable idiom, it is a way to destroy the migration on
+            # the second boot. It worked in SQLite, which is exactly why it
+            # shipped: the bot crash-looped on startup the moment a real
+            # PostgreSQL was attached.
             for table, column, definition in ADDED_COLUMNS:
-                try:
-                    cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
-                except Exception:  # noqa: BLE001 - already present
-                    pass
+                if self._column_exists(cursor, table, column):
+                    continue
+                cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
             cursor.execute(
                 self._rewrite(
                     "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)"

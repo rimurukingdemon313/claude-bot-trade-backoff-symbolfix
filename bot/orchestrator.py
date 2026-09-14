@@ -31,7 +31,14 @@ from .ai.validator import AIValidation, validate_ai_decision
 from .broker.models import InstrumentSpec
 from .clock import trading_day, utc_now
 from .config import TradingConfig, profit_floor_feasibility
-from .errors import AIError, BotError, ConfigError, DemoVerificationError, MarketDataError
+from .errors import (
+    AIError,
+    BotError,
+    ConfigError,
+    DemoVerificationError,
+    MarketDataError,
+    SymbolUnavailable,
+)
 from .execution.executor import ExecutionResult, Executor
 from .execution.manager import PositionManager, plan_actions
 from .execution.plan import build_plan
@@ -105,6 +112,10 @@ class ScanResult:
     executed: ExecutionResult | None = None
     skipped_reason: str | None = None
     errors: list[str] = field(default_factory=list)
+    #: Configured symbols the broker does not offer on this account. Kept
+    #: apart from `errors` because they are a config edit away from fixed
+    #: and will otherwise repeat identically on every scan forever.
+    unavailable: list[dict[str, Any]] = field(default_factory=list)
 
     def as_dict(self, *, detail: bool = False) -> dict[str, Any]:
         return {
@@ -117,6 +128,7 @@ class ScanResult:
             "executed": self.executed.as_dict() if self.executed else None,
             "skippedReason": self.skipped_reason,
             "errors": self.errors,
+            "unavailable": self.unavailable,
             "decision": (
                 f"{self.executed.plan.direction} {self.executed.plan.symbol}"
                 if self.executed and self.executed.ok
@@ -571,6 +583,13 @@ class Orchestrator:
                 outcome = self._evaluate_symbol(
                     symbol, account_state, scan_id=scan_id, now=moment
                 )
+            except SymbolUnavailable as exc:
+                outcome = SymbolOutcome(
+                    symbol=symbol, stage="CONFIG", outcome="UNAVAILABLE", reason=str(exc)
+                )
+                result.unavailable.append(
+                    {"symbol": symbol, "reason": str(exc), "suggestions": list(exc.suggestions)}
+                )
             except BotError as exc:
                 outcome = SymbolOutcome(
                     symbol=symbol, stage="ERROR", outcome="ERROR", reason=str(exc)
@@ -617,12 +636,32 @@ class Orchestrator:
                 "decision": result.as_dict()["decision"],
             },
         )
+        if result.unavailable:
+            # Named, not counted. Four symbols hidden inside "errors: 4" is
+            # a permanent config fault that reads like a transient one.
+            log_event(
+                "SCAN",
+                "configured symbols this account does not carry (they will fail "
+                "identically on every scan until TRADED_SYMBOLS changes): "
+                + "; ".join(
+                    entry["symbol"]
+                    + (
+                        " -> try " + ", ".join(entry["suggestions"])
+                        if entry.get("suggestions")
+                        else ""
+                    )
+                    for entry in result.unavailable
+                ),
+                event_id=scan_id,
+                severity="warning",
+            )
         log_event(
             "SCAN",
             f"scan complete: {result.as_dict()['decision']}",
             event_id=scan_id,
             candidates=len(executable),
             errors=len(result.errors),
+            unavailable=len(result.unavailable),
         )
         return result
 

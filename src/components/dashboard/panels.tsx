@@ -249,6 +249,46 @@ export function SetupPanel({ scan }: { scan: Envelope<Scan> }) {
               {data.skippedReason}
             </p>
           )}
+          {data.unavailable && data.unavailable.length > 0 && (
+            <div className="mb-3 rounded-lg border border-amber-900 bg-amber-950/40 p-2 text-xs text-amber-300">
+              <p className="font-semibold">
+                {data.unavailable.length} configured symbol
+                {data.unavailable.length === 1 ? "" : "s"} this account cannot trade
+              </p>
+              <ul className="mt-1 space-y-0.5">
+                {data.unavailable.map((entry) => (
+                  <li key={entry.symbol}>
+                    <span className="font-mono">{entry.symbol}</span>
+                    {entry.suggestions.length > 0 ? (
+                      <>
+                        {" — try "}
+                        <span className="font-mono">{entry.suggestions.join(", ")}</span>
+                      </>
+                    ) : (
+                      " — nothing on this account resembles it"
+                    )}
+                  </li>
+                ))}
+              </ul>
+              <p className="mt-1 opacity-80">
+                They fail identically on every scan until TRADED_SYMBOLS changes.
+              </p>
+            </div>
+          )}
+          {data.errors.length > 0 && (
+            <div className="mb-3 rounded-lg border border-red-900 bg-red-950/40 p-2 text-xs text-red-300">
+              <p className="font-semibold">
+                {data.errors.length} symbol{data.errors.length === 1 ? "" : "s"} failed this scan
+              </p>
+              <ul className="mt-1 space-y-0.5">
+                {data.errors.map((line) => (
+                  <li key={line} className="break-words">
+                    {line}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
           {data.symbols.length === 0 ? (
             <Empty>No symbols were analysed in this scan.</Empty>
           ) : (

@@ -30,7 +30,7 @@ from .broker.tradelocker import TradeLockerBroker
 from .clock import utc_now
 from .broker.symbols import broker_suffix, canonical_symbol
 from .config import ExecutionMode, TradingConfig, load_config, profit_floor_feasibility
-from .errors import BotError, ConfigError
+from .errors import BotError, ConfigError, SymbolUnavailable
 from .marketdata.candles import to_candles
 from .marketdata.validation import validate_series
 from .observability import redact
@@ -336,6 +336,48 @@ def run(
     except BotError as exc:
         report.add("instruments", FAIL, f"could not list instruments: {exc}")
         available = []
+
+    # 6b. every configured symbol, resolved locally against that directory --
+    #     No extra requests: this reuses the list already fetched above. It
+    #     exists because a symbol the account does not carry fails on every
+    #     scan forever, and the fix is one line of TRADED_SYMBOLS.
+    if available:
+        missing: list[dict[str, object]] = []
+        for name in config.symbols:
+            try:
+                broker.instrument(name)
+            except SymbolUnavailable as exc:
+                missing.append({"symbol": name, "suggestions": list(exc.suggestions)})
+            except BotError as exc:
+                missing.append({"symbol": name, "error": str(exc)})
+        if missing:
+            lines = []
+            for entry in missing:
+                suggestions = entry.get("suggestions") or []
+                if suggestions:
+                    lines.append(
+                        f"  {entry['symbol']} -> not carried; closest: "
+                        + ", ".join(str(item) for item in suggestions)
+                    )
+                elif entry.get("error"):
+                    lines.append(f"  {entry['symbol']} -> {entry['error']}")
+                else:
+                    lines.append(f"  {entry['symbol']} -> not carried, and nothing resembles it")
+            report.add(
+                "configured_symbols",
+                WARN,
+                f"{len(missing)} of {len(config.symbols)} configured symbol(s) cannot be "
+                "traded on this account and are skipped by every scan:\n"
+                + "\n".join(lines)
+                + "\nEdit TRADED_SYMBOLS to the broker's own names to recover them.",
+                missing=missing,
+            )
+        else:
+            report.add(
+                "configured_symbols",
+                OK,
+                f"all {len(config.symbols)} configured symbol(s) resolve on this account",
+            )
 
     # 7. per-symbol verification -----------------------------------------
     for symbol in symbols:

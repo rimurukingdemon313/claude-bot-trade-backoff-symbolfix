@@ -46,33 +46,68 @@ WRITE_METHODS = ("POST", "PUT", "PATCH", "DELETE")
 
 @dataclass
 class CircuitBreaker:
-    """Closed -> Open -> Half-open. Half-open lets exactly one probe through."""
+    """Closed -> Open -> Half-open, with a cooldown that grows.
+
+    The growth is the important part. A fixed 60-second reset means that
+    against a block which lasts longer than a minute — a Cloudflare rate
+    limit is the case here — the client probes once a minute, forever.
+    Cloudflare extends a rate limit for traffic that keeps arriving during
+    it, so a fixed retry does not merely fail to help: it holds the block
+    open. The bot was the reason it never cleared.
+
+    Each consecutive open doubles the wait, capped. One success resets
+    everything, so a broker that comes back is used immediately.
+    """
 
     failure_threshold: int = 5
     reset_seconds: float = 60.0
+    #: Ceiling on the grown cooldown. Fifteen minutes is longer than any
+    #: rate limit observed here and short enough that a recovered broker is
+    #: picked up within one scan interval.
+    max_reset_seconds: float = 900.0
     _failures: int = 0
     _opened_at: float = 0.0
     _half_open: bool = False
+    #: How many times the circuit has opened without a success in between.
+    _consecutive_opens: int = 0
+
+    @property
+    def current_reset_seconds(self) -> float:
+        """The wait this open cycle earns: 60s, 120s, 240s, ... capped."""
+
+        grown = self.reset_seconds * (2 ** max(0, self._consecutive_opens - 1))
+        return min(grown, self.max_reset_seconds)
 
     def before_call(self) -> None:
         if self._failures < self.failure_threshold:
             return
+        wait = self.current_reset_seconds
         elapsed = time.monotonic() - self._opened_at
-        if elapsed < self.reset_seconds:
+        if elapsed < wait:
             raise CircuitOpen(
                 f"broker circuit open after {self._failures} consecutive failures; "
-                f"retry in {self.reset_seconds - elapsed:.0f}s"
+                f"retry in {wait - elapsed:.0f}s"
             )
         self._half_open = True
 
     def record_success(self) -> None:
         self._failures = 0
         self._half_open = False
+        # A single success clears the escalation. Backing off is for a
+        # broker that is still refusing, never a tax on one that recovered.
+        self._consecutive_opens = 0
 
     def record_failure(self) -> None:
         self._failures += 1
-        if self._failures >= self.failure_threshold:
+        if self._failures == self.failure_threshold:
             self._opened_at = time.monotonic()
+            self._consecutive_opens += 1
+        elif self._failures > self.failure_threshold:
+            # A probe through the half-open gate failed. That is another
+            # open cycle, and it earns the next step of the backoff.
+            self._opened_at = time.monotonic()
+            self._consecutive_opens += 1
+            self._failures = self.failure_threshold
         self._half_open = False
 
     @property
@@ -280,6 +315,11 @@ class HttpTransport:
             "calls": self.calls,
             "lastLatencyMs": round(self.last_latency_ms, 1) if self.last_latency_ms else None,
             "requestSpacingSeconds": self.throttle.min_interval,
+            "circuitBackoffSeconds": (
+                round(self.circuit.current_reset_seconds)
+                if self.circuit.state != "closed"
+                else None
+            ),
             # Visible because a rate-limit cooldown looks exactly like a
             # hang from outside: the bot is deliberately silent and the
             # operator has no way to tell that from a broken one.

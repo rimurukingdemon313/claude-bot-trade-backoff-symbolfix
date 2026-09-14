@@ -168,8 +168,17 @@ export default function Dashboard() {
   const data = snapshot.data;
   const health = data?.health;
   const risk = data?.risk?.data;
+  // Tri-state on purpose. Boolean(undefined) is false, and rendering that
+  // as PAUSED told the operator the bot was deliberately stopped when the
+  // truth was that nobody could see it — a plausible-looking value
+  // presented as information, which is the one thing rule 6 forbids. The
+  // same applies to the kill switch: "not tripped" and "unreadable" are
+  // not the same statement, and only one of them is safe to act on.
+  const scannerKnown = health?.components?.scanner?.enabled !== undefined;
   const scannerEnabled = Boolean(health?.components?.scanner?.enabled);
+  const killKnown = risk?.killSwitch?.active !== undefined;
   const killActive = Boolean(risk?.killSwitch?.active);
+  const stateKnown = scannerKnown && killKnown;
   const demoVerified = Boolean(data?.account?.data?.demoVerified);
   const busy = manualScan.isPending || reconcile.isPending;
 
@@ -211,8 +220,12 @@ export default function Dashboard() {
                 without hunting for it. */}
             {activeStrategy && <Badge tone="info">{activeStrategy.shortLabel}</Badge>}
             <Badge tone={connectionState.tone}>{connectionState.label}</Badge>
-            <Badge tone={killActive ? "bad" : scannerEnabled ? "good" : "warn"}>
-              {killActive ? "STOPPED" : scannerEnabled ? "SCANNING" : "PAUSED"}
+            <Badge
+              tone={
+                !stateKnown ? "neutral" : killActive ? "bad" : scannerEnabled ? "good" : "warn"
+              }
+            >
+              {!stateKnown ? "UNKNOWN" : killActive ? "STOPPED" : scannerEnabled ? "SCANNING" : "PAUSED"}
             </Badge>
           </div>
         </div>
@@ -220,9 +233,14 @@ export default function Dashboard() {
         <div className="mx-auto flex max-w-5xl flex-wrap gap-2 px-4 pb-3">
           <ControlButton
             onClick={() => scanning.mutate(!scannerEnabled)}
-            disabled={scanning.isPending || killActive}
+            // Not offered while the state is unknown: the label would be a
+            // guess, and pressing it would send the opposite of what the
+            // operator sees.
+            disabled={scanning.isPending || killActive || !stateKnown}
             icon={scannerEnabled ? Pause : Play}
-            label={scannerEnabled ? "Pause scanning" : "Resume scanning"}
+            label={
+              !stateKnown ? "Scanning —" : scannerEnabled ? "Pause scanning" : "Resume scanning"
+            }
           />
           <ControlButton
             onClick={() => manualScan.mutate()}
@@ -238,10 +256,17 @@ export default function Dashboard() {
           />
           <ControlButton
             onClick={() => killSwitch.mutate({ active: !killActive, force: killActive })}
-            disabled={killSwitch.isPending}
+            // Stopping must always be available. Only the CLEAR direction
+            // needs the state to be known, because clearing something that
+            // might still be tripped is the unsafe half.
+            disabled={killSwitch.isPending || (killActive && !killKnown)}
             icon={AlertTriangle}
-            label={killActive ? "Clear kill switch" : "Emergency stop"}
-            tone={killActive ? "warn" : "danger"}
+            label={
+              killActive && killKnown
+                ? "Clear kill switch"
+                : "Emergency stop"
+            }
+            tone={killActive && killKnown ? "warn" : "danger"}
           />
         </div>
 

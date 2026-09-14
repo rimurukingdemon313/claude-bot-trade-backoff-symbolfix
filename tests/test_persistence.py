@@ -310,3 +310,92 @@ def test_switching_accounts_is_announced_rather_than_silent(orchestrator, repos,
 
     orchestrator._note_account_identity()
     assert "broker account changed" not in (capsys.readouterr().out + captured.err[:0])
+
+
+# -- migrations must survive PostgreSQL, not merely SQLite ----------------
+
+
+def test_migrating_twice_is_a_no_op(tmp_path):
+    """Every boot runs migrate(). The second one must not fail."""
+
+    from bot.storage.db import Database
+
+    database = Database(sqlite_path=str(tmp_path / "bot.db"))
+    database.connect()
+    database.migrate()
+    database.migrate()  # must not raise
+    assert database.ping()
+    database.close()
+
+
+def test_an_added_column_is_checked_for_rather_than_attempted(tmp_path):
+    """The bug this exists to prevent crash-looped the bot on startup.
+
+    In PostgreSQL ANY failed statement aborts the whole transaction, and
+    every command after it raises InFailedSqlTransaction. So "try the
+    ALTER and ignore the duplicate-column error" is not a portable idiom —
+    it is a way to destroy the migration on the SECOND boot. It worked in
+    SQLite, which is exactly why it shipped: the failure only appeared
+    once a real PostgreSQL was attached.
+
+    This drives the migration through a cursor with PostgreSQL's
+    semantics: once a statement raises, every later one does too.
+    """
+
+    from bot.storage.db import ADDED_COLUMNS, Database
+
+    assert ADDED_COLUMNS, "nothing to check"
+
+    class PoisonedOnError:
+        """A cursor that behaves the way PostgreSQL actually behaves."""
+
+        def __init__(self, real):
+            self.real = real
+            self.aborted = False
+
+        def execute(self, statement, params=()):
+            if self.aborted:
+                raise RuntimeError(
+                    "current transaction is aborted, commands ignored "
+                    "until end of transaction block"
+                )
+            try:
+                return self.real.execute(statement, params)
+            except Exception:
+                self.aborted = True
+                raise
+
+        def fetchone(self):
+            return self.real.fetchone()
+
+        def fetchall(self):
+            return self.real.fetchall()
+
+    database = Database(sqlite_path=str(tmp_path / "bot.db"))
+    database.connect()
+    database.migrate()  # first boot: creates everything
+
+    # Second boot, with a cursor that punishes a provoked error the way
+    # PostgreSQL does.
+    with database.transaction() as real_cursor:
+        cursor = PoisonedOnError(real_cursor)
+        for table, column, definition in ADDED_COLUMNS:
+            if database._column_exists(cursor, table, column):
+                continue
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        assert not cursor.aborted, (
+            "the migration provoked an error; on PostgreSQL this aborts the "
+            "transaction and every statement after it fails"
+        )
+
+
+def test_column_existence_is_reported_correctly(tmp_path):
+    from bot.storage.db import Database
+
+    database = Database(sqlite_path=str(tmp_path / "bot.db"))
+    database.connect()
+    database.migrate()
+    with database.transaction() as cursor:
+        assert database._column_exists(cursor, "equity_snapshots", "account_id") is True
+        assert database._column_exists(cursor, "equity_snapshots", "not_a_column") is False
+    database.close()

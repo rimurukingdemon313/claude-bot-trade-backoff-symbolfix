@@ -682,14 +682,31 @@ class EquityRepository:
     def __init__(self, db: Database) -> None:
         self.db = db
 
-    def snapshot(self, balance: float, equity: float) -> None:
+    def snapshot(self, balance: float, equity: float, account_id: str | None = None) -> None:
         self.db.execute(
-            "INSERT INTO equity_snapshots (balance, equity, created_at) VALUES (?, ?, ?)",
-            (balance, equity, utc_now().isoformat()),
+            "INSERT INTO equity_snapshots (balance, equity, account_id, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (balance, equity, str(account_id) if account_id else None, utc_now().isoformat()),
         )
 
-    def peak_equity(self) -> float | None:
-        row = self.db.query_one("SELECT MAX(equity) AS peak FROM equity_snapshots")
+    def peak_equity(self, account_id: str | None = None) -> float | None:
+        """The highest equity this account has reached.
+
+        Scoped deliberately. Peak equity drives the drawdown limit, and a
+        peak carried over from a DIFFERENT broker account is not a
+        drawdown — switching from a $10,000 demo to a fresh $1,000 one
+        would read as a 90% loss and trip MAX_DRAWDOWN before the first
+        trade. Rows written before this column existed have no account and
+        are excluded from a scoped read for the same reason.
+        """
+
+        if account_id:
+            row = self.db.query_one(
+                "SELECT MAX(equity) AS peak FROM equity_snapshots WHERE account_id = ?",
+                (str(account_id),),
+            )
+        else:
+            row = self.db.query_one("SELECT MAX(equity) AS peak FROM equity_snapshots")
         return None if row is None or row["peak"] is None else float(row["peak"])
 
     def curve(self, limit: int = 200) -> list[dict[str, Any]]:

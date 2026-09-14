@@ -244,3 +244,69 @@ def test_accepted_candidates_are_not_counted_as_blockers(repos):
 
 def test_a_blockerless_journal_returns_nothing_rather_than_failing(repos):
     assert repos.journal.blocker_histogram(days=7) == []
+
+
+# -- state belongs to the account that produced it ------------------------
+
+
+def test_peak_equity_is_scoped_to_its_account(repos):
+    """A peak from a DIFFERENT account is not a drawdown.
+
+    Switching a $10,000 demo for a fresh $1,000 one would otherwise read
+    as a 90% loss and trip MAX_DRAWDOWN before the first trade — a safety
+    limit firing on arithmetic about an account that no longer exists.
+    """
+
+    repos.equity.snapshot(10_000.0, 10_000.0, "old-account")
+    repos.equity.snapshot(1_000.0, 1_000.0, "new-account")
+
+    assert repos.equity.peak_equity("old-account") == pytest.approx(10_000.0)
+    assert repos.equity.peak_equity("new-account") == pytest.approx(1_000.0)
+
+
+def test_the_drawdown_on_a_fresh_account_starts_at_zero(repos):
+    repos.equity.snapshot(10_000.0, 10_000.0, "old-account")
+    repos.equity.snapshot(1_000.0, 1_000.0, "new-account")
+
+    peak = repos.equity.peak_equity("new-account") or 1_000.0
+    drawdown = max(0.0, (peak - 1_000.0) / peak)
+    assert drawdown == pytest.approx(0.0), "a new account must not open in drawdown"
+
+
+def test_an_unscoped_read_still_sees_everything(repos):
+    """The dashboard's equity curve is not per-account and must not change."""
+
+    repos.equity.snapshot(10_000.0, 10_000.0, "old-account")
+    repos.equity.snapshot(1_000.0, 1_000.0, "new-account")
+    assert repos.equity.peak_equity() == pytest.approx(10_000.0)
+
+
+def test_rows_written_before_the_column_existed_are_not_claimed_by_an_account(repos):
+    """They belong to an account nobody recorded, so they belong to none."""
+
+    repos.equity.snapshot(5_000.0, 5_000.0)  # no account id
+    assert repos.equity.peak_equity("some-account") is None
+    assert repos.equity.peak_equity() == pytest.approx(5_000.0)
+
+
+def test_switching_accounts_is_announced_rather_than_silent(orchestrator, repos, capsys):
+    import dataclasses
+
+    from bot.orchestrator import STATE_ACCOUNT_ID
+
+    orchestrator.config = dataclasses.replace(
+        orchestrator.config,
+        broker=dataclasses.replace(orchestrator.config.broker, account_id="999-new"),
+    )
+    repos.state.set(STATE_ACCOUNT_ID, "2475112")
+
+    orchestrator._note_account_identity()
+
+    captured = capsys.readouterr()
+    assert "broker account changed" in (captured.out + captured.err)
+    # And the new identity is remembered, so it is announced once, not
+    # every boot.
+    assert str(repos.state.get(STATE_ACCOUNT_ID)) == "999-new"
+
+    orchestrator._note_account_identity()
+    assert "broker account changed" not in (capsys.readouterr().out + captured.err[:0])

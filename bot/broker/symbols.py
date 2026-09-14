@@ -138,3 +138,44 @@ def same_instrument(left: str, right: str) -> bool:
     # Neither resolves to a known pair (an index, say): fall back to an
     # exact alphanumeric comparison rather than declaring them equal.
     return alphanumeric(left) == alphanumeric(right)
+
+
+def nearest_names(requested: str, available: list[str], *, limit: int = 5) -> list[str]:
+    """Broker names a human would recognise as "what you probably meant".
+
+    A symbol the broker does not offer fails on every scan forever, and the
+    fix is always a one-line config edit. Naming the closest instruments the
+    account DOES carry turns a dead end into that edit. This suggests; it
+    never substitutes — rule 14's refusal to silently swap a name applies
+    just as much to a symbol as to a strategy.
+    """
+
+    wanted = alphanumeric(requested)
+    if not wanted:
+        return []
+    base, quote = split_currencies(requested)
+    scored: list[tuple[int, str]] = []
+    for name in available:
+        candidate = alphanumeric(name)
+        if not candidate:
+            continue
+        rank: int | None = None
+        if candidate.startswith(wanted) or wanted.startswith(candidate):
+            rank = 0
+        elif wanted in candidate or candidate in wanted:
+            rank = 1
+        else:
+            other_base, other_quote = split_currencies(name)
+            if base and quote and other_base and other_quote:
+                if {base, quote} == {other_base, other_quote}:
+                    rank = 0
+                elif other_base == base:
+                    # Same base only. A shared QUOTE is not evidence: on a
+                    # USD-quoted book that would suggest every instrument.
+                    rank = 2
+            if rank is None and len(wanted) >= 3 and candidate[:3] == wanted[:3]:
+                rank = 3
+        if rank is not None:
+            scored.append((rank, str(name)))
+    scored.sort(key=lambda item: (item[0], len(item[1]), item[1]))
+    return [name for _, name in scored[:limit]]

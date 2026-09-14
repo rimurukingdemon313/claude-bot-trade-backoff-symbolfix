@@ -145,6 +145,8 @@ export type Scan = {
   decision: string;
   skippedReason: string | null;
   errors: string[];
+  /** Configured symbols this account cannot trade — a config fault, not a blip. */
+  unavailable?: { symbol: string; reason: string; suggestions: string[] }[];
   account: Record<string, unknown>;
   symbols: ScanSymbol[];
   executed: Record<string, any> | null;

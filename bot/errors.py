@@ -85,6 +85,37 @@ class BrokerRejected(BrokerError):
     severity = Severity.PERMANENT
 
 
+class SymbolUnavailable(BrokerRejected):
+    """A configured symbol is not one this account can trade.
+
+    Separated from BrokerRejected because it is a CONFIG fact, not a
+    market event: it fails identically on every scan until TRADED_SYMBOLS
+    changes. Counting it as a scan error hides four permanent
+    misconfigurations inside a number that is supposed to mean "something
+    went wrong just now".
+    """
+
+    category = Category.CONFIG
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        symbol: str,
+        suggestions: tuple[str, ...] = (),
+        detail: object | None = None,
+    ) -> None:
+        super().__init__(message, detail=detail)
+        self.symbol = symbol
+        self.suggestions = tuple(suggestions)
+
+    def as_dict(self) -> dict[str, object]:
+        payload = super().as_dict()
+        payload["symbol"] = self.symbol
+        payload["suggestions"] = list(self.suggestions)
+        return payload
+
+
 class CircuitOpen(BrokerError):
     """The broker circuit breaker is open; calls are being shed."""
 

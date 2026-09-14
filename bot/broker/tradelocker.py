@@ -25,13 +25,21 @@ from typing import Any, Mapping, Sequence
 
 from ..clock import from_epoch, utc_now
 from ..config import TradingConfig
-from ..errors import BotError, BrokerAuthError, BrokerError, BrokerRejected, ConfigError
+from ..errors import (
+    BotError,
+    BrokerAuthError,
+    BrokerError,
+    BrokerRejected,
+    ConfigError,
+    SymbolUnavailable,
+)
 from ..observability import log_event
 from .history import HistoryFetcher, TIMEFRAME_MINUTES
 from .symbols import (
     alphanumeric,
     broker_suffix,
     canonical_symbol,
+    nearest_names,
     same_instrument,
     split_currencies,
 )
@@ -445,14 +453,38 @@ class TradeLockerBroker:
     # -- account ---------------------------------------------------------
 
     def account_state(self) -> AccountState:
-        columns = self._columns("accountDetailsConfig")
+        """Balance, equity and margin for the configured account.
+
+        This goes through `_decode` like every other table rather than
+        zipping columns itself. Zipping directly had two failure modes that
+        both surfaced as "no usable balance", which names the wrong culprit:
+        a brand that renames `accountDetailsConfig` produced no columns and
+        therefore an empty row, and a brand that returns an already-keyed
+        object made `zip` iterate the row's KEYS. Paper mode never reaches
+        this call when PAPER_STARTING_BALANCE is set, so the whole class of
+        failure appears only after switching to demo_live.
+        """
+
         result = self.get(f"/trade/accounts/{self.broker_config.account_id}/state") or {}
         values = result.get("accountDetailsData", [])
-        data = dict(zip(columns, values)) if columns else {}
+        if isinstance(values, Mapping):
+            rows: list[Any] = [values]
+        elif values and all(isinstance(item, (list, tuple, Mapping)) for item in values):
+            # Some brands wrap the single detail row in a list of rows.
+            rows = list(values)
+        elif values:
+            rows = [list(values)]
+        else:
+            rows = []
+        decoded = self._decode(rows, "accountDetailsConfig") if rows else []
+        data = decoded[0] if decoded else {}
         balance = _num(_first(data, "balance", "accountBalance"), None)
         if balance is None:
+            seen = ", ".join(sorted(str(key) for key in data)) or "no fields at all"
             raise BrokerError(
                 "TradeLocker account state did not include a usable balance. "
+                "Looked for 'balance' and 'accountBalance' in the accountDetailsData "
+                f"row; that row carried: {seen}. "
                 "Refusing to substitute a placeholder — every risk calculation depends on it."
             )
         equity = _num(_first(data, "projectedBalance", "equity", "balance"), balance) or balance
@@ -526,9 +558,17 @@ class TradeLockerBroker:
             )
         if not candidates:
             available = self.available_symbols()
-            raise BrokerRejected(
+            suggestions = nearest_names(symbol, available)
+            hint = (
+                f" Closest instruments this account carries: {', '.join(suggestions)}."
+                if suggestions
+                else ""
+            )
+            raise SymbolUnavailable(
                 f"symbol {symbol!r} not available on this account. "
-                f"{len(available)} instruments exist, e.g. {', '.join(available[:20])}"
+                f"{len(available)} instruments exist, e.g. {', '.join(available[:20])}.{hint}",
+                symbol=symbol,
+                suggestions=tuple(suggestions),
             )
 
         spec = self._build_spec(symbol, candidates[0])

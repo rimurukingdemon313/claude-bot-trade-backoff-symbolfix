@@ -308,16 +308,95 @@ def test_the_dashboard_snapshot_shows_only_real_state(config, orchestrator, repo
 
 
 def test_the_dashboard_reports_offline_rather_than_inventing_numbers(config, orchestrator, repos):
+    """A value that was never read is a gap, not a zero."""
+
     from bot.errors import BrokerError
+    from bot.broker.cache import LiveCache
 
     def explode():
         raise BrokerError("broker unreachable")
 
     orchestrator.broker.account_state = explode  # type: ignore[assignment]
+    # Nothing has ever been read: startup's seed is discarded so this is
+    # the cold case, which is the one rule 6 is about.
+    orchestrator.live = LiveCache()
     api = DashboardApi(config, orchestrator, repos)
     account = api.account()
     assert account["status"] == "OFFLINE"
     assert account["data"] is None
+    assert "has been read from the broker yet" in account["error"]
+
+
+def test_a_broker_outage_serves_the_last_read_with_its_age_not_a_blank(
+    config, orchestrator, repos
+):
+    """A number that WAS read stays visible, labelled with when.
+
+    The dashboard no longer calls the broker (bot/broker/cache.py), so an
+    outage no longer blanks the page — it freezes it. That is only honest
+    if the age and the refresh failure travel with the value, which is
+    what this pins. Rule 6 forbids inventing a number; it does not forbid
+    showing a real one and saying how old it is.
+    """
+
+    from bot.errors import BrokerError
+
+    orchestrator.startup()
+    assert orchestrator.live.get("account").present
+
+    def explode():
+        raise BrokerError("broker unreachable")
+
+    orchestrator.broker.account_state = explode  # type: ignore[assignment]
+    orchestrator.broker.positions = explode  # type: ignore[assignment]
+
+    # The TRADING path is unaffected: it still reads the broker and still
+    # refuses to proceed. Only the display falls back to the last read.
+    with pytest.raises(BrokerError):
+        orchestrator.build_account_state()
+
+    api = DashboardApi(config, orchestrator, repos)
+    account = api.account()
+    assert account["status"] == "LIVE"
+    assert account["data"]["balance"] > 0
+    assert account["asOf"] is not None
+    assert account["ageSeconds"] is not None
+    assert account["refreshError"] == "broker unreachable"
+
+
+def test_the_dashboard_never_calls_the_broker(config, orchestrator, repos):
+    """The 30-second proxy timeout, pinned as a property.
+
+    Every broker read shares one throttle that spaces requests and holds a
+    lock while it sleeps. A dashboard request that touches the broker
+    therefore queues behind a whole scan, which is how /snapshot came to
+    take longer than the proxy would wait while the bot was healthy. A
+    test that only measured latency would pass on a quiet broker, so this
+    asserts the structural fact instead: the page makes NO broker calls.
+    """
+
+    orchestrator.startup()
+    orchestrator.scan(source="manual", now=SETUP_END)
+
+    calls: list[str] = []
+
+    def forbid(name):
+        def guard(*args, **kwargs):
+            calls.append(name)
+            raise AssertionError(f"the dashboard called broker.{name}()")
+
+        return guard
+
+    for name in ("account_state", "positions", "orders", "quote", "candles"):
+        setattr(orchestrator.broker, name, forbid(name))
+
+    api = DashboardApi(config, orchestrator, repos)
+    snapshot = api.snapshot()
+
+    assert calls == []
+    assert snapshot["account"]["status"] == "LIVE"
+    assert snapshot["positions"]["status"] == "LIVE"
+    assert snapshot["risk"]["status"] == "LIVE"
 
 
 def test_performance_is_not_fabricated_from_an_empty_history(config, orchestrator, repos):

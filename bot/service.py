@@ -251,13 +251,34 @@ def make_handler(service: BotService) -> type[BaseHTTPRequestHandler]:
         # -- helpers ---------------------------------------------------
 
         def _send(self, status: int, payload: Any) -> None:
+            """Write the response, tolerating a caller that has gone.
+
+            The proxy in front of this service gives up after 30 seconds.
+            When a handler took longer, the answer was written into a
+            socket nobody was holding and Python printed a BrokenPipeError
+            traceback — which reads like the bot crashing when in fact the
+            bot had just finished the work correctly and slightly late.
+            The real fix is not being slow (see bot/broker/cache.py); this
+            keeps the symptom from impersonating a fault in the meantime.
+            """
+
             body = json.dumps(payload, default=str).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            self.wfile.write(body)
+            try:
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                log_event(
+                    "API",
+                    f"caller closed the connection before {self.path} could answer",
+                    severity="warning",
+                    path=self.path,
+                    status=status,
+                )
+                self.close_connection = True
 
         def _authorized(self) -> bool:
             """Commands require the token when one is configured.

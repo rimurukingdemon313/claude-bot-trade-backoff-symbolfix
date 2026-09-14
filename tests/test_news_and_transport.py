@@ -307,3 +307,67 @@ def test_a_transport_built_without_a_throttle_shares_its_sleeper():
     client.throttle.penalise(30.0)
     client.throttle.wait()
     assert slept, "the throttle slept on the real clock instead of the injected one"
+
+
+# -- a fixed retry keeps a rate limit alive --------------------------------
+
+
+def test_the_cooldown_grows_while_the_broker_keeps_refusing():
+    """A fixed 60s reset probes once a minute, forever.
+
+    Cloudflare extends a rate limit for traffic that keeps arriving during
+    it, so a fixed retry does not merely fail to help — it holds the block
+    open. The bot was the reason it never cleared.
+    """
+
+    from bot.broker.http import CircuitBreaker
+
+    breaker = CircuitBreaker(failure_threshold=5, reset_seconds=60.0)
+    for _ in range(5):
+        breaker.record_failure()
+    assert breaker.state == "open"
+    assert breaker.current_reset_seconds == pytest.approx(60.0)
+
+    for expected in (120.0, 240.0, 480.0):
+        breaker.record_failure()  # a probe through half-open failed again
+        assert breaker.current_reset_seconds == pytest.approx(expected)
+
+
+def test_the_cooldown_is_capped():
+    """Long enough to outlast any observed block, short enough that a
+    recovered broker is picked up within one scan interval."""
+
+    from bot.broker.http import CircuitBreaker
+
+    breaker = CircuitBreaker(failure_threshold=1, reset_seconds=60.0, max_reset_seconds=900.0)
+    for _ in range(20):
+        breaker.record_failure()
+    assert breaker.current_reset_seconds == pytest.approx(900.0)
+
+
+def test_one_success_clears_the_escalation_entirely():
+    """Backing off is for a broker still refusing, never a tax on one that
+    recovered."""
+
+    from bot.broker.http import CircuitBreaker
+
+    breaker = CircuitBreaker(failure_threshold=2, reset_seconds=60.0)
+    for _ in range(6):
+        breaker.record_failure()
+    assert breaker.current_reset_seconds > 60.0
+
+    breaker.record_success()
+
+    assert breaker.state == "closed"
+    assert breaker.current_reset_seconds == pytest.approx(60.0)
+    breaker.before_call()  # must not raise
+
+
+def test_the_health_report_shows_the_wait_that_is_actually_in_force():
+    """A fifteen-minute silence is alarming unless it says it is deliberate."""
+
+    client = transport()
+    assert client.health()["circuitBackoffSeconds"] is None
+    for _ in range(5):
+        client.circuit.record_failure()
+    assert client.health()["circuitBackoffSeconds"] == 60

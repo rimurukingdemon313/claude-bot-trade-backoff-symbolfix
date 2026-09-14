@@ -251,6 +251,11 @@ class FakeBroker:
     metadata: dict[str, Any] | None = field(
         default_factory=lambda: {"id": "1", "accNum": "1", "accountType": "DEMO", "currency": "USD"}
     )
+    #: Fill the position WITHOUT the stop and target that were attached to
+    #: the order. Real brokers do this — the order is accepted, the
+    #: protection silently is not — and it is the case the executor's
+    #: repair path exists for.
+    strip_protection: bool = False
     #: Broker-signed session claims. Defaults to None so the fake keeps
     #: proving that the account record alone is enough; tests that model a
     #: brand with no account type set this instead.
@@ -419,8 +424,8 @@ class FakeBroker:
                     direction=direction,
                     quantity=quantity,
                     entry_price=self.quote(spec).ask if direction == "BUY" else self.quote(spec).bid,
-                    stop_loss=stop_loss,
-                    take_profit=take_profit,
+                    stop_loss=None if self.strip_protection else stop_loss,
+                    take_profit=None if self.strip_protection else take_profit,
                     unrealized_pnl=0.0,
                     opened_at=BASE_TIME,
                     raw={},

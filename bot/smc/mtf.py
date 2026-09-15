@@ -46,6 +46,7 @@ from typing import Any, Sequence, TYPE_CHECKING
 from ..config import MtfConfig, SmcConfig
 from .displacement import Displacement
 from .liquidity import LiquiditySweep
+from .regime import Regime
 from .structure import StructureEvent
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle guard only
@@ -74,6 +75,11 @@ _PREFERENCE = (
 # -- signal states -----------------------------------------------------------
 
 #: Nothing here is worth watching.
+#: How near a displacement must be to the trigger to count as the move
+#: that produced it. Wider and it picks up an unrelated impulse; narrower
+#: and a displacement one candle late is missed.
+DISPLACEMENT_PROXIMITY_CANDLES = 6
+
 NO_TRADE = "NO_TRADE"
 #: Context is favourable but the execution trigger is incomplete.
 WATCH = "WATCH"
@@ -86,7 +92,19 @@ TRADE = "TRADE"
 
 
 def _opposite(bias: str) -> str:
-    return "bearish" if bias == "bullish" else "bullish"
+    """The other direction, or "" for a bias that has none.
+
+    Returning "bullish" for "range" - which a bare else did - makes
+    `h4.bias == opposing` accidentally TRUE for a neutral H4 against a
+    bearish setup, so a timeframe with no opinion would read as opposed.
+    Nothing calls it that way today; it is one refactor away from doing so.
+    """
+
+    if bias == "bullish":
+        return "bearish"
+    if bias == "bearish":
+        return "bullish"
+    return ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +163,10 @@ class DirectionEvidence:
     structure_event: StructureEvent | None
     displacement: Displacement | None
     choch: StructureEvent | None
+    #: The most recent qualifying trigger in this direction, over all of
+    #: them - not just the one selected for grading. Used for the recency
+    #: comparison between directions.
+    latest_trigger_index: int = -1
 
     @property
     def has_trigger(self) -> bool:
@@ -173,7 +195,7 @@ class DirectionEvidence:
         return min(1.0, best)
 
 
-def is_choppy(regime: Any, config: MtfConfig) -> bool:
+def is_choppy(regime: Regime | None, config: MtfConfig) -> bool:
     """A market with no usable direction and no usable range.
 
     Neither a trend to continue nor boundaries to rotate against, so the
@@ -237,9 +259,28 @@ def gather_direction_evidence(
     moves = [
         move
         for move in m15.displacements
-        if move.direction == wanted and abs(move.index - reference) <= 6
+        # `move.index <= index` is the whole no-look-ahead guard here, and
+        # it was missing: `abs()` accepts a displacement AFTER the bar
+        # being asked about, so bar 79 could answer bar 76. Nothing in
+        # production noticed because production always asks about the last
+        # bar - a backtest walking forward would have been scored against
+        # candles it could not have seen (project rule 4).
+        if move.direction == wanted
+        and move.index <= index
+        and abs(move.index - reference) <= DISPLACEMENT_PROXIMITY_CANDLES
     ]
     displacement = max(moves, key=lambda m: m.quality) if moves else None
+
+    # The most recent thing the market did in this direction, over ALL
+    # qualifying triggers rather than the one selected for grading. The
+    # sweep above is chosen by QUALITY, so a strong old sweep would
+    # otherwise make a fresh signal look stale to the recency veto in
+    # `decide` - and being judged stale is what lets the opposite
+    # direction take the trade.
+    latest = max(
+        [s.index for s in sweeps] + [e.index for e in events],
+        default=-1,
+    )
 
     return DirectionEvidence(
         wanted=wanted,
@@ -247,6 +288,7 @@ def gather_direction_evidence(
         structure_event=structure_event,
         displacement=displacement,
         choch=choch,
+        latest_trigger_index=latest,
     )
 
 
@@ -297,6 +339,78 @@ def _reversal_shortfalls(
     return missing
 
 
+@dataclass(frozen=True, slots=True)
+class Classification:
+    """What one direction is, and what it must clear to be taken.
+
+    A named result rather than a five-tuple: `allowed` in particular has
+    to be impossible to confuse with the rest, because it is the field
+    that decides whether an order can follow.
+    """
+
+    setup_type: str
+    score_floor: float
+    rationale: str
+    evidence: tuple[str, ...] = field(default_factory=tuple)
+    allowed: bool = False
+
+    @classmethod
+    def refused(cls, setup_type: str, rationale: str) -> "Classification":
+        """Named, scored at nothing, and not takeable.
+
+        The type is still the honest one - a disabled countertrend scalp
+        is a countertrend scalp, and relabelling it NOISE to make it
+        untradeable would hide from the operator what the engine saw.
+        """
+
+        return cls(setup_type=setup_type, score_floor=0.0, rationale=rationale, allowed=False)
+
+
+@dataclass(frozen=True, slots=True)
+class _Case:
+    """The inputs every branch of the classifier shares."""
+
+    h4: "TimeframeAnalysis"
+    h1: "TimeframeAnalysis"
+    m15: "TimeframeAnalysis"
+    wanted: str
+    evidence: DirectionEvidence
+    mtf: MtfConfig
+    tier_b: float
+    #: Extra score demanded because the market is chop. Added to every
+    #: floor below, never subtracted from one.
+    premium: float
+    notes: tuple[str, ...]
+
+    def agrees_h1(self) -> bool:
+        return self.h1.bias == self.wanted
+
+    def opposes_h1(self) -> bool:
+        return self.h1.bias == _opposite(self.wanted)
+
+    def agrees_h4(self) -> bool:
+        return self.h4.bias == self.wanted
+
+    def opposes_h4(self) -> bool:
+        return self.h4.bias == _opposite(self.wanted)
+
+    def take(self, setup_type: str, floor: float, rationale: str, *note: str) -> Classification:
+        """A takeable classification at `max(tier_b, floor)` plus the chop premium.
+
+        The clamp is the one-way ratchet: a classification may demand more
+        evidence than the build's own bar, never less, so no branch here
+        can loosen a limit however it is configured.
+        """
+
+        return Classification(
+            setup_type=setup_type,
+            score_floor=max(self.tier_b, floor) + self.premium,
+            rationale=rationale,
+            evidence=self.notes + tuple(note),
+            allowed=True,
+        )
+
+
 def classify(
     *,
     h4: "TimeframeAnalysis",
@@ -306,221 +420,182 @@ def classify(
     evidence: DirectionEvidence,
     mtf: MtfConfig,
     tier_b: float,
-) -> tuple[str, float, str, tuple[str, ...], bool]:
-    """Classify one direction. Returns (type, score floor, why, evidence).
+) -> Classification:
+    """Classify one direction against the primary bias and the macro.
 
-    The floor is the minimum total score this classification must reach.
-    It starts at the configured B tier and only ever rises.
-
-    The trailing flag is whether this classification may be TAKEN. It is
-    separate from the type on purpose: a countertrend scalp that the
-    configuration disables is still correctly named a countertrend scalp,
-    and calling it NOISE to make it non-tradeable would hide from the
-    operator what the engine actually saw.
+    A dispatcher over three mutually exclusive cases - with the primary
+    bias, without one, against one - because that is the only question
+    that changes what the setup IS. Everything else changes only how much
+    it has to prove.
     """
 
-    notes: list[str] = []
-    opposing = _opposite(wanted)
-
-    agrees_h1 = h1.bias == wanted
-    opposes_h1 = h1.bias == opposing
-    agrees_h4 = h4.bias == wanted
-    opposes_h4 = h4.bias == opposing
-
     if evidence.trigger_quality < mtf.min_trigger_quality:
-        return (
+        return Classification.refused(
             NOISE,
-            0.0,
-            (
-                f"M15 trigger quality {evidence.trigger_quality:.2f} is below the "
-                f"{mtf.min_trigger_quality:.2f} floor - noise, not a setup"
-            ),
-            (),
-            False,
+            f"M15 trigger quality {evidence.trigger_quality:.2f} is below the "
+            f"{mtf.min_trigger_quality:.2f} floor - noise, not a setup",
         )
 
     choppy = is_choppy(h1.regime, mtf) or is_choppy(m15.regime, mtf)
     premium = mtf.choppy_score_premium if choppy else 0.0
-    if choppy:
-        notes.append(
-            f"choppy market ({h1.regime.note}) - {premium:.0f} extra points required"
-        )
+    notes = (
+        (f"choppy market ({h1.regime.note}) - {premium:.0f} extra points required",)
+        if choppy
+        else ()
+    )
+    case = _Case(
+        h4=h4,
+        h1=h1,
+        m15=m15,
+        wanted=wanted,
+        evidence=evidence,
+        mtf=mtf,
+        tier_b=tier_b,
+        premium=premium,
+        notes=notes,
+    )
 
-    # -- with the primary bias -------------------------------------------
-    if agrees_h1:
-        if opposes_h4:
-            notes.append(
-                f"H4 macro is {h4.bias} while H1 is {h1.bias}: trading the primary bias "
-                "against an unturned macro, so the bar is raised rather than the setup dropped"
-            )
-            floor = max(tier_b, mtf.floor_continuation_vs_macro) + premium
-            return (
+    if case.agrees_h1():
+        return _with_primary_bias(case)
+    if not case.opposes_h1():
+        return _without_primary_bias(case)
+    return _against_primary_bias(case)
+
+
+def _with_primary_bias(case: _Case) -> Classification:
+    """The M15 trigger runs with H1. H4 can only raise the bar."""
+
+    mtf, h1, h4 = case.mtf, case.h1, case.h4
+    if case.opposes_h4():
+        return case.take(
             CONTINUATION_VS_MACRO,
-            floor,
+            mtf.floor_continuation_vs_macro,
             "continuation of the H1 bias, counter to H4 context",
-            tuple(notes),
-            True,
+            f"H4 macro is {h4.bias} while H1 is {h1.bias}: trading the primary bias "
+            "against an unturned macro, so the bar is raised rather than the setup dropped",
         )
-        notes.append(
-            f"H1 primary bias is {h1.bias} and H4 macro {'agrees' if agrees_h4 else 'has no opinion'}"
-        )
-        floor = max(tier_b, mtf.floor_continuation) + premium
-        return CONTINUATION, floor, "continuation with the primary bias", tuple(notes), True
+    return case.take(
+        CONTINUATION,
+        mtf.floor_continuation,
+        "continuation with the primary bias",
+        f"H1 primary bias is {h1.bias} and H4 macro "
+        f"{'agrees' if case.agrees_h4() else 'has no opinion'}",
+    )
 
-    # -- the primary timeframe has no bias --------------------------------
-    # H1 is the PRIMARY bias, not the only one. When it has no confirmed
-    # directional structure the macro still has a say, and a trigger in
-    # the H4 direction is ordinary continuation - treating every neutral
-    # H1 as "range rotation only" would reject exactly the setups the
-    # macro context exists to support.
-    if not opposes_h1:
-        if agrees_h4:
-            notes.append(
-                f"H1 has no confirmed directional structure; H4 macro is {h4.bias} "
-                "and the M15 trigger runs with it"
-            )
-            floor = max(tier_b, mtf.floor_continuation) + premium
-            return (
-                CONTINUATION,
-                floor,
-                "continuation with the macro context, H1 neutral",
-                tuple(notes),
-                True,
-            )
 
-        if opposes_h4:
-            # Nothing supports this direction: H1 is silent and the macro
-            # is against it. That needs the full reversal case.
-            shortfalls = _reversal_shortfalls(evidence, mtf)
-            if shortfalls:
-                return (
-                    RETRACEMENT,
-                    0.0,
-                    (
-                        f"M15 is {wanted} against an {h4.bias} H4 macro with no H1 bias to "
-                        "support it, and the move has not earned the name reversal: "
-                        + "; ".join(shortfalls)
-                    ),
-                    (),
-                    False,
-                )
-            notes.append(
-                f"H1 is neutral and H4 macro is {h4.bias}: a turn against the macro with "
-                "complete reversal evidence"
-            )
-            floor = max(tier_b, mtf.floor_reversal) + premium
-            return (
-                REVERSAL,
-                floor,
-                "reversal against the macro context, H1 neutral",
-                tuple(notes),
-                True,
-            )
+def _without_primary_bias(case: _Case) -> Classification:
+    """H1 has no confirmed directional structure.
 
-        # Neither timeframe has an opinion. Two ways that can still be a
-        # setup, and one way it cannot.
-        dealing = h1.dealing_range or m15.dealing_range
-        position = dealing.position if dealing is not None else 0.5
-        # A rotation is only a rotation from the correct END of the range.
-        at_extreme = (
-            position <= (1.0 - mtf.range_rotation_min_position)
-            if wanted == "bullish"
-            else position >= mtf.range_rotation_min_position
-        )
-        if dealing is not None and at_extreme and evidence.sweep is not None:
-            notes.append(
-                f"no higher-timeframe bias; price at {position:.0%} of the dealing range "
-                f"with the boundary swept ({evidence.sweep.level.label})"
-            )
-            floor = max(tier_b, mtf.floor_range_rotation) + premium
-            return (
-                RANGE_ROTATION,
-                floor,
-                "rotation from a swept range extreme",
-                tuple(notes),
-                True,
-            )
+    H1 is the PRIMARY bias, not the only one: the macro still has a say,
+    and a trigger in the H4 direction is ordinary continuation. Treating
+    every neutral H1 as "range rotation only" would reject exactly the
+    setups the macro context exists to support.
+    """
 
-        # Not at a boundary, or no boundary to speak of. A directionless
-        # macro is the ABSENCE of opposition rather than opposition, so the
-        # M15 sequence can still stand on its own - provided M15's OWN
-        # structure points the same way. A trigger against the only
-        # structure present is noise by definition.
-        if m15.bias != wanted:
-            return (
-                NOISE,
-                0.0,
-                (
-                    f"no higher-timeframe bias, and the M15 structure is {m15.bias} rather "
-                    f"than {wanted} - nothing anchors this direction on any timeframe"
-                ),
-                (),
-                False,
-            )
-        notes.append(
-            "no higher-timeframe bias in either direction; M15 structure is the only "
-            "anchor, so the setup carries the whole burden of proof"
-        )
-        floor = max(tier_b, mtf.floor_no_htf_context) + premium
-        return (
+    mtf, h4, h1, m15 = case.mtf, case.h4, case.h1, case.m15
+    if case.agrees_h4():
+        return case.take(
             CONTINUATION,
-            floor,
-            "continuation of M15 structure with no macro opposition",
-            tuple(notes),
-            True,
+            mtf.floor_continuation,
+            "continuation with the macro context, H1 neutral",
+            f"H1 has no confirmed directional structure; H4 macro is {h4.bias} "
+            "and the M15 trigger runs with it",
         )
 
-    # -- against the primary bias: reversal, or retracement ---------------
-    shortfalls = _reversal_shortfalls(evidence, mtf)
-    if shortfalls:
-        return (
-            RETRACEMENT,
-            0.0,
-            (
-                f"M15 is {wanted} against an {h1.bias} H1 bias, and this is a retracement "
-                "rather than a reversal: " + "; ".join(shortfalls)
-            ),
-            (),
-            False,
-        )
-
-    if opposes_h4:
-        if not mtf.allow_countertrend_scalp:
-            return (
-                COUNTERTREND_SCALP,
-                0.0,
-                (
-                    f"a {wanted} turn against both an {h1.bias} H1 bias and an {h4.bias} H4 "
-                    "macro is a countertrend scalp; disabled "
-                    "(MTF_ALLOW_COUNTERTREND_SCALP)"
-                ),
-                (),
-                False,
+    if case.opposes_h4():
+        # Nothing supports this direction: H1 is silent and the macro is
+        # against it. That needs the full reversal case.
+        shortfalls = _reversal_shortfalls(case.evidence, mtf)
+        if shortfalls:
+            return Classification.refused(
+                RETRACEMENT,
+                f"M15 is {case.wanted} against an {h4.bias} H4 macro with no H1 bias to "
+                "support it, and the move has not earned the name reversal: "
+                + "; ".join(shortfalls),
             )
-        notes.append(
-            f"reversal evidence complete, but against BOTH H1 ({h1.bias}) and H4 ({h4.bias})"
-        )
-        floor = max(tier_b, mtf.floor_countertrend_scalp) + premium
-        return (
-            COUNTERTREND_SCALP,
-            floor,
-            "countertrend scalp with full reversal evidence",
-            tuple(notes),
-            True,
+        return case.take(
+            REVERSAL,
+            mtf.floor_reversal,
+            "reversal against the macro context, H1 neutral",
+            f"H1 is neutral and H4 macro is {h4.bias}: a turn against the macro with "
+            "complete reversal evidence",
         )
 
-    if agrees_h4:
+    # Neither timeframe has an opinion. Two ways that can still be a
+    # setup, and one way it cannot.
+    dealing = h1.dealing_range or m15.dealing_range
+    position = dealing.position if dealing is not None else 0.5
+    # A rotation is only a rotation from the correct END of the range.
+    at_extreme = (
+        position <= (1.0 - mtf.range_rotation_min_position)
+        if case.wanted == "bullish"
+        else position >= mtf.range_rotation_min_position
+    )
+    if dealing is not None and at_extreme and case.evidence.sweep is not None:
+        return case.take(
+            RANGE_ROTATION,
+            mtf.floor_range_rotation,
+            "rotation from a swept range extreme",
+            f"no higher-timeframe bias; price at {position:.0%} of the dealing range "
+            f"with the boundary swept ({case.evidence.sweep.level.label})",
+        )
+
+    # Not at a boundary, or no boundary to speak of. A directionless macro
+    # is the ABSENCE of opposition rather than opposition, so the M15
+    # sequence can still stand on its own - provided M15's OWN structure
+    # points the same way. A trigger against the only structure present is
+    # noise by definition.
+    if m15.bias != case.wanted:
+        return Classification.refused(
+            NOISE,
+            f"no higher-timeframe bias, and the M15 structure is {m15.bias} rather "
+            f"than {case.wanted} - nothing anchors this direction on any timeframe",
+        )
+    return case.take(
+        CONTINUATION,
+        mtf.floor_no_htf_context,
+        "continuation of M15 structure with no macro opposition",
+        "no higher-timeframe bias in either direction; M15 structure is the only "
+        "anchor, so the setup carries the whole burden of proof",
+    )
+
+
+def _against_primary_bias(case: _Case) -> Classification:
+    """Reversal, or retracement. The distinction the layer turns on."""
+
+    mtf, h1, h4 = case.mtf, case.h1, case.h4
+    shortfalls = _reversal_shortfalls(case.evidence, mtf)
+    if shortfalls:
+        return Classification.refused(
+            RETRACEMENT,
+            f"M15 is {case.wanted} against an {h1.bias} H1 bias, and this is a retracement "
+            "rather than a reversal: " + "; ".join(shortfalls),
+        )
+
+    if case.opposes_h4():
+        if not mtf.allow_countertrend_scalp:
+            return Classification.refused(
+                COUNTERTREND_SCALP,
+                f"a {case.wanted} turn against both an {h1.bias} H1 bias and an {h4.bias} H4 "
+                "macro is a countertrend scalp; disabled (MTF_ALLOW_COUNTERTREND_SCALP)",
+            )
+        return case.take(
+            COUNTERTREND_SCALP,
+            mtf.floor_countertrend_scalp,
+            "countertrend scalp with full reversal evidence",
+            f"reversal evidence complete, but against BOTH H1 ({h1.bias}) and H4 ({h4.bias})",
+        )
+
+    note = (
         # The strongest reversal there is: H1 is the timeframe that is out
         # of step, and the turn is back toward the macro, not away from it.
-        notes.append(
-            f"reversal against the {h1.bias} H1 bias and back toward the {h4.bias} H4 macro"
-        )
-    else:
-        notes.append(
-            f"reversal against the {h1.bias} H1 bias while H4 has no directional opinion"
-        )
-    floor = max(tier_b, mtf.floor_reversal) + premium
-    return REVERSAL, floor, "genuine reversal against the primary bias", tuple(notes), True
+        f"reversal against the {h1.bias} H1 bias and back toward the {h4.bias} H4 macro"
+        if case.agrees_h4()
+        else f"reversal against the {h1.bias} H1 bias while H4 has no directional opinion"
+    )
+    return case.take(
+        REVERSAL, mtf.floor_reversal, "genuine reversal against the primary bias", note
+    )
 
 
 def _alignment_label(h4_bias: str, h1_bias: str, wanted: str) -> str:
@@ -554,9 +629,9 @@ def decide(
 
     results: list[tuple[int, str, MtfDecision, DirectionEvidence]] = []
     rejected: list[MtfDecision] = []
-    #: (evidence, trigger quality) for each direction that did NOT qualify,
-    #: so a refused direction can still veto a staler opposite one.
-    rejected_triggers: list[tuple[DirectionEvidence, float]] = []
+    #: Evidence for each direction that did NOT qualify, so a refused
+    #: direction can still veto a staler opposite one.
+    rejected_triggers: list[DirectionEvidence] = []
 
     for wanted in ("bullish", "bearish"):
         evidence = gather_direction_evidence(
@@ -584,53 +659,35 @@ def decide(
             )
             continue
 
-        setup_type, floor, rationale, notes, allowed = classify(
+        result = classify(
             h4=h4, h1=h1, m15=m15, wanted=wanted, evidence=evidence, mtf=mtf, tier_b=tier_b
         )
         decision = MtfDecision(
-            direction=direction if allowed else None,
+            direction=direction if result.allowed else None,
             wanted=wanted,
-            setup_type=setup_type,
-            state=VALID_SETUP if allowed else NO_TRADE,
+            setup_type=result.setup_type,
+            state=VALID_SETUP if result.allowed else NO_TRADE,
             h4_context=h4.bias,
             h1_bias=h1.bias,
             m15_bias=m15.bias,
             alignment=_alignment_label(h4.bias, h1.bias, wanted),
-            score_floor=floor,
+            score_floor=result.score_floor,
             regime_note=m15.regime.note,
-            rationale=rationale,
-            evidence=notes,
+            rationale=result.rationale,
+            evidence=result.evidence,
         )
-        if allowed:
-            results.append((_PREFERENCE.index(setup_type), wanted, decision, evidence))
+        if result.allowed:
+            results.append(
+                (_PREFERENCE.index(result.setup_type), wanted, decision, evidence)
+            )
         else:
             rejected.append(decision)
-            rejected_triggers.append((evidence, evidence.trigger_quality))
+            rejected_triggers.append(evidence)
 
     if results:
-        # A direction is only takeable if the market has not since said
-        # something meaningful against it.
-        #
-        # Refusing one direction must never hand the trade to the other by
-        # default. With the countertrend scalp disabled, a fresh bullish
-        # reversal was being declined and the engine then SOLD on an older
-        # bearish break - taking the side the market had just turned away
-        # from, which is strictly worse than either trading or skipping.
-        # A rejected direction only vetoes if its trigger is genuinely
-        # more recent AND cleared the noise floor; weak noise does not get
-        # to block a real setup.
-        newest_rejected = max(
-            (
-                d.reference_index
-                for d, q in rejected_triggers
-                if q >= mtf.min_trigger_quality
-            ),
-            default=-1,
+        results, blocked = _drop_directions_the_market_has_overtaken(
+            results, rejected_triggers, mtf
         )
-        blocked = [
-            row for row in results if row[3].reference_index < newest_rejected
-        ]
-        results = [row for row in results if row[3].reference_index >= newest_rejected]
         if not results:
             stale = blocked[0][2] if blocked else None
             return (
@@ -666,7 +723,11 @@ def decide(
         # tie on the same candle, and the classification preference
         # breaks a tie on both, so the result never depends on loop order.
         results.sort(
-            key=lambda row: (-row[3].reference_index, -row[3].trigger_quality, row[0])
+            key=lambda row: (
+                -row[3].latest_trigger_index,
+                -row[3].trigger_quality,
+                row[0],
+            )
         )
         _, _, decision, evidence = results[0]
         return decision, evidence
@@ -676,6 +737,40 @@ def decide(
     # trigger", and a WATCH says more than a flat NO_TRADE.
     rejected.sort(key=lambda d: _refusal_rank(d))
     return rejected[0], None
+
+
+def _drop_directions_the_market_has_overtaken(
+    results: list[tuple[int, str, MtfDecision, DirectionEvidence]],
+    rejected: Sequence[DirectionEvidence],
+    mtf: MtfConfig,
+) -> tuple[
+    list[tuple[int, str, MtfDecision, DirectionEvidence]],
+    list[tuple[int, str, MtfDecision, DirectionEvidence]],
+]:
+    """Remove any takeable direction the market has since traded against.
+
+    Refusing one direction must never hand the trade to the other by
+    default. With the countertrend scalp disabled, a fresh bullish
+    reversal was declined and the engine then SOLD on an older bearish
+    break - taking the side the market had just turned away from, which is
+    strictly worse than either trading or standing aside.
+
+    A refused direction only vetoes when its trigger is genuinely more
+    recent AND cleared the noise floor: weak noise does not get to block a
+    real setup. Returns (still takeable, overtaken).
+    """
+
+    newest_refused = max(
+        (
+            evidence.latest_trigger_index
+            for evidence in rejected
+            if evidence.trigger_quality >= mtf.min_trigger_quality
+        ),
+        default=-1,
+    )
+    takeable = [row for row in results if row[3].latest_trigger_index >= newest_refused]
+    overtaken = [row for row in results if row[3].latest_trigger_index < newest_refused]
+    return takeable, overtaken
 
 
 def _refusal_rank(decision: MtfDecision) -> int:

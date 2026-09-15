@@ -270,6 +270,73 @@ class SmcConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class MtfConfig:
+    """Thresholds for the multi-timeframe decision layer.
+
+    Every number the classifier branches on lives here so it can be tuned
+    per account without editing logic, and so a change is visible in one
+    place rather than buried across the engine.
+
+    The model is H4 = CONTEXT, H1 = PRIMARY BIAS, M15 = EXECUTION. H4
+    disagreement raises the bar; it does not veto. What DOES veto is a
+    move against the primary bias that has not earned the name reversal.
+    """
+
+    #: A trigger weaker than this is noise whatever else agrees with it.
+    min_trigger_quality: float = 0.35
+    #: A structure break must clear its level by this much ATR to count as
+    #: structure at all. Below it, a wick-and-a-half through an old pivot
+    #: would read as a break of structure.
+    min_structure_clearance_atr: float = 0.12
+
+    # -- what a REVERSAL against the primary bias must show ---------------
+    #: The swept level's own significance (see liquidity.LEVEL_WEIGHTS).
+    #: A random intraday pivot is not the liquidity a reversal runs on.
+    reversal_min_level_weight: float = 0.6
+    reversal_min_sweep_quality: float = 0.55
+    reversal_min_displacement_quality: float = 0.45
+    #: A reversal must break structure the OTHER way — a CHoCH. A BOS in
+    #: the counter direction is continuation of a move already underway,
+    #: which is the definition of the retracement this must not trade.
+    reversal_requires_choch: bool = True
+
+    # -- score floors by classification ------------------------------------
+    #: Minimum total score (0..100) for each setup type. Continuation with
+    #: context is the baseline; everything that fights something has to be
+    #: better than baseline, in proportion to what it fights.
+    floor_continuation: float = 0.0          # 0 = use the configured B tier
+    floor_continuation_vs_macro: float = 62.0
+    floor_range_rotation: float = 60.0
+    #: Neither H4 nor H1 has confirmed directional structure. The M15
+    #: sequence is then the only anchor there is, so it must be a good
+    #: one - but a directionless macro is the ABSENCE of opposition,
+    #: not opposition, and refusing these outright would be exactly the
+    #: over-filtering this layer exists to remove.
+    floor_no_htf_context: float = 60.0
+    floor_reversal: float = 70.0
+    floor_countertrend_scalp: float = 78.0
+
+    #: Countertrend scalps fight BOTH the primary bias and the macro
+    #: context. Off by default: rule 12 — a mode earns its place with
+    #: evidence, and there is none yet.
+    allow_countertrend_scalp: bool = False
+
+    # -- regime handling ---------------------------------------------------
+    #: A transitional market with directional strength below this and no
+    #: consistent breaks is chop: the same setup means much less in it.
+    choppy_directional_strength: float = 0.28
+    #: Extra score demanded in a choppy market, on top of the type floor.
+    choppy_score_premium: float = 8.0
+    #: In a ranging primary timeframe, a rotation entry must sit this far
+    #: into the correct half of the dealing range.
+    range_rotation_min_position: float = 0.62
+
+    #: No single critical component may be near-absent and be carried by
+    #: the others. Expressed as a fraction of that component's weight.
+    min_critical_component_fraction: float = 0.25
+
+
+@dataclass(frozen=True, slots=True)
 class SessionConfig:
     """UTC session windows. Times are approximations of the liquidity
     profile, not exchange hours; they shift by an hour across DST, which
@@ -347,6 +414,7 @@ class TradingConfig:
     opportunity: OpportunityConfig = field(default_factory=OpportunityConfig)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     smc: SmcConfig = field(default_factory=SmcConfig)
+    mtf: MtfConfig = field(default_factory=MtfConfig)
     sessions: SessionConfig = field(default_factory=SessionConfig)
     news: NewsConfig = field(default_factory=NewsConfig)
     ai: AIConfig = field(default_factory=AIConfig)
@@ -619,6 +687,44 @@ def load_config(env: Mapping[str, str] | None = None) -> TradingConfig:
         position_poll_seconds=_env_int("POSITION_POLL_SECONDS", 30, low=5, high=600),
         reconcile_interval_seconds=_env_int("RECONCILE_INTERVAL_SECONDS", 300, low=30, high=3600),
     )
+    mtf = MtfConfig(
+        min_trigger_quality=_env_float("MTF_MIN_TRIGGER_QUALITY", 0.35, low=0.0, high=1.0),
+        min_structure_clearance_atr=_env_float(
+            "MTF_MIN_STRUCTURE_CLEARANCE_ATR", 0.12, low=0.0, high=2.0
+        ),
+        reversal_min_level_weight=_env_float(
+            "MTF_REVERSAL_MIN_LEVEL_WEIGHT", 0.6, low=0.0, high=1.0
+        ),
+        reversal_min_sweep_quality=_env_float(
+            "MTF_REVERSAL_MIN_SWEEP_QUALITY", 0.55, low=0.0, high=1.0
+        ),
+        reversal_min_displacement_quality=_env_float(
+            "MTF_REVERSAL_MIN_DISPLACEMENT_QUALITY", 0.45, low=0.0, high=1.0
+        ),
+        reversal_requires_choch=_env_bool("MTF_REVERSAL_REQUIRES_CHOCH", True),
+        floor_continuation_vs_macro=_env_float(
+            "MTF_FLOOR_CONTINUATION_VS_MACRO", 62.0, low=0.0, high=100.0
+        ),
+        floor_range_rotation=_env_float("MTF_FLOOR_RANGE_ROTATION", 60.0, low=0.0, high=100.0),
+        floor_no_htf_context=_env_float(
+            "MTF_FLOOR_NO_HTF_CONTEXT", 60.0, low=0.0, high=100.0
+        ),
+        floor_reversal=_env_float("MTF_FLOOR_REVERSAL", 70.0, low=0.0, high=100.0),
+        floor_countertrend_scalp=_env_float(
+            "MTF_FLOOR_COUNTERTREND_SCALP", 78.0, low=0.0, high=100.0
+        ),
+        allow_countertrend_scalp=_env_bool("MTF_ALLOW_COUNTERTREND_SCALP", False),
+        choppy_directional_strength=_env_float(
+            "MTF_CHOPPY_DIRECTIONAL_STRENGTH", 0.28, low=0.0, high=1.0
+        ),
+        choppy_score_premium=_env_float("MTF_CHOPPY_SCORE_PREMIUM", 8.0, low=0.0, high=50.0),
+        range_rotation_min_position=_env_float(
+            "MTF_RANGE_ROTATION_MIN_POSITION", 0.62, low=0.5, high=1.0
+        ),
+        min_critical_component_fraction=_env_float(
+            "MTF_MIN_CRITICAL_COMPONENT_FRACTION", 0.25, low=0.0, high=1.0
+        ),
+    )
     raw_mode = (_env_str("TRADING_MODE", "paper") or "paper").lower()
     try:
         mode = ExecutionMode(raw_mode)
@@ -645,6 +751,7 @@ def load_config(env: Mapping[str, str] | None = None) -> TradingConfig:
         ),
         broker=broker,
         risk=risk,
+        mtf=mtf,
         opportunity=opportunity,
         ai=ai,
         storage=storage,

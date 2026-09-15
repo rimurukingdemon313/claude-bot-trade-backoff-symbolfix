@@ -19,13 +19,15 @@ PROFILE = StrategyProfile(
     key="smc",
     name="Smart Money Concepts",
     description=(
-        "Trades continuation after a structural shift: a liquidity sweep, a break of structure "
-        "with displacement, and an entry back inside the imbalance it left. Requires H4, H1 and "
-        "M15 to agree, so it stands aside often and aims far."
+        "Trades a structural shift on M15: a liquidity sweep, a break of structure with "
+        "displacement, and an entry back inside the imbalance it left. H4 is macro context "
+        "and H1 the primary bias — a setup that fights either is held to a higher score "
+        "rather than refused, and a move against the primary bias must have earned the "
+        "name reversal to be taken at all."
     ),
     min_risk_reward=2.0,
     expected_frequency="a few a week",
-    thesis="structure breaks in the direction institutional flow has already committed to",
+    thesis="high-quality M15 execution, weighted by H1 bias and H4 context",
 )
 
 

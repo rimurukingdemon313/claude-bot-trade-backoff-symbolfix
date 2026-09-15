@@ -65,6 +65,7 @@ def build_prompt(candidate: SetupCandidate, score: SetupScore) -> str:
             "h1Bias": candidate.h1_bias,
             "m15Bias": candidate.m15_bias,
             "alignment": candidate.alignment,
+            "setupType": candidate.setup_type,
             "session": candidate.session.name,
             "regime": candidate.regime.as_dict(),
         },

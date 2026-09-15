@@ -1,18 +1,32 @@
 """Multi-timeframe SMC engine.
 
-Pipeline per MASTER_MISSION §22/§98:
+    H4 macro context -> H1 primary bias -> M15 execution
+      -> liquidity map -> sweep -> displacement -> BOS/CHoCH
+      -> FVG/OB retracement -> premium/discount -> priced candidate
 
-    H4 context -> H1 bias -> M15 structure -> liquidity map -> sweep
-    -> displacement -> BOS/CHoCH -> FVG/OB retracement -> premium/discount
+Direction and the bar it must clear come from `bot.smc.mtf`, which
+classifies the setup against the primary bias and the macro context
+instead of requiring the three timeframes to agree. Read that module for
+why: in short, unanimity is not what makes a setup good, and demanding it
+threw away the ordinary case of a short with the primary bias while the
+macro has not yet turned.
 
-The engine's output is a SetupCandidate whose entry, stop and target are
-derived DETERMINISTICALLY from market structure. This is the single most
-important change from the previous build, where the AI invented the
-prices and the system submitted them to the broker verbatim.
+This engine then does the part that unanimity was never a substitute for:
+finding a real M15 trigger, an entry zone price has actually reached, and
+levels that are structurally consistent.
+
+The output is a SetupCandidate whose entry, stop and target are derived
+DETERMINISTICALLY from market structure. That remains the single most
+important property here — an earlier build had the AI invent the prices
+and submitted them to the broker verbatim.
 
 Stop placement is structural: behind the sweep extreme or the far edge of
 the point of interest, plus an ATR buffer. Target is the next opposing
 liquidity pool when one exists, otherwise an R-multiple projection.
+
+Nothing in this file approves a trade or sizes one. `risk/engine.py` is
+the only code that does (project rule 2), and a classification can demand
+more evidence than the build's floor but never less.
 """
 
 from __future__ import annotations
@@ -29,6 +43,13 @@ from .displacement import Displacement, detect_displacement
 from .fvg import FairValueGap, best_entry_gap, detect_fair_value_gaps
 from .indicators import atr
 from .liquidity import LiquidityMap, LiquiditySweep, build_liquidity_map, detect_sweeps
+from .mtf import (
+    NO_TRADE,
+    TRADE,
+    VALID_SETUP,
+    MtfDecision,
+    decide as decide_mtf,
+)
 from .orderblocks import OrderBlock, best_entry_block, detect_order_blocks
 from .regime import Regime, classify_regime
 from .sessions import SessionState, classify_session
@@ -101,13 +122,22 @@ class SetupCandidate:
     htf_bias: str
     h1_bias: str
     m15_bias: str
-    alignment: str           # aligned | partial | conflicted
+    alignment: str           # aligned | partial | counter
     sweep: LiquiditySweep | None
     structure_event: StructureEvent | None
     displacement: Displacement | None
     point_of_interest: dict[str, Any] | None
     dealing_range: DealingRange | None
     liquidity_target: dict[str, Any] | None
+    #: How this setup relates to the primary bias and the macro context:
+    #: CONTINUATION, CONTINUATION_VS_MACRO, RANGE_ROTATION, REVERSAL or
+    #: COUNTERTREND_SCALP. Recorded on every trade, because averaging a
+    #: reversal's results with a continuation's describes neither.
+    setup_type: str = "CONTINUATION"
+    #: Minimum total score this classification must reach. Set by the MTF
+    #: layer and only ever ABOVE the configured B tier - a classification
+    #: can demand more evidence, never less.
+    score_floor: float = 0.0
     evidence: tuple[str, ...] = field(default_factory=tuple)
     timestamp: datetime | None = None
 
@@ -127,6 +157,8 @@ class SetupCandidate:
             "h1Bias": self.h1_bias,
             "m15Bias": self.m15_bias,
             "alignment": self.alignment,
+            "setupType": self.setup_type,
+            "scoreFloor": round(self.score_floor, 2),
             "sweep": self.sweep.as_dict() if self.sweep else None,
             "structureEvent": self.structure_event.as_dict() if self.structure_event else None,
             "displacement": self.displacement.as_dict() if self.displacement else None,
@@ -144,6 +176,13 @@ class SmcResult:
     analyses: dict[str, TimeframeAnalysis]
     candidate: SetupCandidate | None
     rejection: str | None
+    #: NO_TRADE | WATCH | VALID_SETUP | TRADE. Distinguishing "nothing is
+    #: happening here" from "context is right, the trigger has not fired"
+    #: is the difference between a screen an operator can read and a wall
+    #: of identical refusals. A candidate is still the ONLY thing that can
+    #: become an order: a state is a label, never a permission.
+    state: str = "NO_TRADE"
+    mtf: MtfDecision | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -151,7 +190,28 @@ class SmcResult:
             "timeframes": {name: analysis.as_dict() for name, analysis in self.analyses.items()},
             "candidate": self.candidate.as_dict() if self.candidate else None,
             "rejection": self.rejection,
+            "state": self.state,
+            "mtf": self.mtf.as_dict() if self.mtf else None,
         }
+
+
+def _signal_state(candidate: SetupCandidate | None, decision: MtfDecision | None) -> str:
+    """Label the result so an operator can tell the refusals apart.
+
+    A label, never a permission: only a candidate can become an order, and
+    every gate downstream still runs. Rule 8 stands - NO TRADE is the
+    expected answer, and WATCH exists so the expected answer is legible
+    rather than a wall of identical lines.
+    """
+
+    if candidate is not None:
+        return TRADE
+    if decision is None:
+        return NO_TRADE
+    if decision.tradeable:
+        # Classified and directional, but entry conditions were not met.
+        return VALID_SETUP
+    return decision.state
 
 
 class SmcEngine:
@@ -232,17 +292,33 @@ class SmcEngine:
             )
             for timeframe, data in series.items()
         }
-        candidate, rejection = self.build_candidate(symbol, analyses, now=now)
-        return SmcResult(symbol=symbol, analyses=analyses, candidate=candidate, rejection=rejection)
+        candidate, rejection, decision = self.evaluate(symbol, analyses, now=now)
+        return SmcResult(
+            symbol=symbol,
+            analyses=analyses,
+            candidate=candidate,
+            rejection=rejection,
+            state=_signal_state(candidate, decision),
+            mtf=decision,
+        )
 
     def build_candidate(
         self, symbol: str, analyses: dict[str, TimeframeAnalysis], *, now: datetime | None = None
     ) -> tuple[SetupCandidate | None, str | None]:
+        """Backwards-compatible view of `evaluate` for callers that only
+        need the candidate and the reason there isn't one."""
+
+        candidate, rejection, _ = self.evaluate(symbol, analyses, now=now)
+        return candidate, rejection
+
+    def evaluate(
+        self, symbol: str, analyses: dict[str, TimeframeAnalysis], *, now: datetime | None = None
+    ) -> tuple[SetupCandidate | None, str | None, MtfDecision | None]:
         m15 = analyses.get("M15")
         h1 = analyses.get("H1")
         h4 = analyses.get("H4")
         if m15 is None or h1 is None or h4 is None:
-            return None, "multi-timeframe analysis incomplete (H4, H1 and M15 are all required)"
+            return None, "multi-timeframe analysis incomplete (H4, H1 and M15 are all required)", None
 
         index = m15.last_index
         price = m15.price
@@ -250,32 +326,34 @@ class SmcEngine:
         session = classify_session(moment, self.config.sessions)
 
         if session.weekend:
-            return None, "forex market is closed for the weekend"
+            return None, "forex market is closed for the weekend", None
         if not m15.regime.tradeable:
-            return None, f"M15 regime not tradeable: {m15.regime.note}"
+            return None, f"M15 regime not tradeable: {m15.regime.note}", None
         if m15.atr <= 0:
-            return None, "ATR is zero — cannot normalise structure or size a stop"
+            return None, "ATR is zero — cannot normalise structure or size a stop", None
 
-        # --- direction: HTF context leads, M15 must not contradict it ---
-        direction, alignment, rejection = self._resolve_direction(h4, h1, m15)
-        if direction is None:
-            return None, rejection
+        # --- H4 context, H1 bias, M15 execution: weighted, not unanimous ---
+        decision, evidence = decide_mtf(
+            h4=h4,
+            h1=h1,
+            m15=m15,
+            index=index,
+            smc=self.smc,
+            mtf=self.config.mtf,
+            tier_b=self.config.scoring.tier_b,
+        )
+        if decision.direction is None or evidence is None:
+            return None, decision.rationale, decision
 
-        wanted = "bullish" if direction == "BUY" else "bearish"
-
-        # --- the trigger: a confirmed sweep, or a displaced structure break ---
-        sweep = self._recent_sweep(m15, wanted, index)
-        structure_event = self._recent_structure_event(m15, wanted, index)
-        if sweep is None and structure_event is None:
-            return None, (
-                "no M15 trigger: neither a confirmed liquidity sweep nor a displaced "
-                f"{wanted} structure break within {self.smc.sweep_max_age_candles} candles"
-            )
-
+        direction = decision.direction
+        alignment = decision.alignment
+        wanted = decision.wanted or ("bullish" if direction == "BUY" else "bearish")
+        sweep = evidence.sweep
+        structure_event = evidence.structure_event
+        displacement = evidence.displacement
         reference_index = max(
             sweep.index if sweep else -1, structure_event.index if structure_event else -1
         )
-        displacement = self._recent_displacement(m15, wanted, reference_index)
 
         # --- the entry zone: an unmitigated FVG or order block ---
         gap = best_entry_gap(
@@ -294,7 +372,7 @@ class SmcEngine:
         )
         poi, poi_kind = self._choose_poi(gap, block)
         if poi is None:
-            return None, "no live fair value gap or order block to enter from"
+            return None, "no live fair value gap or order block to enter from", decision
 
         # Entry requires price to actually be AT the point of interest.
         # Without this gate the engine would chase an extended move and
@@ -302,9 +380,15 @@ class SmcEngine:
         # stop several ATR wide for no structural reason.
         proximity = m15.atr * 0.35
         if not (poi.lower - proximity <= price <= poi.upper + proximity):
-            return None, (
-                f"price {price:.5f} has not retraced into the {poi_kind} zone "
-                f"[{poi.lower:.5f}, {poi.upper:.5f}] — waiting rather than chasing"
+            # Structurally valid, entry conditions not yet met: this is a
+            # VALID_SETUP to watch, not a refusal of the idea.
+            return (
+                None,
+                (
+                    f"price {price:.5f} has not retraced into the {poi_kind} zone "
+                    f"[{poi.lower:.5f}, {poi.upper:.5f}] — waiting rather than chasing"
+                ),
+                decision,
             )
 
         # --- deterministic levels ---
@@ -318,34 +402,48 @@ class SmcEngine:
             index=index,
         )
         if levels is None:
-            return None, "could not construct a structurally valid stop and target"
+            return None, "could not construct a structurally valid stop and target", decision
         entry, stop_loss, take_profit, target_level = levels
 
         stop_distance = abs(entry - stop_loss)
         reward_distance = abs(take_profit - entry)
         if stop_distance <= 0:
-            return None, "stop distance resolved to zero"
+            return None, "stop distance resolved to zero", decision
 
         stop_atr = stop_distance / m15.atr
         if stop_atr < self.config.risk.min_stop_distance_atr:
-            return None, (
-                f"stop is only {stop_atr:.2f} ATR away — too tight to survive normal noise "
-                f"(minimum {self.config.risk.min_stop_distance_atr} ATR)"
+            return (
+                None,
+                (
+                    f"stop is only {stop_atr:.2f} ATR away — too tight to survive normal noise "
+                    f"(minimum {self.config.risk.min_stop_distance_atr} ATR)"
+                ),
+                decision,
             )
         if stop_atr > self.config.risk.max_stop_distance_atr:
-            return None, (
-                f"stop is {stop_atr:.2f} ATR away — structurally too wide "
-                f"(maximum {self.config.risk.max_stop_distance_atr} ATR)"
+            return (
+                None,
+                (
+                    f"stop is {stop_atr:.2f} ATR away — structurally too wide "
+                    f"(maximum {self.config.risk.max_stop_distance_atr} ATR)"
+                ),
+                decision,
             )
 
         risk_reward = reward_distance / stop_distance
         if risk_reward < self.config.risk.min_risk_reward:
-            return None, (
-                f"structural R:R is 1:{risk_reward:.2f}, below the required "
-                f"1:{self.config.risk.min_risk_reward:g}"
+            return (
+                None,
+                (
+                    f"structural R:R is 1:{risk_reward:.2f}, below the required "
+                    f"1:{self.config.risk.min_risk_reward:g}"
+                ),
+                decision,
             )
 
-        evidence = self._evidence(direction, alignment, sweep, structure_event, displacement, poi_kind, m15)
+        evidence_notes = self._evidence(
+            direction, decision, sweep, structure_event, displacement, poi_kind, m15
+        )
         candidate = SetupCandidate(
             symbol=symbol,
             direction=direction,
@@ -367,77 +465,14 @@ class SmcEngine:
             point_of_interest={"kind": poi_kind, **poi.as_dict()},
             dealing_range=m15.dealing_range,
             liquidity_target=target_level,
-            evidence=evidence,
+            setup_type=decision.setup_type,
+            score_floor=decision.score_floor,
+            evidence=evidence_notes,
             timestamp=moment,
         )
-        return candidate, None
+        return candidate, None, decision
 
     # -- helpers ---------------------------------------------------------
-
-    def _resolve_direction(
-        self, h4: TimeframeAnalysis, h1: TimeframeAnalysis, m15: TimeframeAnalysis
-    ) -> tuple[str | None, str, str | None]:
-        """HTF context decides direction; M15 may confirm but never oppose.
-
-        A 'range' higher timeframe is permissive (it has no opinion), but
-        an explicit opposing H4 bias is a veto — MASTER_MISSION §22 says
-        never trade against strong higher-timeframe structure.
-        """
-
-        if m15.bias == "range":
-            return None, "conflicted", "M15 has no confirmed directional structure"
-
-        direction = "BUY" if m15.bias == "bullish" else "SELL"
-        opposing = "bearish" if m15.bias == "bullish" else "bullish"
-
-        if h4.bias == opposing:
-            return None, "conflicted", (
-                f"M15 is {m15.bias} but H4 is {h4.bias} — refusing to trade against "
-                "higher-timeframe structure"
-            )
-        if h1.bias == opposing:
-            return None, "conflicted", f"M15 is {m15.bias} but H1 is {h1.bias} — conflicted context"
-
-        if h4.bias == m15.bias and h1.bias == m15.bias:
-            alignment = "aligned"
-        else:
-            alignment = "partial"
-        return direction, alignment, None
-
-    def _recent_sweep(
-        self, analysis: TimeframeAnalysis, wanted: str, index: int
-    ) -> LiquiditySweep | None:
-        candidates = [
-            sweep
-            for sweep in analysis.sweeps
-            if sweep.direction == wanted
-            and sweep.confirmed_index <= index
-            and (index - sweep.index) <= self.smc.sweep_max_age_candles
-        ]
-        return max(candidates, key=lambda sweep: (sweep.quality, sweep.index)) if candidates else None
-
-    def _recent_structure_event(
-        self, analysis: TimeframeAnalysis, wanted: str, index: int
-    ) -> StructureEvent | None:
-        candidates = [
-            event
-            for event in analysis.structure_events
-            if event.direction == wanted
-            and event.index <= index
-            and (index - event.index) <= self.smc.sweep_max_age_candles
-            and event.displaced
-        ]
-        return max(candidates, key=lambda event: event.index) if candidates else None
-
-    def _recent_displacement(
-        self, analysis: TimeframeAnalysis, wanted: str, reference_index: int
-    ) -> Displacement | None:
-        candidates = [
-            move
-            for move in analysis.displacements
-            if move.direction == wanted and abs(move.index - reference_index) <= 6
-        ]
-        return max(candidates, key=lambda move: move.quality) if candidates else None
 
     @staticmethod
     def _choose_poi(gap: FairValueGap | None, block: OrderBlock | None) -> tuple[Any, str]:
@@ -542,14 +577,21 @@ class SmcEngine:
     @staticmethod
     def _evidence(
         direction: str,
-        alignment: str,
+        decision: MtfDecision,
         sweep: LiquiditySweep | None,
         structure_event: StructureEvent | None,
         displacement: Displacement | None,
         poi_kind: str,
         analysis: TimeframeAnalysis,
     ) -> tuple[str, ...]:
-        items = [f"{direction} with {alignment} multi-timeframe context"]
+        items = [
+            f"{direction} classified {decision.setup_type} "
+            f"(H4 {decision.h4_context} / H1 {decision.h1_bias} / M15 {decision.m15_bias})",
+            decision.rationale,
+        ]
+        items.extend(decision.evidence)
+        if decision.score_floor > 0:
+            items.append(f"requires a score of at least {decision.score_floor:.0f}")
         if sweep is not None:
             items.append(
                 f"{sweep.level.label} swept (quality {sweep.quality:.2f}, "

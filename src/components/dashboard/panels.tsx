@@ -334,6 +334,22 @@ export function SetupPanel({ scan }: { scan: Envelope<Scan> | undefined }) {
   );
 }
 
+/** How much the setup is fighting: green with the bias, amber against it. */
+function setupTone(setupType: string | undefined): "good" | "warn" | "neutral" {
+  switch (setupType) {
+    case "CONTINUATION":
+      return "good";
+    case "CONTINUATION_VS_MACRO":
+    case "RANGE_ROTATION":
+      return "neutral";
+    case "REVERSAL":
+    case "COUNTERTREND_SCALP":
+      return "warn";
+    default:
+      return "neutral";
+  }
+}
+
 function SymbolCard({ entry }: { entry: ScanSymbol }) {
   const candidate = entry.candidate;
   const score = entry.score;
@@ -367,9 +383,19 @@ function SymbolCard({ entry }: { entry: ScanSymbol }) {
             <Badge tone="info">H4 {candidate.htfBias}</Badge>
             <Badge tone="info">H1 {candidate.h1Bias}</Badge>
             <Badge tone="info">M15 {candidate.m15Bias}</Badge>
-            <Badge tone={candidate.alignment === "aligned" ? "good" : "warn"}>
-              {candidate.alignment}
+            {/*
+              The classification, not a unanimity score. H4/H1/M15 all
+              agreeing is not what makes a setup good - a reversal
+              disagrees with the primary bias by definition - so what is
+              shown is how the setup stands to the context, and the score
+              it therefore had to clear.
+            */}
+            <Badge tone={setupTone(candidate.setupType)}>
+              {String(candidate.setupType ?? candidate.alignment).replace(/_/g, " ")}
             </Badge>
+            {Number(candidate.scoreFloor) > 0 && (
+              <Badge tone="neutral">needs {Math.round(Number(candidate.scoreFloor))}</Badge>
+            )}
             {candidate.sweep && (
               <Badge tone="good">sweep {Number(candidate.sweep.quality).toFixed(2)}</Badge>
             )}

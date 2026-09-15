@@ -52,11 +52,46 @@ def test_no_component_can_exceed_its_documented_maximum(config, candidate):
         assert value <= WEIGHTS[name] + 1e-9
 
 
-def test_a_conflicted_setup_is_gated_to_no_trade_regardless_of_score(config, candidate):
-    conflicted = dataclasses.replace(candidate, alignment="conflicted")
-    score = SetupScorer(config).score(conflicted)
+def test_an_unclassified_setup_is_gated_to_no_trade_regardless_of_score(config, candidate):
+    """The gate moved from "timeframes disagree" to "this is unclassified".
+
+    Disagreement is no longer disqualifying - a reversal disagrees with
+    the primary bias by definition, and refusing it outright was the
+    over-filtering the MTF layer replaced. What IS disqualifying is a
+    setup the scorer cannot place: an unrecognised classification is
+    never scored on a guess, and the legacy "conflicted" state lands here.
+    """
+
+    for setup_type in ("conflicted", "", "SOMETHING_NEW"):
+        unclassified = dataclasses.replace(candidate, setup_type=setup_type)
+        score = SetupScorer(config).score(unclassified)
+        assert score.tier == "NO_TRADE"
+        assert any("unclassified setup" in note for note in score.notes)
+
+
+def test_a_critical_component_cannot_be_outvoted_by_the_others(config, candidate):
+    """Seven good components must not carry one structural failure.
+
+    A near-absent trigger, entry zone or R:R is not a weak trade that a
+    strong session and a favourable regime can compensate for.
+    """
+
+    from bot.smc.liquidity import LiquidityLevel, LiquiditySweep
+
+    floor = config.mtf.min_critical_component_fraction
+    assert candidate.sweep is not None
+    barely = dataclasses.replace(
+        candidate,
+        structure_event=None,
+        sweep=dataclasses.replace(candidate.sweep, quality=floor / 2.0),
+    )
+    score = SetupScorer(config).score(barely)
     assert score.tier == "NO_TRADE"
-    assert any("timeframe conflict" in note for note in score.notes)
+    assert any("critical component" in note for note in score.notes)
+
+    # The same setup with a real trigger is tradeable, so the gate is
+    # discriminating rather than simply rejecting everything.
+    assert SetupScorer(config).score(candidate).tradeable
 
 
 def test_a_setup_without_a_trigger_is_gated_to_no_trade(config, candidate):
@@ -86,11 +121,53 @@ def test_tier_ranking_orders_candidates():
     assert tier_rank("A+") > tier_rank("A") > tier_rank("B") > tier_rank("NO_TRADE")
 
 
-def test_full_alignment_scores_above_partial(config, candidate):
+def test_context_is_graded_by_what_the_setup_has_to_fight(config, candidate):
+    """Continuation > continuation-vs-macro > rotation > reversal > scalp.
+
+    Graded rather than boolean: a reversal is not scored zero for
+    disagreeing with the primary bias (that was the rigid filter), it is
+    scored lower and then held to a higher floor. Both mechanisms point
+    the same way, so neither excuses the other.
+    """
+
     scorer = SetupScorer(config)
-    partial = scorer.score(dataclasses.replace(candidate, alignment="partial"))
-    aligned = scorer.score(dataclasses.replace(candidate, alignment="aligned"))
-    assert aligned.total > partial.total
+    ordered = [
+        "CONTINUATION",
+        "CONTINUATION_VS_MACRO",
+        "RANGE_ROTATION",
+        "REVERSAL",
+        "COUNTERTREND_SCALP",
+    ]
+    totals = [
+        scorer.score(dataclasses.replace(candidate, setup_type=name, score_floor=0.0)).total
+        for name in ordered
+    ]
+    assert totals == sorted(totals, reverse=True)
+    assert totals[0] > totals[-1]
+
+
+def test_a_higher_floor_refuses_a_setup_the_same_score_would_otherwise_pass(
+    config, candidate
+):
+    """The classification floor is what makes a reversal cost more."""
+
+    scorer = SetupScorer(config)
+    passing = scorer.score(dataclasses.replace(candidate, score_floor=0.0))
+    assert passing.tradeable
+
+    demanding = scorer.score(
+        dataclasses.replace(candidate, score_floor=passing.total + 5.0)
+    )
+    assert demanding.tier == "NO_TRADE"
+    assert any("requires a score of" in note for note in demanding.notes)
+
+    # A floor BELOW the configured B tier cannot loosen anything: the
+    # scorer takes the higher of the two, so a classification can only
+    # ever demand more evidence than the build does.
+    loosened = scorer.score(
+        dataclasses.replace(candidate, score_floor=-100.0, risk_reward=2.0)
+    )
+    assert loosened.tier != "NO_TRADE" or loosened.total < config.scoring.tier_b
 
 
 def test_better_risk_reward_scores_higher(config, candidate):

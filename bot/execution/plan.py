@@ -50,6 +50,12 @@ class TradePlan:
     #: into one performance number, and after the fact the only way to
     #: separate them is to have written it down at the time.
     strategy: str = "smc"
+    #: The MTF classification this trade was taken under, for the same
+    #: reason: a reversal against the primary bias and a continuation with
+    #: it are not the same trade, and averaging their results describes
+    #: neither. Defaulted so a record written before classification
+    #: existed still loads, and reads as what it was.
+    setup_type: str = "CONTINUATION"
 
     def as_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -121,6 +127,7 @@ def build_plan(
         ai_confidence=ai_confidence,
         htf_bias=candidate.htf_bias,
         alignment=candidate.alignment,
+        setup_type=candidate.setup_type,
         instrument_id=spec.tradable_instrument_id,
         route_id=spec.route_id,
         created_at=utc_now().isoformat(),

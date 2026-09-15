@@ -14,13 +14,23 @@ Design constraints from MASTER_MISSION §27/§28:
 
 Weight rationale, in descending order of evidential value:
   trigger quality (25)  - the sweep/structure event IS the edge
-  htf alignment  (18)   - trading with context is the largest single filter
+  context        (18)   - how the setup stands to the primary bias and macro
   displacement   (14)   - proves intent behind the move
   entry zone     (12)   - a fresh, displaced POI beats a stale one
   risk/reward    (12)   - expectancy scales directly with it
   regime         (10)   - the same setup is worth less in a dead range
   location       (6)    - premium/discount preference, deliberately small
   session        (3)    - a tiebreak, not a thesis
+
+Two things the total alone must never be allowed to do:
+
+* carry a CRITICAL failure. A setup with no real trigger, no entry zone,
+  or an unacceptable R:R is not a weak trade that seven good components
+  can outvote - it is not a trade. Those three are floored individually.
+* let a hard classification off. The MTF layer sets `score_floor` per
+  setup type, so a reversal against the primary bias has to be a better
+  setup than a continuation, measured on this same scale. The floor only
+  ever rises above the configured B tier; nothing here can lower a limit.
 """
 
 from __future__ import annotations
@@ -33,7 +43,7 @@ from ..smc.engine import SetupCandidate
 
 WEIGHTS = {
     "trigger": 25.0,
-    "htf_alignment": 18.0,
+    "context": 18.0,
     "displacement": 14.0,
     "entry_zone": 12.0,
     "risk_reward": 12.0,
@@ -43,6 +53,23 @@ WEIGHTS = {
 }
 
 TIERS = ("A+", "A", "B", "NO_TRADE")
+
+#: Components that cannot be compensated for. A near-zero score in any of
+#: these means the setup is missing something structural, and no amount of
+#: session quality or premium/discount agreement substitutes for it.
+CRITICAL_COMPONENTS = ("trigger", "entry_zone", "risk_reward")
+
+#: How much a setup's classification is worth on the context axis. A
+#: continuation with the primary bias is the reference; everything that
+#: fights something scores less here AND carries a higher floor, so the
+#: two act together rather than one excusing the other.
+CONTEXT_FRACTION = {
+    "CONTINUATION": 1.0,
+    "CONTINUATION_VS_MACRO": 0.70,
+    "RANGE_ROTATION": 0.60,
+    "REVERSAL": 0.55,
+    "COUNTERTREND_SCALP": 0.30,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,13 +114,25 @@ def _trigger_component(candidate: SetupCandidate) -> tuple[float, str]:
     return 0.0, "no trigger"
 
 
-def _alignment_component(candidate: SetupCandidate) -> tuple[float, str]:
-    if candidate.alignment == "aligned":
-        return 1.0, "H4, H1 and M15 all agree"
-    if candidate.alignment == "partial":
-        # One higher timeframe is neutral rather than opposed.
-        return 0.6, "higher timeframe is neutral, not opposed"
-    return 0.0, "timeframes conflict"
+def _context_component(candidate: SetupCandidate) -> tuple[float, str]:
+    """How the setup stands to the primary bias and the macro context.
+
+    Graded, not boolean. Unanimity across H4/H1/M15 is not the thing being
+    measured - a reversal is by definition NOT unanimous, and scoring it
+    zero for that would reinstate the rigid filter this replaced. What is
+    measured is how much the setup has to fight, and a setup that fights
+    more simply has to be better, which is what `score_floor` enforces.
+    """
+
+    fraction = CONTEXT_FRACTION.get(candidate.setup_type)
+    if fraction is None:
+        # An unrecognised classification is not scored generously. Rule:
+        # unknown is never treated as favourable.
+        return 0.0, f"unrecognised setup type {candidate.setup_type!r}"
+    detail = (
+        f"H4 {candidate.htf_bias} / H1 {candidate.h1_bias} / M15 {candidate.m15_bias}"
+    )
+    return fraction, f"{candidate.setup_type} ({detail})"
 
 
 def _displacement_component(candidate: SetupCandidate) -> tuple[float, str]:
@@ -155,7 +194,7 @@ class SetupScorer:
         minimum_rr = self.config.risk.min_risk_reward
         parts = {
             "trigger": _trigger_component(candidate),
-            "htf_alignment": _alignment_component(candidate),
+            "context": _context_component(candidate),
             "displacement": _displacement_component(candidate),
             "entry_zone": _entry_zone_component(candidate),
             "risk_reward": _risk_reward_component(candidate, minimum_rr),
@@ -171,15 +210,58 @@ class SetupScorer:
         total = sum(components.values())
 
         # Hard structural gates. These are not score penalties — a setup
-        # missing its trigger or trading into conflict is not a weak
-        # trade, it is not a trade.
-        if parts["trigger"][0] <= 0.0 or parts["entry_zone"][0] <= 0.0:
-            return SetupScore(total, "NO_TRADE", components, notes + ("gate: missing trigger or entry zone",))
-        if candidate.alignment == "conflicted":
-            return SetupScore(total, "NO_TRADE", components, notes + ("gate: timeframe conflict",))
+        # missing its trigger or its entry zone is not a weak trade, it is
+        # not a trade, and no combination of the other components may vote
+        # it back in.
+        critical_floor = self.config.mtf.min_critical_component_fraction
+        for name in CRITICAL_COMPONENTS:
+            fraction = parts[name][0]
+            if fraction <= 0.0:
+                return SetupScore(
+                    total,
+                    "NO_TRADE",
+                    components,
+                    notes + (f"gate: {name} is absent ({parts[name][1]})",),
+                )
+            if fraction < critical_floor:
+                return SetupScore(
+                    total,
+                    "NO_TRADE",
+                    components,
+                    notes
+                    + (
+                        f"gate: {name} scored {fraction:.2f} of 1.00, below the "
+                        f"{critical_floor:.2f} a critical component must reach on its own",
+                    ),
+                )
+        if candidate.setup_type not in CONTEXT_FRACTION:
+            # Includes the legacy "conflicted" state: a setup whose
+            # classification this scorer does not recognise is refused
+            # rather than scored on a guess.
+            return SetupScore(
+                total,
+                "NO_TRADE",
+                components,
+                notes + (f"gate: unclassified setup ({candidate.setup_type})",),
+            )
         if not candidate.session.tradeable:
             return SetupScore(
                 total, "NO_TRADE", components, notes + ("gate: session liquidity too thin",)
+            )
+
+        # The MTF layer's floor for this classification. It is never below
+        # the configured B tier, so this can only ever demand more.
+        floor = max(self.scoring.tier_b, candidate.score_floor)
+        if total < floor:
+            return SetupScore(
+                total,
+                "NO_TRADE",
+                components,
+                notes
+                + (
+                    f"gate: {candidate.setup_type} requires a score of {floor:.0f}, "
+                    f"scored {total:.1f}",
+                ),
             )
 
         if total >= self.scoring.tier_a_plus:

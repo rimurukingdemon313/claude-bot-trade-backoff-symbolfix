@@ -2,7 +2,7 @@
  "account": {
   "status": "LIVE",
   "asOf": "2026-09-10T14:00:00+00:00",
-  "ageSeconds": 408333.2,
+  "ageSeconds": 437270.9,
   "stale": true,
   "refreshError": null,
   "data": {
@@ -29,7 +29,7 @@
  "positions": {
   "status": "LIVE",
   "asOf": "2026-09-10T14:00:00+00:00",
-  "ageSeconds": 408333.2,
+  "ageSeconds": 437270.9,
   "stale": true,
   "refreshError": null,
   "data": [
@@ -37,7 +37,7 @@
     "positionId": "5001",
     "symbol": "EURUSD",
     "direction": "BUY",
-    "quantity": 0.19,
+    "quantity": 0.23,
     "entryPrice": 1.1219799999999984,
     "stopLoss": 1.11901,
     "takeProfit": 1.12778,
@@ -46,8 +46,8 @@
     "currentPrice": 1.1218799999999982,
     "priceStatus": "live",
     "rMultiple": -0.034,
-    "riskAmount": 55.57,
-    "setupGrade": "A",
+    "riskAmount": 67.27,
+    "setupGrade": "A+",
     "executionId": "2ab7b6f21285a70c1aeeb87f2a207679",
     "durationMinutes": 1800.0,
     "orphaned": false,
@@ -88,17 +88,17 @@
     {
      "balance": 10000.0,
      "equity": 10000.0,
-     "created_at": "2026-09-15T07:25:33.135606+00:00"
+     "created_at": "2026-09-15T15:27:50.833038+00:00"
     },
     {
      "balance": 10000.0,
      "equity": 10000.0,
-     "created_at": "2026-09-15T07:25:33.139459+00:00"
+     "created_at": "2026-09-15T15:27:50.836167+00:00"
     },
     {
      "balance": 10000.0,
      "equity": 10000.0,
-     "created_at": "2026-09-15T07:25:33.141536+00:00"
+     "created_at": "2026-09-15T15:27:50.837714+00:00"
     }
    ],
    "dailyHistory": [
@@ -111,7 +111,7 @@
      "losses": 0,
      "consecutive_losses": 0,
      "start_balance": 10000.0,
-     "updated_at": "2026-09-15T07:25:33.158592+00:00"
+     "updated_at": "2026-09-15T15:27:50.851328+00:00"
     },
     {
      "day": "2026-09-10",
@@ -122,7 +122,7 @@
      "losses": 0,
      "consecutive_losses": 0,
      "start_balance": 10000.0,
-     "updated_at": "2026-09-15T07:25:33.142448+00:00"
+     "updated_at": "2026-09-15T15:27:50.838266+00:00"
     }
    ]
   }
@@ -130,15 +130,15 @@
  "scan": {
   "status": "LIVE",
   "data": {
-   "scanId": "30a64f83410b",
+   "scanId": "2340bed67aeb",
    "startedAt": "2026-09-10T14:00:00+00:00",
-   "finishedAt": "2026-09-15T07:25:33.162224+00:00",
+   "finishedAt": "2026-09-15T15:27:50.855527+00:00",
    "demo": {
     "verified": true,
     "urlOk": true,
     "accountOk": true,
     "contradicted": false,
-    "checkedAt": "2026-09-15T07:25:33.141457+00:00",
+    "checkedAt": "2026-09-15T15:27:50.837626+00:00",
     "evidence": [
      "base URL contains DEMO marker 'demo.tradelocker.com'",
      "account.accountType='DEMO'"
@@ -193,6 +193,8 @@
       "h1Bias": "range",
       "m15Bias": "bullish",
       "alignment": "partial",
+      "setupType": "CONTINUATION",
+      "scoreFloor": 60.0,
       "sweep": {
        "index": 75,
        "confirmedIndex": 79,
@@ -255,7 +257,10 @@
       },
       "liquidityTarget": null,
       "evidence": [
-       "BUY with partial multi-timeframe context",
+       "BUY classified CONTINUATION (H4 range / H1 range / M15 bullish)",
+       "continuation of M15 structure with no macro opposition",
+       "no higher-timeframe bias in either direction; M15 structure is the only anchor, so the setup carries the whole burden of proof",
+       "requires a score of at least 60",
        "swing low swept (quality 0.85, rejection 94%)",
        "BOS bullish clearing 1.99 ATR",
        "displacement 2.2x ATR (quality 0.85)",
@@ -266,11 +271,11 @@
       "timestamp": "2026-09-10T14:00:00+00:00"
      },
      "score": {
-      "total": 74.8,
-      "tier": "A",
+      "total": 82.0,
+      "tier": "A+",
       "components": {
        "trigger": 25.0,
-       "htf_alignment": 10.8,
+       "context": 18.0,
        "displacement": 11.9,
        "entry_zone": 12.0,
        "risk_reward": 3.6,
@@ -280,7 +285,7 @@
       },
       "maxima": {
        "trigger": 25.0,
-       "htf_alignment": 18.0,
+       "context": 18.0,
        "displacement": 14.0,
        "entry_zone": 12.0,
        "risk_reward": 12.0,
@@ -290,7 +295,7 @@
       },
       "notes": [
        "trigger: sweep quality 0.85 followed by a structure shift",
-       "htf_alignment: higher timeframe is neutral, not opposed",
+       "context: CONTINUATION (H4 range / H1 range / M15 bullish)",
        "displacement: displacement 2.2x ATR",
        "entry_zone: fresh fair value gap",
        "risk_reward: R:R 1:2.00",
@@ -305,44 +310,44 @@
       "symbol": "EURUSD",
       "direction": "BUY",
       "reasons": [
-       "A setup: risk scaled up 1.15x",
-       "risking $55.57 (0.57% of $10000.00 equity)",
-       "0.19 lots, expected $111.14 at target, R:R 1:2.00",
-       "expected $111.14 at the structural target clears the $50.00 bar for a A setup (absolute floor $40.00)"
+       "A+ setup: risk scaled up 1.4x within hard limits",
+       "risking $67.27 (0.70% of $10000.00 equity)",
+       "0.23 lots, expected $134.54 at target, R:R 1:2.00",
+       "expected $134.54 at the structural target clears the $40.00 bar for a A+ setup (absolute floor $40.00)"
       ],
-      "riskPct": 0.575,
-      "riskAmount": 57.5,
+      "riskPct": 0.7,
+      "riskAmount": 70.0,
       "size": {
-       "lots": 0.19,
-       "units": 19000.0,
-       "riskAmount": 57.5,
-       "actualRisk": 55.57,
+       "lots": 0.23,
+       "units": 23000.0,
+       "riskAmount": 70.0,
+       "actualRisk": 67.27,
        "lossPerLot": 292.4829,
        "conversionRate": 1.0,
        "marginEstimate": null,
        "notes": [
         "quote currency USD equals account currency",
-        "raw 0.1966 lots rounded down to 0.19 (step 0.01)"
+        "raw 0.2393 lots rounded down to 0.23 (step 0.01)"
        ]
       },
-      "expectedProfit": 111.14,
+      "expectedProfit": 134.54,
       "opportunity": {
        "meetsObjective": true,
-       "expectedProfit": 111.14,
+       "expectedProfit": 134.54,
        "targetProfit": 50.0,
-       "requiredProfit": 50.0,
+       "requiredProfit": 40.0,
        "minimumProfit": 40.0,
        "shortfall": 0.0,
-       "reason": "expected $111.14 at the structural target clears the $50.00 bar for a A setup (absolute floor $40.00)"
+       "reason": "expected $134.54 at the structural target clears the $40.00 bar for a A+ setup (absolute floor $40.00)"
       },
       "exposure": {
        "perCurrency": {
-        "EUR": 55.57,
-        "USD": -55.57
+        "EUR": 67.27,
+        "USD": -67.27
        },
-       "correlatedRisk": 55.57,
+       "correlatedRisk": 67.27,
        "worstPair": null,
-       "totalOpenRisk": 55.57
+       "totalOpenRisk": 67.27
       },
       "limits": {
        "maxRiskPct": 0.01,
@@ -366,7 +371,7 @@
     "executionId": "2ab7b6f21285a70c1aeeb87f2a207679",
     "symbol": "EURUSD",
     "direction": "BUY",
-    "quantity": 0.19,
+    "quantity": 0.23,
     "brokerOrderId": "ord-5001",
     "brokerPositionId": "5001",
     "fillPrice": 1.1219799999999984,
@@ -381,7 +386,7 @@
  "risk": {
   "status": "LIVE",
   "asOf": "2026-09-10T14:00:00+00:00",
-  "ageSeconds": 408333.2,
+  "ageSeconds": 437270.9,
   "stale": true,
   "refreshError": null,
   "data": {
@@ -474,7 +479,7 @@
     "urlOk": true,
     "accountOk": true,
     "contradicted": false,
-    "checkedAt": "2026-09-15T07:25:33.141457+00:00",
+    "checkedAt": "2026-09-15T15:27:50.837626+00:00",
     "evidence": [
      "base URL contains DEMO marker 'demo.tradelocker.com'",
      "account.accountType='DEMO'"
@@ -535,8 +540,8 @@
     "enabled": true,
     "running": false,
     "lastScan": {
-     "scanId": "30a64f83410b",
-     "at": "2026-09-15T07:25:33.162224+00:00",
+     "scanId": "2340bed67aeb",
+     "at": "2026-09-15T15:27:50.855527+00:00",
      "source": "manual",
      "decision": "BUY EURUSD"
     }
@@ -550,7 +555,7 @@
     "unprotected": [],
     "errors": [],
     "clean": true,
-    "at": "2026-09-15T07:25:33.140129+00:00"
+    "at": "2026-09-15T15:27:50.836799+00:00"
    },
    "market": {
     "ok": true,
@@ -560,7 +565,7 @@
   },
   "uptimeSeconds": 0,
   "versions": {
-   "system": "3.11.0",
+   "system": "3.12.0",
    "smc": "smc-2.0.0",
    "scoring": "score-2.0.0",
    "risk": "risk-2.3.0",
@@ -584,9 +589,9 @@
      "unprotected": [],
      "errors": [],
      "clean": true,
-     "at": "2026-09-15T07:25:33.140129+00:00"
+     "at": "2026-09-15T15:27:50.836799+00:00"
     },
-    "created_at": "2026-09-15T07:25:33.140423+00:00"
+    "created_at": "2026-09-15T15:27:50.836904+00:00"
    },
    {
     "id": 1,
@@ -601,12 +606,12 @@
      "unprotected": [],
      "errors": [],
      "clean": true,
-     "at": "2026-09-15T07:25:33.137272+00:00"
+     "at": "2026-09-15T15:27:50.834291+00:00"
     },
-    "created_at": "2026-09-15T07:25:33.137950+00:00"
+    "created_at": "2026-09-15T15:27:50.834698+00:00"
    }
   ],
   "upcomingNews": []
  },
- "generatedAt": "2026-09-15T07:25:33.164281+00:00"
+ "generatedAt": "2026-09-15T15:27:50.857638+00:00"
 }

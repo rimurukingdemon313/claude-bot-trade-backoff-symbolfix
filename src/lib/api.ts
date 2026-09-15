@@ -149,6 +149,23 @@ export type ScanSymbol = {
   ai: Record<string, any> | null;
 };
 
+/** NO_TRADE | WATCH | VALID_SETUP | TRADE — see bot/smc/mtf.py. */
+export type SignalState = "NO_TRADE" | "WATCH" | "VALID_SETUP" | "TRADE";
+
+export type MtfDecision = {
+  direction: string | null;
+  setupType: string;
+  state: SignalState;
+  h4Context: string;
+  h1Bias: string;
+  m15Bias: string;
+  alignment: string;
+  scoreFloor: number;
+  regime: string;
+  rationale: string;
+  evidence: string[];
+};
+
 export type Scan = {
   scanId: string;
   startedAt: string;

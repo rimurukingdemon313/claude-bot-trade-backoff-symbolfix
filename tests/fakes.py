@@ -180,6 +180,138 @@ def aligned_htf(
     return series_from_path(path, timeframe=timeframe, end=last_close)
 
 
+def zigzag_path(
+    *, count: int, start_price: float, step: float, direction: int
+) -> list[tuple[float, float, float, float]]:
+    """A trend that actually prints swings.
+
+    `trending_path` moves monotonically, which reads as "range" to
+    `structural_bias`: a line with no pullbacks has no confirmed pivots,
+    so there are no higher highs or lower lows to sequence. A prevailing
+    trend has to be built from impulses and pullbacks for the detectors to
+    see it - and without a prevailing trend, the first break in either
+    direction is labelled BOS, so a CHoCH becomes impossible to construct.
+    """
+
+    path: list[tuple[float, float, float, float]] = []
+    price = start_price
+    sign = 1 if direction > 0 else -1
+    while len(path) < count:
+        for _ in range(3):  # impulse
+            close = price + sign * step
+            high = max(price, close) + step * 0.15
+            low = min(price, close) - step * 0.15
+            path.append((price, high, low, close))
+            price = close
+        for _ in range(2):  # pullback, shallower than the impulse
+            close = price - sign * step * 0.45
+            high = max(price, close) + step * 0.12
+            low = min(price, close) - step * 0.12
+            path.append((price, high, low, close))
+            price = close
+    return path[:count]
+
+
+def reversal_setup_m15(
+    *,
+    start_price: float = 1.1400,
+    step: float = 0.00060,
+    wobble: float = 0.00012,
+    trend_candles: int = 70,
+    displacement_overshoot: float = 0.15,
+    end: datetime | None = None,
+) -> list[Candle]:
+    """A genuine bullish reversal: a DOWNtrend that turns.
+
+    `bullish_setup_m15` builds its sweep-and-break inside an uptrend, so
+    the break is a BOS - continuation, by definition. A reversal has to
+    break the other way, which means the prevailing M15 trend must be
+    bearish first. The stages are otherwise identical:
+
+      1. a sustained DOWNtrend (bearish M15 structure, so the first
+         bullish break is a CHoCH and not a BOS);
+      2. a pullback that prints a clear swing low;
+      3. consolidation leaving TWO equal lows (stop liquidity);
+      4. a sweep: wick below them, close back above;
+      5. displacement up, closing above the last swing high - the CHoCH;
+      6. a shallow retracement into the imbalance it left.
+
+    `displacement_overshoot` controls how far past the swing high the
+    breaking candle closes, and therefore how wide the imbalance - and
+    the structural stop behind it - turns out to be. A modest overshoot
+    leaves a tradeable stop; a violent one leaves a stop several ATR wide,
+    which the engine refuses on width alone. Both are real reversals, and
+    the parameter exists so a test can say which it means rather than
+    tuning numbers until something passes.
+
+    Built so the correct answer is known by construction (project rule
+    10): this is the one shape that must be allowed to trade against a
+    bearish H1 bias, and nothing weaker should be.
+    """
+
+    path = zigzag_path(
+        count=trend_candles, start_price=start_price, step=step, direction=-1
+    )
+    price = path[-1][3]
+
+    equal_low = price - step * 4
+    path.append((price, price + wobble, equal_low + step * 0.5, equal_low + step * 0.8))
+    path.append((equal_low + step * 0.8, equal_low + step * 1.2, equal_low, equal_low + step * 0.6))
+    path.append((equal_low + step * 0.6, equal_low + step * 1.6, equal_low + step * 0.4, equal_low + step * 1.4))
+    path.append((equal_low + step * 1.4, equal_low + step * 1.8, equal_low + step * 0.02, equal_low + step * 0.9))
+    path.append((equal_low + step * 0.9, equal_low + step * 1.3, equal_low + step * 0.5, equal_low + step * 1.1))
+
+    sweep_open = equal_low + step * 1.1
+    sweep_low = equal_low - step * 1.8
+    sweep_close = equal_low + step * 1.5
+    path.append((sweep_open, sweep_close + wobble, sweep_low, sweep_close))
+
+    prior_high = max(row[1] for row in path[-14:])
+    disp_open = sweep_close
+    disp_close = prior_high + step * displacement_overshoot
+    path.append((disp_open, disp_close + wobble, disp_open - wobble, disp_close))
+
+    leg_open = disp_close + step * 0.6
+    leg_close = leg_open + step * 1.1
+    path.append((leg_open, leg_close + wobble, leg_open - wobble * 0.5, leg_close))
+
+    path.append((leg_close, leg_close + wobble, disp_close + step * 0.4, disp_close + step * 1.0))
+    path.append((disp_close + step * 1.0, disp_close + step * 1.4, disp_close + step * 0.2, disp_close + step * 0.8))
+
+    return series_from_path(path, timeframe="M15", end=end or SETUP_END)
+
+
+def directional_htf(
+    m15: Sequence[Candle], *, timeframe: str, direction: int, count: int = 70
+) -> list[Candle]:
+    """A higher-timeframe series with the bias the test asks for.
+
+    `aligned_htf` can only build a series that agrees with the M15 leg,
+    which makes every H4/H1 disagreement impossible to express - and those
+    are exactly the cases the MTF layer exists to classify.
+
+    A smooth trending path is not enough: `structural_bias` reads
+    CONFIRMED swings and breaks, and a monotonic line prints neither, so
+    such a series reads as "range" however far it travels. So the shapes
+    that are known to print structure are reused and retimed onto the
+    higher timeframe. direction=1 is bullish, -1 bearish, 0 leaves no
+    confirmed directional structure at all.
+    """
+
+    last_close = m15[-1].close_time
+    if direction == 0:
+        price = m15[0].open
+        path = [
+            (price, price + 0.00030, price - 0.00030, price + 0.00004 * (1 if i % 2 else -1))
+            for i in range(count)
+        ]
+        return series_from_path(path, timeframe=timeframe, end=last_close)
+
+    source = bullish_setup_m15() if direction > 0 else bearish_setup_m15()
+    path = [(c.open, c.high, c.low, c.close) for c in source]
+    return series_from_path(path, timeframe=timeframe, end=last_close)
+
+
 def bearish_setup_m15(**kwargs: Any) -> list[Candle]:
     """The mirror image of bullish_setup_m15, for direction symmetry tests."""
 

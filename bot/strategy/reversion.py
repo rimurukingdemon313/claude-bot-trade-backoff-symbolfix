@@ -49,6 +49,7 @@ from ..marketdata.provider import Series
 from ..smc.dealing_range import dealing_range
 from ..smc.engine import SetupCandidate, SmcEngine, SmcResult, TimeframeAnalysis
 from ..smc.liquidity import LiquiditySweep
+from ..smc.mtf import NO_TRADE, RANGE_ROTATION, TRADE
 from ..smc.sessions import classify_session
 from .base import StrategyProfile
 
@@ -114,7 +115,11 @@ class ReversionStrategy:
         }
         candidate, rejection = self.build_candidate(symbol, analyses, now=now)
         return SmcResult(
-            symbol=symbol, analyses=analyses, candidate=candidate, rejection=rejection
+            symbol=symbol,
+            analyses=analyses,
+            candidate=candidate,
+            rejection=rejection,
+            state=TRADE if candidate is not None else NO_TRADE,
         )
 
     # -- candidate --------------------------------------------------------
@@ -206,7 +211,16 @@ class ReversionStrategy:
                 htf_bias=h4.bias,
                 h1_bias=h1.bias,
                 m15_bias=m15.bias,
-                alignment="reversion",
+                alignment="counter",
+                setup_type=RANGE_ROTATION,
+                # Named for what it is: this mode fades a stretched move
+                # back toward the range, which is a rotation whatever the
+                # higher timeframes are doing. Leaving it unclassified
+                # would now be refused by the scorer, and rightly - a
+                # classification the scorer cannot place is not scored on
+                # a guess. `score_floor` stays 0 so the build's B tier
+                # remains this mode's bar: naming the setup honestly must
+                # not silently retune a mode that was working.
                 sweep=sweep,
                 structure_event=None,
                 displacement=None,
@@ -260,9 +274,18 @@ class ReversionStrategy:
         trending H4 is not something a reversion trade should stand in
         front of: the one loss that does not come back is the one taken
         against the dominant flow.
+
+        This is DELIBERATELY not `bot.smc.mtf`, and it is not a leftover of
+        the rigid agreement rule that module replaced. The SMC engine takes
+        a turn against the primary bias when the turn has earned the name
+        reversal — a swept level of real significance, displacement away
+        from it, a CHoCH. This mode has no such trigger to appeal to: it
+        fades a stretched move on the strength of the stretch alone, and a
+        stretch is not evidence of a turn. So it keeps the stricter rule,
+        and it applies only while this strategy is the selected one. Both
+        strategies then meet the same risk engine, unchanged (rule 14).
         """
 
-        wanted = "bullish" if direction == "BUY" else "bearish"
         opposing = "bearish" if direction == "BUY" else "bullish"
 
         if h4.bias == opposing:
@@ -275,7 +298,6 @@ class ReversionStrategy:
                 f"{direction} reversion refused: H4 has no bias and H1 is {h1.bias} — "
                 "nothing supports the reversion"
             )
-        del wanted  # named for the reader; the checks above are the rule
         return True, ""
 
     def _price_levels(

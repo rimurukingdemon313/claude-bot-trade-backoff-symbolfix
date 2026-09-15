@@ -30,13 +30,48 @@ produce the identical verdict it produced with the later bars present.
 
 | Timeframe | Role |
 | --- | --- |
-| **H4** | Macro context. An explicit opposing H4 bias is a veto. |
-| **H1** | Directional bias. An opposing H1 is a veto. |
+| **H4** | Macro context. Raises the bar when it disagrees; never a veto. |
+| **H1** | Primary directional bias. |
 | **M15** | Execution: the trigger, the entry zone, the levels. |
 
-A *neutral* higher timeframe is permissive (it has no opinion) and scores as
-`partial` alignment. A *contradicting* one is a hard rejection — the system
-does not trade against confirmed higher-timeframe structure.
+Direction is **not** taken from any single timeframe's bias. `bot/smc/mtf.py`
+classifies *both* directions from the M15 evidence and takes the better one,
+because deriving direction from one timeframe made the answer depend on which
+timeframe was consulted rather than on what the market had done — and made a
+reversal impossible to find, since a reversal is by definition the direction
+the primary bias does not point in.
+
+Each direction is classified, and the classification sets a **score floor**
+rather than a yes/no:
+
+| Classification | Meaning | Floor |
+| --- | --- | --- |
+| `CONTINUATION` | With H1; H4 agrees or is neutral | the configured B tier |
+| `CONTINUATION_VS_MACRO` | With H1, against H4 | `MTF_FLOOR_CONTINUATION_VS_MACRO` |
+| `RANGE_ROTATION` | No HTF bias; swept range extreme | `MTF_FLOOR_RANGE_ROTATION` |
+| `REVERSAL` | Against H1, with sweep + displacement + CHoCH | `MTF_FLOOR_REVERSAL` |
+| `COUNTERTREND_SCALP` | Against H1 **and** H4 | `MTF_FLOOR_COUNTERTREND_SCALP`, off by default |
+| `RETRACEMENT` / `NOISE` | Against H1 without that evidence | never traded |
+
+A floor is a one-way ratchet: it is `max(tier_b, floor)`, so a classification
+can demand more evidence than the build does and never less.
+
+**Retracement vs reversal** is the distinction the whole layer turns on. A
+move against the primary bias is only a reversal when it has swept liquidity
+of real significance, displaced away from it, and printed a **CHoCH** — a
+break against the prevailing M15 trend. A break in the direction the move was
+already travelling is continuation of a pullback. Distance travelled is not
+evidence, and treating it as evidence is how a system sells the bottom of one.
+
+A refused direction never hands the trade to the other: if the most recent
+meaningful trigger points the way we will not trade, the answer is no trade,
+not a trade the other way on staler evidence.
+
+### Signal states
+
+`NO_TRADE`, `WATCH` (context favourable, trigger incomplete), `VALID_SETUP`
+(structurally valid, entry conditions unmet) and `TRADE`. A state is a label,
+never a permission — only a candidate can become an order.
 
 ## Swing structure
 
@@ -204,13 +239,19 @@ rather than fitted to a backtest:
 | Component | Weight | Why |
 | --- | --- | --- |
 | Trigger quality | 25 | The sweep/structure event *is* the edge. |
-| HTF alignment | 18 | Trading with context is the largest single filter. |
+| Context | 18 | How much the setup has to fight (see the table above). |
 | Displacement | 14 | Proves intent behind the move. |
 | Entry zone | 12 | A fresh, displaced POI beats a stale one. |
 | Risk/reward | 12 | Expectancy scales directly with it. |
 | Regime | 10 | The same setup is worth less in a dead range. |
 | Location | 6 | Premium/discount preference, deliberately small. |
 | Session | 3 | A tiebreak, not a thesis. |
+
+Three components are **critical** and cannot be outvoted by the other five:
+trigger, entry zone and risk/reward. Each must reach
+`MTF_MIN_CRITICAL_COMPONENT_FRACTION` of its own weight, or the setup is
+NO_TRADE whatever the total says. A setup missing one of those is not a weak
+trade; it is not a trade.
 
 R:R saturates at 4R: rewarding an 8R target encourages picking targets price
 will never reach.

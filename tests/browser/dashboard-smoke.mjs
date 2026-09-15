@@ -72,7 +72,8 @@ const isPageFault = (line) => !line.includes("Failed to load resource");
 async function render(label, { hangApi = false, fixture = "snapshot.json", expect = [], reject = [] } = {}) {
   snapshotFixture = fixture;
   const page = await browser.newPage();
-  const faults = [];
+
+const faults = [];
   page.on("pageerror", (error) => faults.push(`${label}: ${error.message}`));
   page.on("console", (message) => {
     if (message.type() !== "error") return;
@@ -101,20 +102,22 @@ async function render(label, { hangApi = false, fixture = "snapshot.json", expec
   return faults;
 }
 
-const faults = [
-  ...(await render("loaded", { expect: ["HEALTHY", "SCANNING"], reject: ["CONNECTING", "UNKNOWN"] })),
-  ...(await render("loading", { hangApi: true })),
+const scenarios = [
+  await render("loaded", { expect: ["HEALTHY", "SCANNING"], reject: ["CONNECTING", "UNKNOWN"] }),
+  await render("loading", { hangApi: true }),
   // The kill switch lives in the database, so an operator must still see
   // and use it when the BROKER is the thing that is down. Reading it from
   // the risk panel — which needs a broker read to exist at all — rendered
   // a perfectly readable switch as UNKNOWN and disabled the controls with
   // it, which is exactly what rule 15 exists to prevent.
-  ...(await render("broker down", {
+  await render("broker down", {
     fixture: "snapshot.broker-down.json",
     expect: ["SCANNING"],
     reject: ["UNKNOWN"],
-  })),
+  }),
 ];
+
+const faults = scenarios.flat();
 
 await browser.close();
 server.close();
@@ -124,4 +127,6 @@ if (faults.length) {
   for (const fault of faults) console.error("  " + fault);
   process.exit(1);
 }
-console.log("dashboard smoke: both states render with no page errors");
+console.log(
+  `dashboard smoke: ${scenarios.length} states render with no page errors`,
+);

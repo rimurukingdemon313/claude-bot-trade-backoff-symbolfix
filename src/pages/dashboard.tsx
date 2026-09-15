@@ -301,17 +301,17 @@ export default function Dashboard() {
 
         {tab === "overview" && (
           <>
-            <AccountPanel account={data?.account as any} />
-            <PositionsPanel positions={data?.positions as any} />
-            <RiskPanel risk={data?.risk as any} />
+            <AccountPanel account={data?.account} />
+            <PositionsPanel positions={data?.positions} />
+            <RiskPanel risk={data?.risk} />
           </>
         )}
 
-        {tab === "setup" && <SetupPanel scan={data?.scan as any} />}
+        {tab === "setup" && <SetupPanel scan={data?.scan} />}
 
-        {tab === "history" && <HistoryPanel history={data?.history as any} />}
+        {tab === "history" && <HistoryPanel history={data?.history} />}
 
-        {tab === "performance" && <PerformancePanel performance={data?.performance as any} />}
+        {tab === "performance" && <PerformancePanel performance={data?.performance} />}
 
         {tab === "system" && (
           <>

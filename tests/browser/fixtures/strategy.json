@@ -1,0 +1,32 @@
+{
+ "status": "LIVE",
+ "data": {
+  "active": "smc",
+  "options": [
+   {
+    "key": "reversion",
+    "name": "Sweep reversion",
+    "description": "Fades a failed run past a liquidity level, back toward the middle of the range. Trades ranging conditions that the SMC mode rejects outright, so it fires far more often for a smaller target.",
+    "minRiskReward": 1.5,
+    "expectedFrequency": "several a day across a wide symbol list",
+    "thesis": "price that cannot hold beyond a swept level returns into its range",
+    "active": false,
+    "typicalProfitAtFloorRisk": 150.0,
+    "clearsProfitFloor": true,
+    "note": null
+   },
+   {
+    "key": "smc",
+    "name": "Smart Money Concepts",
+    "description": "Trades continuation after a structural shift: a liquidity sweep, a break of structure with displacement, and an entry back inside the imbalance it left. Requires H4, H1 and M15 to agree, so it stands aside often and aims far.",
+    "minRiskReward": 2.0,
+    "expectedFrequency": "a few a week",
+    "thesis": "structure breaks in the direction institutional flow has already committed to",
+    "active": true,
+    "typicalProfitAtFloorRisk": 200.0,
+    "clearsProfitFloor": true,
+    "note": null
+   }
+  ]
+ }
+}

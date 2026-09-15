@@ -105,7 +105,12 @@ export function ModeBanner({ health }: { health: Health | undefined }) {
  * failed, saying so is the difference between a number and a number you
  * can act on.
  */
-function Freshness({ envelope }: { envelope: Envelope<unknown> }) {
+function Freshness({ envelope }: { envelope: Envelope<unknown> | undefined }) {
+  // Undefined is the loading state, and this renders in places `guard()`
+  // does not cover. Taking the envelope as possibly-absent is what stops
+  // a placement mistake becoming a blank page: React unmounts the whole
+  // tree on a throw, so one undefined read here takes down the dashboard.
+  if (!envelope) return null;
   const age = envelope.ageSeconds;
   if (age == null) return null;
   if (!envelope.stale && !envelope.refreshError) return null;
@@ -121,7 +126,7 @@ function Freshness({ envelope }: { envelope: Envelope<unknown> }) {
 
 // -- account ---------------------------------------------------------------
 
-export function AccountPanel({ account }: { account: Envelope<Account> }) {
+export function AccountPanel({ account }: { account: Envelope<Account> | undefined }) {
   return (
     <Card
       title="Account"
@@ -173,7 +178,7 @@ export function AccountPanel({ account }: { account: Envelope<Account> }) {
 
 // -- positions -------------------------------------------------------------
 
-export function PositionsPanel({ positions }: { positions: Envelope<Position[]> }) {
+export function PositionsPanel({ positions }: { positions: Envelope<Position[]> | undefined }) {
   return (
     <Card
       title="Open positions"
@@ -258,7 +263,7 @@ function Field({ label, value }: { label: string; value: ReactNode }) {
 
 // -- setup / SMC -----------------------------------------------------------
 
-export function SetupPanel({ scan }: { scan: Envelope<Scan> }) {
+export function SetupPanel({ scan }: { scan: Envelope<Scan> | undefined }) {
   return (
     <Card
       title="Current analysis"
@@ -432,7 +437,7 @@ function SymbolCard({ entry }: { entry: ScanSymbol }) {
 
 // -- risk ------------------------------------------------------------------
 
-export function RiskPanel({ risk }: { risk: Envelope<RiskState> }) {
+export function RiskPanel({ risk }: { risk: Envelope<RiskState> | undefined }) {
   return (
     <Card
       title="Risk"
@@ -520,7 +525,7 @@ export function RiskPanel({ risk }: { risk: Envelope<RiskState> }) {
 
 // -- performance -----------------------------------------------------------
 
-export function PerformancePanel({ performance }: { performance: Envelope<Performance> }) {
+export function PerformancePanel({ performance }: { performance: Envelope<Performance> | undefined }) {
   return (
     <Card
       title="Performance"
@@ -621,7 +626,7 @@ function BreakdownTable({ title, rows }: { title: string; rows: Performance["byS
 
 // -- history ---------------------------------------------------------------
 
-export function HistoryPanel({ history }: { history: Envelope<HistoryRow[]> }) {
+export function HistoryPanel({ history }: { history: Envelope<HistoryRow[]> | undefined }) {
   return (
     <Card title="Trade history">
       {guard(history, (rows) =>

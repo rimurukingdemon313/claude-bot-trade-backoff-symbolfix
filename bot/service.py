@@ -41,7 +41,7 @@ class BotService:
         self.config = config or load_config()
         self.database = open_database(self.config.storage)
         self.repos = Repositories(self.database)
-        live_broker = broker or TradeLockerBroker(self.config)
+        live_broker = broker or TradeLockerBroker(self.config, spec_store=self.repos.instruments)
         # Paper mode wraps the live connection rather than replacing it:
         # reads still come from TradeLocker, only the writes are simulated.
         # Composition (not inheritance) means no unoverridden method can

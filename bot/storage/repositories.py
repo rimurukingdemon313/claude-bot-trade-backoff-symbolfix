@@ -864,6 +864,61 @@ class PaperRepository:
         )
 
 
+class InstrumentSpecRepository:
+    """Contract sizes, remembered across restarts.
+
+    A contract size is a property of the instrument and does not change.
+    TradeLocker's instrument directory does not carry it, so learning it
+    costs one request per symbol — and the old in-memory cache was cleared
+    on every hourly directory refresh and lost on every restart. With 23
+    symbols that was 23 requests re-spent for information the bot already
+    knew, on an account whose rate limit a single scan was already close
+    to. Cloudflare answered 1015, the circuit opened, and the symbols that
+    had not been resolved yet were skipped for the rest of the run.
+
+    A value is stored only after a SUCCESSFUL lookup, so a failed one is
+    never cached as a fact. Rule 6 applies here as much as to a balance:
+    a wrong contract size does not show up as a gap, it mis-sizes every
+    order on the instrument.
+    """
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    def contract_size(self, instrument_id: str) -> float | None:
+        rows = self.db.query(
+            "SELECT contract_size FROM instrument_specs WHERE instrument_id = ?",
+            (str(instrument_id),),
+        )
+        if not rows:
+            return None
+        try:
+            size = float(rows[0]["contract_size"])
+        except (TypeError, ValueError):
+            return None
+        return size if size > 0 else None
+
+    def remember(self, instrument_id: str, contract_size: float, *, symbol: str = "") -> None:
+        if not instrument_id or contract_size is None or contract_size <= 0:
+            return
+        self.db.execute(
+            """
+            INSERT INTO instrument_specs (instrument_id, symbol, contract_size, fetched_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT (instrument_id) DO UPDATE SET
+                symbol = EXCLUDED.symbol,
+                contract_size = EXCLUDED.contract_size,
+                fetched_at = EXCLUDED.fetched_at
+            """,
+            (str(instrument_id), str(symbol), float(contract_size), utc_now().isoformat()),
+        )
+
+    def known(self) -> list[dict[str, Any]]:
+        return self.db.query(
+            "SELECT * FROM instrument_specs ORDER BY symbol, instrument_id"
+        )
+
+
 class Repositories:
     """Bundle handed to every component that needs persistence."""
 
@@ -878,6 +933,7 @@ class Repositories:
         self.daily = DailyStatsRepository(db)
         self.equity = EquityRepository(db)
         self.paper = PaperRepository(db)
+        self.instruments = InstrumentSpecRepository(db)
 
     @property
     def healthy(self) -> bool:

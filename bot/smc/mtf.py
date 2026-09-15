@@ -91,6 +91,17 @@ VALID_SETUP = "VALID_SETUP"
 TRADE = "TRADE"
 
 
+def _a(bias: str) -> str:
+    """"a bullish" / "an unclear" - the refusal text is read by a person.
+
+    Hardcoding "an" printed "an bullish H1 bias" on the dashboard for
+    every retracement. Small, and the sort of thing that makes an
+    operator trust the rest of the message less.
+    """
+
+    return f"an {bias}" if bias[:1].lower() in "aeiou" else f"a {bias}"
+
+
 def _opposite(bias: str) -> str:
     """The other direction, or "" for a bias that has none.
 
@@ -509,7 +520,7 @@ def _without_primary_bias(case: _Case) -> Classification:
         if shortfalls:
             return Classification.refused(
                 RETRACEMENT,
-                f"M15 is {case.wanted} against an {h4.bias} H4 macro with no H1 bias to "
+                f"M15 is {case.wanted} against {_a(h4.bias)} H4 macro with no H1 bias to "
                 "support it, and the move has not earned the name reversal: "
                 + "; ".join(shortfalls),
             )
@@ -568,7 +579,7 @@ def _against_primary_bias(case: _Case) -> Classification:
     if shortfalls:
         return Classification.refused(
             RETRACEMENT,
-            f"M15 is {case.wanted} against an {h1.bias} H1 bias, and this is a retracement "
+            f"M15 is {case.wanted} against {_a(h1.bias)} H1 bias, and this is a retracement "
             "rather than a reversal: " + "; ".join(shortfalls),
         )
 
@@ -576,7 +587,7 @@ def _against_primary_bias(case: _Case) -> Classification:
         if not mtf.allow_countertrend_scalp:
             return Classification.refused(
                 COUNTERTREND_SCALP,
-                f"a {case.wanted} turn against both an {h1.bias} H1 bias and an {h4.bias} H4 "
+                f"a {case.wanted} turn against both {_a(h1.bias)} H1 bias and {_a(h4.bias)} H4 "
                 "macro is a countertrend scalp; disabled (MTF_ALLOW_COUNTERTREND_SCALP)",
             )
         return case.take(

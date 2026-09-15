@@ -6,10 +6,17 @@ stop/target prices to TradeLocker — two different price series, so every
 level was subtly wrong and could be rejected or filled at a price the
 analysis never saw.
 
-A short TTL cache exists because one scan needs H4/H1/M15 for several
-symbols and the broker is rate limited; the TTL is always shorter than
-the timeframe it serves, so a cache hit can never hide a new closed
-candle for long.
+A cache exists because one scan needs H4/H1/M15 for several symbols and
+the broker is rate limited. It holds each series until the bar that could
+CHANGE it actually closes, which is a fact rather than a guess:
+`validate_series` removes the forming candle, so a series is closed bars
+only, and closed bars do not move. Re-fetching one before its next close
+returns different bytes and identical analysis input.
+
+The old policy was a fixed fraction of the bar (0.2), which re-fetched
+every series five times per bar and threw four of those away. Across 23
+symbols that was the difference between 53 and 30 history requests per
+scan, and Cloudflare answered 1015 to the difference.
 """
 
 from __future__ import annotations
@@ -17,15 +24,25 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Mapping
 
 from ..broker.models import InstrumentSpec
+from ..clock import ensure_utc, utc_now
 from ..config import TradingConfig
 from ..errors import MarketDataError
 from ..observability import log_event
 from .candles import Candle, TIMEFRAME_MINUTES, to_candles
 from .validation import ValidationReport, validate_series
+
+#: Never re-fetch the same series faster than this, however close the next
+#: bar is. Several symbols share one scan and would otherwise stampede the
+#: same endpoint within a second of each other.
+MIN_CACHE_SECONDS = 20.0
+
+#: Brokers publish a closed bar a moment after its close. Expiring exactly
+#: on the boundary spends a request to be told what we already knew.
+PUBLISH_GRACE_SECONDS = 5.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,10 +64,30 @@ class MarketDataProvider:
         self._cache: dict[tuple[str, str], tuple[float, Series]] = {}
         self._lock = threading.RLock()
 
-    def _ttl(self, timeframe: str) -> float:
-        """Cache for a fraction of one candle: never long enough to miss a close."""
+    def _seconds_until_stale(
+        self, series: "Series", timeframe: str, now: datetime | None = None
+    ) -> float:
+        """How long this series is still the whole truth.
 
-        return max(20.0, TIMEFRAME_MINUTES[timeframe.upper()] * 60 * 0.2)
+        Derived from the data, not from a calendar: the newest CLOSED bar
+        plus one bar duration is exactly when the next one closes, so this
+        needs no assumption about where session boundaries fall — which
+        matters for H4, where "the next multiple of 240 minutes" is not a
+        question the clock can answer.
+
+        Bounded on both sides. Never longer than one bar, so a broken
+        timestamp cannot pin a stale series in memory; never shorter than
+        `MIN_CACHE_SECONDS`, so the several symbols sharing one scan do
+        not each re-fetch the same series seconds apart.
+        """
+
+        bar_seconds = TIMEFRAME_MINUTES[timeframe.upper()] * 60
+        if not series.candles:
+            return MIN_CACHE_SECONDS
+        moment = ensure_utc(now) if now is not None else utc_now()
+        next_close = series.candles[-1].close_time + timedelta(seconds=bar_seconds)
+        remaining = (next_close - moment).total_seconds() + PUBLISH_GRACE_SECONDS
+        return max(MIN_CACHE_SECONDS, min(float(bar_seconds), remaining))
 
     def series(
         self,
@@ -65,7 +102,7 @@ class MarketDataProvider:
         key = (spec.symbol, timeframe)
         with self._lock:
             cached = self._cache.get(key)
-            if cached and not force and (time.monotonic() - cached[0]) < self._ttl(timeframe):
+            if cached and not force and time.monotonic() < cached[0]:
                 return cached[1]
 
         raw = self.broker.candles(spec, timeframe, count=count)
@@ -86,7 +123,13 @@ class MarketDataProvider:
             symbol=spec.symbol, timeframe=timeframe, candles=tuple(candles), report=report
         )
         with self._lock:
-            self._cache[key] = (time.monotonic(), series)
+            # An EXPIRY, not a fetch time: how long the answer stays the
+            # answer depends on where in the bar we are, which a fixed TTL
+            # measured from the fetch cannot express.
+            self._cache[key] = (
+                time.monotonic() + self._seconds_until_stale(series, timeframe, now),
+                series,
+            )
         return series
 
     def multi_timeframe(
@@ -121,12 +164,15 @@ class MarketDataProvider:
         with self._lock:
             entries = {
                 f"{symbol}:{timeframe}": {
-                    "ageSeconds": round(time.monotonic() - stamp, 1),
+                    # The cache stores an EXPIRY now, so report what an
+                    # operator can actually act on: how long this series
+                    # stays usable, not how long ago it was fetched.
+                    "usableForSeconds": round(max(0.0, expires_at - time.monotonic()), 1),
                     "candles": series.report.accepted,
                     "newestClose": series.report.newest_close.isoformat()
                     if series.report.newest_close
                     else None,
                 }
-                for (symbol, timeframe), (stamp, series) in self._cache.items()
+                for (symbol, timeframe), (expires_at, series) in self._cache.items()
             }
         return {"cached": entries}

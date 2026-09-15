@@ -11,7 +11,7 @@ import pytest
 
 from bot.broker.http import CircuitBreaker, HttpTransport, Throttle
 from bot.config import NewsConfig
-from bot.errors import AmbiguousExecution, BrokerAuthError, BrokerRateLimited, BrokerRejected, CircuitOpen
+from bot.errors import AmbiguousExecution, BrokerAuthError, BrokerError, BrokerRateLimited, BrokerRejected, CircuitOpen
 from bot.news import NewsFilter, currencies_for
 from bot.observability import redact
 from fakes import SETUP_END
@@ -140,21 +140,27 @@ def http_error(code: int) -> urllib.error.HTTPError:
     return urllib.error.HTTPError("http://x", code, "err", {}, io.BytesIO(b"detail"))
 
 
-def test_a_read_retries_on_rate_limiting_then_succeeds(monkeypatch):
-    calls = {"n": 0}
+def test_a_rate_limit_is_never_retried(monkeypatch):
+    """Retrying a 429 makes the ban it is trying to ride out longer.
 
-    def fake_urlopen(request, timeout=None):
-        calls["n"] += 1
-        if calls["n"] < 3:
-            raise http_error(429)
-        return FakeResponse({"ok": True})
+    This asserted the opposite: that a read retries THROUGH a rate limit
+    and succeeds on the third attempt. That was a deliberate choice, and
+    it was wrong once the shared cooldown existed beside it.
 
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
-    assert transport().request("GET", "http://x")["ok"] is True
-    assert calls["n"] == 3
+    Three reasons, all of which showed up live as Cloudflare 1015:
 
+    * every retry is another request the host counts, so the retry
+      extends the limit it is waiting out;
+    * `penalise()` holds the throttle lock for the full cooldown, and the
+      retry sleeps inside it — so one rate-limited read froze every
+      broker call in the process for minutes, not just its own;
+    * four failures from ONE symbol tripped a five-failure circuit, which
+      then shed every remaining symbol and doubled its own backoff.
 
-def test_retries_are_bounded(monkeypatch):
+    The cooldown is the correct mechanism and already holds every thread
+    back. The next scan retries naturally, after it has expired.
+    """
+
     calls = {"n": 0}
 
     def fake_urlopen(request, timeout=None):
@@ -163,6 +169,44 @@ def test_retries_are_bounded(monkeypatch):
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
     with pytest.raises(BrokerRateLimited):
+        transport().request("GET", "http://x")
+    assert calls["n"] == 1, "a rate limit must cost exactly one request"
+
+
+def test_a_rate_limit_is_not_counted_as_a_broker_outage(monkeypatch):
+    """The circuit breaker is for a broker that is DOWN.
+
+    A rate limit is a healthy broker telling us to slow down. Counting it
+    as an outage is how one throttled symbol took the whole scan with it.
+    """
+
+    from bot.broker.http import CircuitBreaker
+
+    def always_429(request, timeout=None):
+        raise http_error(429)
+
+    monkeypatch.setattr("urllib.request.urlopen", always_429)
+    circuit = CircuitBreaker(failure_threshold=2, reset_seconds=60.0)
+    wire = transport(circuit=circuit)
+    for _ in range(5):
+        with pytest.raises(BrokerRateLimited):
+            wire.request("GET", "http://x")
+    assert circuit.state == "closed", "a rate limit must not open the circuit"
+    assert wire.throttle.cooling_down > 0, "but it must set the shared cooldown"
+    assert wire.rate_limited == 5
+
+
+def test_retries_are_bounded(monkeypatch):
+    """Server errors still retry, and still stop. Only 429 is exempt."""
+
+    calls = {"n": 0}
+
+    def fake_urlopen(request, timeout=None):
+        calls["n"] += 1
+        raise http_error(503)
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    with pytest.raises(BrokerError):
         transport(max_attempts=3).request("GET", "http://x")
     assert calls["n"] == 3, "retries must never be unbounded"
 

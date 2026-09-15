@@ -1,0 +1,612 @@
+{
+ "account": {
+  "status": "LIVE",
+  "asOf": "2026-09-10T14:00:00+00:00",
+  "ageSeconds": 408333.2,
+  "stale": true,
+  "refreshError": null,
+  "data": {
+   "balance": 10000.0,
+   "equity": 10000.0,
+   "marginUsed": 0.0,
+   "marginAvailable": 10000.0,
+   "openPnl": 0.0,
+   "todayPnl": 0.0,
+   "currency": "USD",
+   "dailyRealizedPnl": 0.0,
+   "dailyPnl": 0.0,
+   "totalPnl": 0,
+   "peakEquity": 10000.0,
+   "drawdownPct": 0.0,
+   "tradesToday": 1,
+   "demoVerified": true,
+   "demoReason": null,
+   "environment": "DEMO",
+   "mode": "paper",
+   "paper": true
+  }
+ },
+ "positions": {
+  "status": "LIVE",
+  "asOf": "2026-09-10T14:00:00+00:00",
+  "ageSeconds": 408333.2,
+  "stale": true,
+  "refreshError": null,
+  "data": [
+   {
+    "positionId": "5001",
+    "symbol": "EURUSD",
+    "direction": "BUY",
+    "quantity": 0.19,
+    "entryPrice": 1.1219799999999984,
+    "stopLoss": 1.11901,
+    "takeProfit": 1.12778,
+    "unrealizedPnl": 0.0,
+    "openedAt": "2026-09-09T08:00:00+00:00",
+    "currentPrice": 1.1218799999999982,
+    "priceStatus": "live",
+    "rMultiple": -0.034,
+    "riskAmount": 55.57,
+    "setupGrade": "A",
+    "executionId": "2ab7b6f21285a70c1aeeb87f2a207679",
+    "durationMinutes": 1800.0,
+    "orphaned": false,
+    "tracked": true
+   }
+  ]
+ },
+ "history": {
+  "status": "LIVE",
+  "data": []
+ },
+ "performance": {
+  "status": "LIVE",
+  "data": {
+   "trades": 0,
+   "wins": 0,
+   "losses": 0,
+   "breakeven": 0,
+   "winRate": null,
+   "profitFactor": null,
+   "expectancy": null,
+   "averageWin": null,
+   "averageLoss": null,
+   "averageR": null,
+   "totalPnl": 0,
+   "maxDrawdown": null,
+   "currentDrawdown": null,
+   "consecutiveWins": 0,
+   "consecutiveLosses": 0,
+   "dailyPnl": 0,
+   "weeklyPnl": 0,
+   "monthlyPnl": 0,
+   "sample": "insufficient",
+   "bySymbol": [],
+   "byGrade": [],
+   "bySession": [],
+   "equityCurve": [
+    {
+     "balance": 10000.0,
+     "equity": 10000.0,
+     "created_at": "2026-09-15T07:25:33.135606+00:00"
+    },
+    {
+     "balance": 10000.0,
+     "equity": 10000.0,
+     "created_at": "2026-09-15T07:25:33.139459+00:00"
+    },
+    {
+     "balance": 10000.0,
+     "equity": 10000.0,
+     "created_at": "2026-09-15T07:25:33.141536+00:00"
+    }
+   ],
+   "dailyHistory": [
+    {
+     "day": "2026-09-15",
+     "realized_pnl": 0.0,
+     "trades_opened": 1,
+     "trades_closed": 0,
+     "wins": 0,
+     "losses": 0,
+     "consecutive_losses": 0,
+     "start_balance": 10000.0,
+     "updated_at": "2026-09-15T07:25:33.158592+00:00"
+    },
+    {
+     "day": "2026-09-10",
+     "realized_pnl": 0.0,
+     "trades_opened": 0,
+     "trades_closed": 0,
+     "wins": 0,
+     "losses": 0,
+     "consecutive_losses": 0,
+     "start_balance": 10000.0,
+     "updated_at": "2026-09-15T07:25:33.142448+00:00"
+    }
+   ]
+  }
+ },
+ "scan": {
+  "status": "LIVE",
+  "data": {
+   "scanId": "30a64f83410b",
+   "startedAt": "2026-09-10T14:00:00+00:00",
+   "finishedAt": "2026-09-15T07:25:33.162224+00:00",
+   "demo": {
+    "verified": true,
+    "urlOk": true,
+    "accountOk": true,
+    "contradicted": false,
+    "checkedAt": "2026-09-15T07:25:33.141457+00:00",
+    "evidence": [
+     "base URL contains DEMO marker 'demo.tradelocker.com'",
+     "account.accountType='DEMO'"
+    ],
+    "reason": null
+   },
+   "account": {
+    "balance": 10000.0,
+    "equity": 10000.0,
+    "peakEquity": 10000.0,
+    "drawdownPct": 0.0,
+    "dailyRealizedPnl": 0.0,
+    "openPnl": 0.0,
+    "dailyPnl": 0.0,
+    "tradesToday": 0,
+    "consecutiveLosses": 0,
+    "openPositions": 0
+   },
+   "symbols": [
+    {
+     "symbol": "EURUSD",
+     "stage": "CANDIDATE",
+     "outcome": "CANDIDATE",
+     "reason": null,
+     "candidate": {
+      "symbol": "EURUSD",
+      "direction": "BUY",
+      "entry": 1.1219299999999983,
+      "stopLoss": 1.1190051714285696,
+      "takeProfit": 1.1277796571428558,
+      "riskReward": 2.0,
+      "stopDistance": 0.002924828571428728,
+      "atr": 0.0011241428571427483,
+      "session": {
+       "name": "OVERLAP",
+       "quality": 1.0,
+       "tradeable": true,
+       "hourUtc": 14,
+       "weekend": false
+      },
+      "regime": {
+       "trend": "trending",
+       "volatility": "expanded",
+       "atr": 0.0011241428571427483,
+       "atrPercentile": 1.0,
+       "directionalStrength": 1.0,
+       "tradeable": true,
+       "quality": 0.85,
+       "note": "trending market in expanded volatility"
+      },
+      "htfBias": "range",
+      "h1Bias": "range",
+      "m15Bias": "bullish",
+      "alignment": "partial",
+      "sweep": {
+       "index": 75,
+       "confirmedIndex": 79,
+       "timestamp": "2026-09-10T12:45:00+00:00",
+       "direction": "bullish",
+       "level": {
+        "price": 1.1182099999999984,
+        "side": "sell",
+        "kind": "SWING",
+        "label": "swing low",
+        "weight": 0.6,
+        "touches": 1,
+        "scope": "internal"
+       },
+       "rejectionRatio": 0.943,
+       "displaced": true,
+       "structureShift": true,
+       "quality": 0.855
+      },
+      "structureEvent": {
+       "index": 76,
+       "timestamp": "2026-09-10T13:00:00+00:00",
+       "direction": "bullish",
+       "type": "BOS",
+       "level": 1.1192899999999983,
+       "close": 1.1214499999999983,
+       "displaced": true,
+       "displacementQuality": 0.85,
+       "clearanceAtr": 1.986
+      },
+      "displacement": {
+       "index": 76,
+       "timestamp": "2026-09-10T13:00:00+00:00",
+       "direction": "bullish",
+       "atrMultiple": 2.151,
+       "bodyRatio": 0.907,
+       "leavesGap": true,
+       "quality": 0.85
+      },
+      "pointOfInterest": {
+       "kind": "FVG",
+       "index": 77,
+       "timestamp": "2026-09-10T13:15:00+00:00",
+       "direction": "bullish",
+       "lower": 1.1192299999999982,
+       "upper": 1.1217499999999982,
+       "midpoint": 1.1204899999999982,
+       "sizeAtr": 2.272,
+       "displaced": true,
+       "fillFraction": 0.071,
+       "mitigated": false,
+       "invalidated": false
+      },
+      "dealingRange": {
+       "high": 1.1192899999999983,
+       "low": 1.1171299999999984,
+       "equilibrium": 1.1182099999999984,
+       "position": 1.0,
+       "zone": "premium"
+      },
+      "liquidityTarget": null,
+      "evidence": [
+       "BUY with partial multi-timeframe context",
+       "swing low swept (quality 0.85, rejection 94%)",
+       "BOS bullish clearing 1.99 ATR",
+       "displacement 2.2x ATR (quality 0.85)",
+       "entry zone: FVG",
+       "price in premium of the dealing range",
+       "regime: trending market in expanded volatility"
+      ],
+      "timestamp": "2026-09-10T14:00:00+00:00"
+     },
+     "score": {
+      "total": 74.8,
+      "tier": "A",
+      "components": {
+       "trigger": 25.0,
+       "htf_alignment": 10.8,
+       "displacement": 11.9,
+       "entry_zone": 12.0,
+       "risk_reward": 3.6,
+       "regime": 8.5,
+       "location": 0.0,
+       "session": 3.0
+      },
+      "maxima": {
+       "trigger": 25.0,
+       "htf_alignment": 18.0,
+       "displacement": 14.0,
+       "entry_zone": 12.0,
+       "risk_reward": 12.0,
+       "regime": 10.0,
+       "location": 6.0,
+       "session": 3.0
+      },
+      "notes": [
+       "trigger: sweep quality 0.85 followed by a structure shift",
+       "htf_alignment: higher timeframe is neutral, not opposed",
+       "displacement: displacement 2.2x ATR",
+       "entry_zone: fresh fair value gap",
+       "risk_reward: R:R 1:2.00",
+       "regime: trending market in expanded volatility",
+       "location: price in premium (100% of range)",
+       "session: OVERLAP session"
+      ]
+     },
+     "risk": {
+      "approved": true,
+      "state": "BUY",
+      "symbol": "EURUSD",
+      "direction": "BUY",
+      "reasons": [
+       "A setup: risk scaled up 1.15x",
+       "risking $55.57 (0.57% of $10000.00 equity)",
+       "0.19 lots, expected $111.14 at target, R:R 1:2.00",
+       "expected $111.14 at the structural target clears the $50.00 bar for a A setup (absolute floor $40.00)"
+      ],
+      "riskPct": 0.575,
+      "riskAmount": 57.5,
+      "size": {
+       "lots": 0.19,
+       "units": 19000.0,
+       "riskAmount": 57.5,
+       "actualRisk": 55.57,
+       "lossPerLot": 292.4829,
+       "conversionRate": 1.0,
+       "marginEstimate": null,
+       "notes": [
+        "quote currency USD equals account currency",
+        "raw 0.1966 lots rounded down to 0.19 (step 0.01)"
+       ]
+      },
+      "expectedProfit": 111.14,
+      "opportunity": {
+       "meetsObjective": true,
+       "expectedProfit": 111.14,
+       "targetProfit": 50.0,
+       "requiredProfit": 50.0,
+       "minimumProfit": 40.0,
+       "shortfall": 0.0,
+       "reason": "expected $111.14 at the structural target clears the $50.00 bar for a A setup (absolute floor $40.00)"
+      },
+      "exposure": {
+       "perCurrency": {
+        "EUR": 55.57,
+        "USD": -55.57
+       },
+       "correlatedRisk": 55.57,
+       "worstPair": null,
+       "totalOpenRisk": 55.57
+      },
+      "limits": {
+       "maxRiskPct": 0.01,
+       "maxPortfolioRiskPct": 0.03,
+       "maxDailyLossPct": 0.03,
+       "maxDrawdownPct": 0.1,
+       "maxOpenPositions": 3,
+       "maxTradesPerDay": 6,
+       "minRiskReward": 2.0,
+       "maxConsecutiveLosses": 4
+      },
+      "version": "risk-2.3.0"
+     },
+     "ai": null
+    }
+   ],
+   "executed": {
+    "ok": true,
+    "status": "FILLED",
+    "reason": null,
+    "executionId": "2ab7b6f21285a70c1aeeb87f2a207679",
+    "symbol": "EURUSD",
+    "direction": "BUY",
+    "quantity": 0.19,
+    "brokerOrderId": "ord-5001",
+    "brokerPositionId": "5001",
+    "fillPrice": 1.1219799999999984,
+    "slippage": 0.0
+   },
+   "skippedReason": null,
+   "errors": [],
+   "unavailable": [],
+   "decision": "BUY EURUSD"
+  }
+ },
+ "risk": {
+  "status": "LIVE",
+  "asOf": "2026-09-10T14:00:00+00:00",
+  "ageSeconds": 408333.2,
+  "stale": true,
+  "refreshError": null,
+  "data": {
+   "balance": 10000.0,
+   "equity": 10000.0,
+   "peakEquity": 10000.0,
+   "drawdownPct": 0.0,
+   "dailyRealizedPnl": 0.0,
+   "openPnl": 0.0,
+   "dailyPnl": 0.0,
+   "tradesToday": 1,
+   "consecutiveLosses": 0,
+   "openPositions": 1,
+   "killSwitch": {
+    "active": false,
+    "reason": null,
+    "detail": null,
+    "trippedAt": null
+   },
+   "limits": {
+    "baseRiskPct": 0.005,
+    "maxRiskPct": 0.01,
+    "maxPortfolioRiskPct": 0.03,
+    "maxDailyLossPct": 0.03,
+    "maxDrawdownPct": 0.1,
+    "maxOpenPositions": 3,
+    "maxTradesPerDay": 6,
+    "maxConsecutiveLosses": 4,
+    "minRiskReward": 2.0
+   },
+   "opportunityTarget": 50.0,
+   "opportunityMinimum": 40.0,
+   "profitObjective": {
+    "feasible": true,
+    "demanding": false,
+    "equity": 10000.0,
+    "maxRiskPerTrade": 100.0,
+    "comfortableProfit": 200.0,
+    "bestCaseProfit": 1000.0,
+    "minimumProfit": 40.0,
+    "requiredRiskReward": 0.4,
+    "requiredEquity": 400.0,
+    "comfortableEquity": 2000.0,
+    "reason": "reachable: $200.00 at the $100.00 risk ceiling and the 1:2 minimum R:R, versus a $40.00 floor"
+   }
+  }
+ },
+ "health": {
+  "ok": true,
+  "marketClosed": false,
+  "tradingPermitted": true,
+  "mode": "paper",
+  "paper": true,
+  "components": {
+   "mode": {
+    "ok": true,
+    "value": "paper",
+    "paper": true,
+    "description": "orders are simulated against live prices; nothing reaches the broker"
+   },
+   "profitObjective": {
+    "ok": true,
+    "feasible": true,
+    "demanding": false,
+    "equity": 10000.0,
+    "maxRiskPerTrade": 100.0,
+    "comfortableProfit": 200.0,
+    "bestCaseProfit": 1000.0,
+    "minimumProfit": 40.0,
+    "requiredRiskReward": 0.4,
+    "requiredEquity": 400.0,
+    "comfortableEquity": 2000.0,
+    "reason": "reachable: $200.00 at the $100.00 risk ceiling and the 1:2 minimum R:R, versus a $40.00 floor"
+   },
+   "database": {
+    "ok": true,
+    "backend": "sqlite",
+    "error": null
+   },
+   "broker": {
+    "ok": true,
+    "note": null,
+    "connected": true,
+    "circuit": "closed",
+    "calls": 1
+   },
+   "demo": {
+    "ok": true,
+    "verified": true,
+    "urlOk": true,
+    "accountOk": true,
+    "contradicted": false,
+    "checkedAt": "2026-09-15T07:25:33.141457+00:00",
+    "evidence": [
+     "base URL contains DEMO marker 'demo.tradelocker.com'",
+     "account.accountType='DEMO'"
+    ],
+    "reason": null
+   },
+   "marketData": {
+    "ok": true,
+    "cached": {
+     "EURUSD:H4": {
+      "ageSeconds": 0.0,
+      "candles": 70,
+      "newestClose": "2026-09-10T14:00:00+00:00"
+     },
+     "EURUSD:H1": {
+      "ageSeconds": 0.0,
+      "candles": 70,
+      "newestClose": "2026-09-10T14:00:00+00:00"
+     },
+     "EURUSD:M15": {
+      "ageSeconds": 0.0,
+      "candles": 80,
+      "newestClose": "2026-09-10T14:00:00+00:00"
+     }
+    }
+   },
+   "ai": {
+    "enabled": false,
+    "available": false,
+    "calls": 0,
+    "providers": {
+     "gemini": false,
+     "groq": false
+    },
+    "lastAttempts": [],
+    "ok": true,
+    "blockingAllTrades": false,
+    "note": null
+   },
+   "news": {
+    "enabled": false,
+    "feedAvailable": false,
+    "events": 0,
+    "ageSeconds": null,
+    "failClosed": true
+   },
+   "killSwitch": {
+    "active": false,
+    "reason": null,
+    "detail": null,
+    "trippedAt": null
+   },
+   "startup": {
+    "ok": true,
+    "error": null
+   },
+   "scanner": {
+    "enabled": true,
+    "running": false,
+    "lastScan": {
+     "scanId": "30a64f83410b",
+     "at": "2026-09-15T07:25:33.162224+00:00",
+     "source": "manual",
+     "decision": "BUY EURUSD"
+    }
+   },
+   "reconcile": {
+    "checkedPositions": 0,
+    "adoptedOrphans": [],
+    "closedStale": [],
+    "resolvedIntents": [],
+    "unresolvedIntents": [],
+    "unprotected": [],
+    "errors": [],
+    "clean": true,
+    "at": "2026-09-15T07:25:33.140129+00:00"
+   },
+   "market": {
+    "ok": true,
+    "open": true,
+    "note": null
+   }
+  },
+  "uptimeSeconds": 0,
+  "versions": {
+   "system": "3.11.0",
+   "smc": "smc-2.0.0",
+   "scoring": "score-2.0.0",
+   "risk": "risk-2.3.0",
+   "execution": "exec-2.6.0",
+   "ai_prompt": "ai-prompt-2.0.0"
+  },
+  "symbols": [
+   "EURUSD"
+  ],
+  "reconciliations": [
+   {
+    "id": 2,
+    "kind": "PERIODIC",
+    "symbol": null,
+    "detail": {
+     "checkedPositions": 0,
+     "adoptedOrphans": [],
+     "closedStale": [],
+     "resolvedIntents": [],
+     "unresolvedIntents": [],
+     "unprotected": [],
+     "errors": [],
+     "clean": true,
+     "at": "2026-09-15T07:25:33.140129+00:00"
+    },
+    "created_at": "2026-09-15T07:25:33.140423+00:00"
+   },
+   {
+    "id": 1,
+    "kind": "PERIODIC",
+    "symbol": null,
+    "detail": {
+     "checkedPositions": 0,
+     "adoptedOrphans": [],
+     "closedStale": [],
+     "resolvedIntents": [],
+     "unresolvedIntents": [],
+     "unprotected": [],
+     "errors": [],
+     "clean": true,
+     "at": "2026-09-15T07:25:33.137272+00:00"
+    },
+    "created_at": "2026-09-15T07:25:33.137950+00:00"
+   }
+  ],
+  "upcomingNews": []
+ },
+ "generatedAt": "2026-09-15T07:25:33.164281+00:00"
+}

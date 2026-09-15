@@ -1,0 +1,99 @@
+{
+ "ready": false,
+ "missingRequired": [
+  "TRADELOCKER_EMAIL",
+  "TRADELOCKER_PASSWORD",
+  "TRADELOCKER_SERVER",
+  "TRADELOCKER_ACC_ID"
+ ],
+ "missingRecommended": [
+  "TRADELOCKER_URL",
+  "DATABASE_URL",
+  "DASHBOARD_TOKEN"
+ ],
+ "settings": [
+  {
+   "name": "TRADELOCKER_EMAIL",
+   "importance": "required",
+   "purpose": "The email you sign in to TradeLocker with.",
+   "present": false,
+   "example": "TRADELOCKER_EMAIL=your@email.com"
+  },
+  {
+   "name": "TRADELOCKER_PASSWORD",
+   "importance": "required",
+   "purpose": "Your TradeLocker password.",
+   "present": false,
+   "example": "TRADELOCKER_PASSWORD="
+  },
+  {
+   "name": "TRADELOCKER_SERVER",
+   "importance": "required",
+   "purpose": "The server name shown on the TradeLocker login screen (e.g. GATESFX).",
+   "present": false,
+   "example": "TRADELOCKER_SERVER="
+  },
+  {
+   "name": "TRADELOCKER_ACC_ID",
+   "importance": "required",
+   "purpose": "The account number shown after the '#' in the account switcher.",
+   "present": false,
+   "example": "TRADELOCKER_ACC_ID="
+  },
+  {
+   "name": "TRADELOCKER_URL",
+   "importance": "recommended",
+   "purpose": "The DEMO API endpoint. Defaults to the demo host; a live URL is refused.",
+   "present": false,
+   "example": "TRADELOCKER_URL=https://demo.tradelocker.com/backend-api"
+  },
+  {
+   "name": "DATABASE_URL",
+   "importance": "recommended",
+   "purpose": "PostgreSQL. WITHOUT THIS the kill switch, daily-loss counter and drawdown state reset on every redeploy, because the filesystem is ephemeral. Add a PostgreSQL plugin and this is set for you.",
+   "present": false,
+   "example": ""
+  },
+  {
+   "name": "DASHBOARD_TOKEN",
+   "importance": "recommended",
+   "purpose": "Protects the pause, kill-switch and manual-scan controls. Any long random string.",
+   "present": false,
+   "example": "DASHBOARD_TOKEN="
+  },
+  {
+   "name": "TRADED_SYMBOLS",
+   "importance": "optional",
+   "purpose": "Which pairs to scan. Accepts bare pairs (EURUSD) or your broker's exact names (EURUSD.R) \u2014 both resolve.",
+   "present": false,
+   "example": "TRADED_SYMBOLS=EURUSD,GBPUSD,USDJPY,AUDUSD,USDCHF,XAUUSD"
+  },
+  {
+   "name": "TRADING_MODE",
+   "importance": "optional",
+   "purpose": "'paper' simulates fills against live prices and sends nothing to the broker (the default). 'demo_live' places real orders on the DEMO account.",
+   "present": false,
+   "example": "TRADING_MODE=paper"
+  },
+  {
+   "name": "GEMINI_API_KEY",
+   "importance": "optional",
+   "purpose": "Optional AI review. AI can only VETO a trade, never create or change one. Leave blank to run fully deterministically.",
+   "present": false,
+   "example": ""
+  },
+  {
+   "name": "GROQ_API_KEY",
+   "importance": "optional",
+   "purpose": "Optional AI review fallback. Same veto-only role.",
+   "present": false,
+   "example": ""
+  }
+ ],
+ "warnings": [
+  "No DATABASE_URL: risk state (kill switch, daily loss, drawdown, losing streak) will reset on every redeploy. Add a PostgreSQL plugin before trading for real.",
+  "No DASHBOARD_TOKEN: the controls that can START trading \u2014 clearing the kill switch, resuming the scanner, switching strategy, running a manual scan \u2014 are DISABLED, because this deployment is reachable by anyone who learns its hostname and hostnames are published in certificate transparency logs. Stopping the bot still works without it. Set DASHBOARD_TOKEN to any long random string, then unlock the dashboard with the same value."
+ ],
+ "pasteBlock": "TRADELOCKER_EMAIL=your@email.com\nTRADELOCKER_PASSWORD=\nTRADELOCKER_SERVER=\nTRADELOCKER_ACC_ID=\nTRADELOCKER_URL=https://demo.tradelocker.com/backend-api\nDASHBOARD_TOKEN=\nTRADED_SYMBOLS=EURUSD,GBPUSD,USDJPY,AUDUSD,USDCHF,XAUUSD\nTRADING_MODE=paper",
+ "nextStep": "Set 4 required variable(s): TRADELOCKER_EMAIL, TRADELOCKER_PASSWORD, TRADELOCKER_SERVER, TRADELOCKER_ACC_ID. Paste the block below into your host's environment variables, fill in the blanks, and redeploy."
+}

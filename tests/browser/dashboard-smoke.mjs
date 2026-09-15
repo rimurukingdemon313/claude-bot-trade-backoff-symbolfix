@@ -37,10 +37,13 @@ if (!fs.existsSync(DIST)) {
   process.exit(1);
 }
 
+/** Which snapshot fixture the next page load should receive. */
+let snapshotFixture = "snapshot.json";
+
 const server = http.createServer((req, res) => {
   const url = req.url.split("?")[0];
   if (url.startsWith("/api/")) {
-    const name = url.slice("/api/".length) + ".json";
+    const name = url === "/api/snapshot" ? snapshotFixture : url.slice("/api/".length) + ".json";
     const file = path.join(FIXTURES, name);
     const body = fs.existsSync(file)
       ? fs.readFileSync(file, "utf8")
@@ -66,7 +69,8 @@ const browser = await chromium.launch({
 /** An aborted fetch is the scenario, not a fault — only page errors count. */
 const isPageFault = (line) => !line.includes("Failed to load resource");
 
-async function render(label, { hangApi = false } = {}) {
+async function render(label, { hangApi = false, fixture = "snapshot.json", expect = [], reject = [] } = {}) {
+  snapshotFixture = fixture;
   const page = await browser.newPage();
   const faults = [];
   page.on("pageerror", (error) => faults.push(`${label}: ${error.message}`));
@@ -87,13 +91,29 @@ async function render(label, { hangApi = false } = {}) {
   if (body.includes("dashboard hit an error")) {
     faults.push(`${label}: the error boundary caught a render failure`);
   }
+  for (const wanted of expect) {
+    if (!body.includes(wanted)) faults.push(`${label}: expected to see ${JSON.stringify(wanted)}`);
+  }
+  for (const unwanted of reject) {
+    if (body.includes(unwanted)) faults.push(`${label}: must not show ${JSON.stringify(unwanted)}`);
+  }
   await page.close();
   return faults;
 }
 
 const faults = [
-  ...(await render("loaded")),
+  ...(await render("loaded", { expect: ["HEALTHY", "SCANNING"], reject: ["CONNECTING", "UNKNOWN"] })),
   ...(await render("loading", { hangApi: true })),
+  // The kill switch lives in the database, so an operator must still see
+  // and use it when the BROKER is the thing that is down. Reading it from
+  // the risk panel — which needs a broker read to exist at all — rendered
+  // a perfectly readable switch as UNKNOWN and disabled the controls with
+  // it, which is exactly what rule 15 exists to prevent.
+  ...(await render("broker down", {
+    fixture: "snapshot.broker-down.json",
+    expect: ["SCANNING"],
+    reject: ["UNKNOWN"],
+  })),
 ];
 
 await browser.close();

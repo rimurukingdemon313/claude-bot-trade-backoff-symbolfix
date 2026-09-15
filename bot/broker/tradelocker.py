@@ -165,9 +165,20 @@ def decode_token_claims(token: str | None) -> dict[str, Any] | None:
 class TradeLockerBroker:
     """Thread-safe TradeLocker client for a single DEMO account."""
 
-    def __init__(self, config: TradingConfig, transport: HttpTransport | None = None) -> None:
+    def __init__(
+        self,
+        config: TradingConfig,
+        transport: HttpTransport | None = None,
+        *,
+        spec_store: Any = None,
+    ) -> None:
         self.config = config
         self.broker_config = config.broker
+        #: Optional persistent memory for contract sizes (see
+        #: InstrumentSpecRepository). Optional so the adapter stays usable
+        #: without a database — the doctor constructs one before storage
+        #: exists — and so this module keeps knowing nothing about SQL.
+        self.spec_store = spec_store
         self.transport = transport or HttpTransport(
             timeout=config.broker.request_timeout,
             max_attempts=config.broker.max_attempts,
@@ -175,7 +186,12 @@ class TradeLockerBroker:
                 failure_threshold=config.broker.circuit_failure_threshold,
                 reset_seconds=config.broker.circuit_reset_seconds,
             ),
-            throttle=Throttle(min_interval=0.15),
+            # From configuration, not a literal. BROKER_MIN_REQUEST_INTERVAL
+            # and its 0.6s default were added to stop Cloudflare answering
+            # 1015 and never read by anything — so the live bot kept
+            # spacing requests at 0.15s, four times faster than the number
+            # the operator could see in the config and in /health.
+            throttle=Throttle(min_interval=config.broker.min_request_interval),
         )
         self._lock = threading.RLock()
         self._access_token: str | None = None
@@ -658,7 +674,17 @@ class TradeLockerBroker:
                 None,
             )
 
+        instrument_key = str(
+            int(_num(_first(raw, "tradableInstrumentId", "id", default=0), 0) or 0)
+        )
         contract_size = read_contract_size(details)
+        if (contract_size is None or contract_size <= 0) and self.spec_store is not None:
+            # Learned once, on some earlier run. A contract size does not
+            # change, so paying a request for it again is spending a rate
+            # limit on information the bot already has — and with 23
+            # symbols that was the spend that opened the circuit before a
+            # scan could finish.
+            contract_size = self.spec_store.contract_size(instrument_key)
         if contract_size is None or contract_size <= 0:
             # Only now is the second call worth making. Brands that put the
             # size in the directory cost nothing extra; GATESFX does not,
@@ -667,6 +693,25 @@ class TradeLockerBroker:
             info_route_id = int(_num((info_route or {}).get("id"), 0) or 0) or None
             details.update(self._instrument_details(raw, info_route_id))
             contract_size = read_contract_size(details)
+            if (
+                contract_size is not None
+                and contract_size > 0
+                and self.spec_store is not None
+                and instrument_key != "0"
+            ):
+                # Only a SUCCESSFUL lookup is remembered. Caching a failure
+                # as a fact would make one bad minute permanent.
+                try:
+                    self.spec_store.remember(
+                        instrument_key, float(contract_size), symbol=str(raw.get("name", ""))
+                    )
+                except Exception as exc:  # noqa: BLE001 - storage must never block a read
+                    log_event(
+                        "BROKER",
+                        f"could not persist the contract size for {symbol}: {exc}",
+                        severity="warning",
+                        symbol=symbol,
+                    )
         tick_size = _num(_first(details, "tickSize", "minPriceIncrement", "pipSize", default=None), None)
         digits_raw = _first(details, "digits", "precision", "pricePrecision", default=None)
         digits = int(_num(digits_raw, 5) or 5)

@@ -27,7 +27,7 @@ from ..observability import log_event
 #: Bump when ddl() changes. Every statement is CREATE ... IF NOT EXISTS, so
 #: migration stays idempotent and safe to run on every boot; the version is
 #: recorded so a deployment's schema generation is attributable.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 #: (table, column, definition) added after the first release. Applied on
 #: every boot and safe to re-run: an existing column raises and is ignored.
@@ -320,6 +320,21 @@ class Database:
                 -- account.
                 account_id TEXT,
                 created_at TEXT NOT NULL
+            )
+            """,
+            f"""
+            -- Broker metadata that does not change: the contract size for
+            -- an instrument is a property of the instrument, not of a
+            -- session. TradeLocker's instrument DIRECTORY omits it, so it
+            -- costs one request per symbol to learn, and re-learning 23 of
+            -- them on every restart and every hourly directory refresh is
+            -- what pushed the account over Cloudflare's rate limit and
+            -- opened the circuit before a single scan could finish.
+            CREATE TABLE IF NOT EXISTS instrument_specs (
+                instrument_id TEXT PRIMARY KEY,
+                symbol TEXT,
+                contract_size REAL NOT NULL,
+                fetched_at TEXT NOT NULL
             )
             """,
             f"""

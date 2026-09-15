@@ -176,8 +176,20 @@ export default function Dashboard() {
   // not the same statement, and only one of them is safe to act on.
   const scannerKnown = health?.components?.scanner?.enabled !== undefined;
   const scannerEnabled = Boolean(health?.components?.scanner?.enabled);
-  const killKnown = risk?.killSwitch?.active !== undefined;
-  const killActive = Boolean(risk?.killSwitch?.active);
+  // Read the kill switch from HEALTH, not from the risk panel. It lives in
+  // the database and has nothing to do with the broker, but `risk` needs a
+  // successful broker read to be composed at all — so an outage used to
+  // render a perfectly readable switch as UNKNOWN and disable the
+  // controls with it. Rule 15 says an operator must be able to stop the
+  // bot from any device having lost anything; a display that cannot show
+  // the switch because a price feed is down fails that. `risk` remains the
+  // fallback so nothing regresses if health is the half that is missing.
+  const killState =
+    health?.components?.killSwitch?.active !== undefined
+      ? health.components.killSwitch
+      : risk?.killSwitch;
+  const killKnown = killState?.active !== undefined;
+  const killActive = Boolean(killState?.active);
   const stateKnown = scannerKnown && killKnown;
   const demoVerified = Boolean(data?.account?.data?.demoVerified);
   const busy = manualScan.isPending || reconcile.isPending;

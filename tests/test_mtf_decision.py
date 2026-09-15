@@ -641,3 +641,116 @@ def test_the_kill_switch_outranks_every_classification(cfg):
     )
     assert not decision.approved
     assert any("kill switch" in reason for reason in decision.reasons)
+
+
+# -- the MTF layer's own no-look-ahead guarantee ---------------------------
+
+
+def test_the_mtf_layer_at_bar_i_cannot_see_bar_i_plus_one(cfg):
+    """Rule 4, asserted on this layer and not only on the detectors.
+
+    `test_analysis_on_bar_i_cannot_see_bar_i_plus_one` proves the
+    DETECTORS are honest. It says nothing about what the decision layer
+    does with their output, and this layer was selecting a displacement
+    with `abs(move.index - reference) <= 6` and no upper bound at all -
+    so bar 79 could answer bar 76. Production never noticed because
+    production always asks about the last bar; a walk-forward backtest
+    would have been scored against candles it could not have seen.
+    """
+
+    engine = SmcEngine(cfg)
+    m15 = engine.analyze_timeframe(bullish_setup_m15(), timeframe="M15", now=SETUP_END)
+
+    for cut in range(40, m15.last_index + 1):
+        for wanted in ("bullish", "bearish"):
+            evidence = mtf.gather_direction_evidence(
+                m15, wanted, index=cut, smc=cfg.smc, mtf=cfg.mtf
+            )
+            if evidence.sweep is not None:
+                assert evidence.sweep.confirmed_index <= cut
+                assert evidence.sweep.index <= cut
+            if evidence.structure_event is not None:
+                assert evidence.structure_event.index <= cut
+            if evidence.choch is not None:
+                assert evidence.choch.index <= cut
+            if evidence.displacement is not None:
+                assert evidence.displacement.index <= cut, (
+                    f"a displacement at {evidence.displacement.index} answered bar {cut}"
+                )
+            assert evidence.latest_trigger_index <= cut
+
+
+def test_a_displacement_after_the_asked_bar_is_never_selected(cfg):
+    """The exact defect, pinned with an injected future candle.
+
+    Built rather than hunted: no fixture happened to place a displacement
+    in the window AFTER the trigger, which is why the bug survived a green
+    suite. Constructing it makes the guarantee testable instead of lucky.
+    """
+
+    engine = SmcEngine(cfg)
+    m15 = engine.analyze_timeframe(bullish_setup_m15(), timeframe="M15", now=SETUP_END)
+    real = next(d for d in m15.displacements if d.direction == "bullish")
+
+    future = dataclasses.replace(real, index=real.index + 3, quality=1.0)
+    tampered = dataclasses.replace(m15, displacements=m15.displacements + (future,))
+
+    evidence = mtf.gather_direction_evidence(
+        tampered, "bullish", index=real.index, smc=cfg.smc, mtf=cfg.mtf
+    )
+    assert evidence.displacement is not None
+    assert evidence.displacement.index <= real.index
+    assert evidence.displacement.quality < 1.0, "the future candle was preferred on quality"
+
+
+def test_recency_is_measured_on_the_latest_trigger_not_the_graded_one(cfg):
+    """A strong old sweep must not make a fresh signal look stale.
+
+    The sweep carried on the evidence is chosen by QUALITY, because that
+    is what grading needs. The recency comparison between directions needs
+    the opposite: the most recent qualifying trigger, whichever it is.
+    Conflating them let a direction be judged stale on the strength of its
+    own best evidence - and being judged stale is what hands the trade to
+    the other side.
+    """
+
+    engine = SmcEngine(cfg)
+    m15 = engine.analyze_timeframe(bullish_setup_m15(), timeframe="M15", now=SETUP_END)
+    evidence = mtf.gather_direction_evidence(
+        m15, "bullish", index=m15.last_index, smc=cfg.smc, mtf=cfg.mtf
+    )
+    assert evidence.latest_trigger_index >= evidence.reference_index
+
+    strong_but_old = next(s for s in m15.sweeps if s.direction == "bullish")
+    fresh_but_weak = dataclasses.replace(
+        strong_but_old,
+        index=m15.last_index,
+        confirmed_index=m15.last_index,
+        quality=strong_but_old.quality / 3.0,
+    )
+    both = dataclasses.replace(m15, sweeps=m15.sweeps + (fresh_but_weak,))
+    evidence = mtf.gather_direction_evidence(
+        both, "bullish", index=m15.last_index, smc=cfg.smc, mtf=cfg.mtf
+    )
+    assert evidence.sweep.quality == strong_but_old.quality, "grading takes the best sweep"
+    assert evidence.latest_trigger_index == m15.last_index, "recency takes the newest"
+
+
+def test_a_neutral_timeframe_is_never_read_as_opposed(cfg):
+    """`_opposite("range")` returned "bullish" from a bare else.
+
+    That makes `h4.bias == opposing` accidentally true for a neutral H4
+    against a bearish setup - a timeframe with no opinion reading as one
+    that disagrees, which is the exact failure this layer exists to end.
+    """
+
+    assert mtf._opposite("bullish") == "bearish"
+    assert mtf._opposite("bearish") == "bullish"
+    assert mtf._opposite("range") == ""
+    assert mtf._opposite("") == ""
+
+    # And a neutral H4 still scores as context, not as opposition.
+    candidate, rejection, decision = evaluate(cfg, bullish_setup_m15(), h4=NEUTRAL, h1=BULLISH)
+    assert candidate is not None, rejection
+    assert decision.setup_type == mtf.CONTINUATION
+    assert decision.alignment == "partial"

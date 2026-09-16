@@ -394,6 +394,17 @@ class SchedulerConfig:
     scan_interval_minutes: int = 15
     scan_offset_seconds: int = 20
     position_poll_seconds: int = 30
+    #: How often to re-read positions when there are NONE open.
+    #:
+    #: Polling every 30s with nothing to manage was the single largest
+    #: source of broker traffic in this system - 2.7x the scans - and all
+    #: of it spent asking about positions that did not exist. A position
+    #: can only appear two ways, and both are already covered: the bot
+    #: opening one (which refreshes this view immediately) or somebody
+    #: opening one by hand (which the reconciler finds). So the fast poll
+    #: buys nothing while flat, and it was buying it at the price of the
+    #: rate limit the scans needed.
+    idle_position_poll_seconds: int = 180
     reconcile_interval_seconds: int = 300
     max_scan_duration_seconds: float = 240.0
 
@@ -685,6 +696,9 @@ def load_config(env: Mapping[str, str] | None = None) -> TradingConfig:
     scheduler = SchedulerConfig(
         scan_interval_minutes=_env_int("SCAN_INTERVAL_MINUTES", 15, low=1, high=240),
         position_poll_seconds=_env_int("POSITION_POLL_SECONDS", 30, low=5, high=600),
+        idle_position_poll_seconds=_env_int(
+            "IDLE_POSITION_POLL_SECONDS", 180, low=5, high=3600
+        ),
         reconcile_interval_seconds=_env_int("RECONCILE_INTERVAL_SECONDS", 300, low=30, high=3600),
     )
     mtf = MtfConfig(

@@ -63,7 +63,20 @@ class DashboardApi:
     #: plus a margin means an ordinary late poll does not flash a warning,
     #: while a genuinely stuck refresh shows up within a minute or so.
     def _stale_after(self) -> float:
-        return max(30.0, self.config.scheduler.position_poll_seconds * 2.5)
+        """How old a broker read may be before the page marks it stale.
+
+        Measured against the SLOWER of the two poll cadences. While the
+        account is flat the position poll deliberately backs off, and a
+        page that cried "stale" at a bot behaving exactly as designed
+        would teach the operator to ignore the warning that one day is
+        real.
+        """
+
+        scheduler = self.config.scheduler
+        slowest = max(
+            scheduler.position_poll_seconds, scheduler.idle_position_poll_seconds
+        )
+        return max(30.0, slowest * 1.5)
 
     def _unread(self, read: CachedRead, what: str) -> dict[str, Any]:
         """Nothing has ever been read, so there is nothing to show.

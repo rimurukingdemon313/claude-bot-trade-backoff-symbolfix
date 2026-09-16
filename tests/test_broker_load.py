@@ -295,3 +295,199 @@ def test_the_backoff_can_never_hide_a_position_from_the_reconciler(config, broke
     )
     report = orchestrator.reconciler.reconcile()
     assert report.checked_positions == 1, "the reconciler must see it regardless"
+
+
+# -- finding a limit nobody knows -----------------------------------------
+
+
+class FakeHost:
+    """A host with a SECRET burst limit, on a clock the test controls.
+
+    The point of the control loop is that the limit is unknown and
+    unmeasurable without tripping it. A test that told the throttle the
+    answer would be testing nothing, so this never does: the limit lives
+    here and the throttle only ever sees 429s.
+    """
+
+    def __init__(self, *, requests_per_minute: float) -> None:
+        self.window = 60.0
+        self.allowed = requests_per_minute
+        self.now = 0.0
+        self.times: list[float] = []
+        self.refusals = 0
+        self.served = 0
+
+    def sleep(self, seconds: float) -> None:
+        self.now += max(0.0, seconds)
+
+    def request(self) -> bool:
+        """True if served, False if the host refused (429)."""
+
+        self.times = [t for t in self.times if t > self.now - self.window]
+        if len(self.times) >= self.allowed:
+            self.refusals += 1
+            return False
+        self.times.append(self.now)
+        self.served += 1
+        return True
+
+
+def _drive(throttle: Throttle, host: FakeHost, *, requests: int) -> None:
+    """Run `requests` through the throttle against the host."""
+
+    for _ in range(requests):
+        throttle.wait()
+        host.now += 0.01  # the request itself takes a moment
+        if host.request():
+            throttle.record_success()
+        else:
+            throttle.penalise(60.0)
+
+
+def test_the_throttle_finds_a_limit_it_was_never_told(monkeypatch):
+    """The whole point, stated as a measurement.
+
+    Configured for 100 requests/minute against a host that allows 40. A
+    fixed interval cannot solve this - it is either too slow forever or
+    refused forever, and picking between them is what every previous
+    attempt on this failure did.
+    """
+
+    host = FakeHost(requests_per_minute=40)
+    throttle = Throttle(min_interval=0.6, sleeper=host.sleep)
+    monkeypatch.setattr("bot.broker.http.time.monotonic", lambda: host.now)
+
+    assert 60 / throttle.interval > host.allowed, "must start too fast, or nothing is learned"
+
+    _drive(throttle, host, requests=400)
+
+    learned_rate = 60 / throttle.interval
+    assert learned_rate <= host.allowed * 1.2, (
+        f"settled at {learned_rate:.0f}/min against a limit of {host.allowed}/min"
+    )
+    assert throttle.interval <= throttle.max_interval
+
+
+def test_it_stops_being_refused_once_it_has_learned(monkeypatch):
+    """Convergence is only worth anything if the refusals stop."""
+
+    host = FakeHost(requests_per_minute=40)
+    throttle = Throttle(min_interval=0.6, sleeper=host.sleep)
+    monkeypatch.setattr("bot.broker.http.time.monotonic", lambda: host.now)
+
+    _drive(throttle, host, requests=200)
+    early = host.refusals
+    _drive(throttle, host, requests=200)
+    late = host.refusals - early
+
+    assert late < early, f"still being refused after learning: {early} then {late}"
+    assert late <= 1, f"{late} refusals in the second half — it has not settled"
+
+
+def test_a_generous_host_is_not_slowed_down_forever(monkeypatch):
+    """One bad minute must not cost the rest of the day.
+
+    The decrease is multiplicative and the recovery additive, so a host
+    that turns out to be generous is paid back for gradually rather than
+    being punished permanently.
+    """
+
+    host = FakeHost(requests_per_minute=10_000)
+    throttle = Throttle(min_interval=0.6, sleeper=host.sleep)
+    monkeypatch.setattr("bot.broker.http.time.monotonic", lambda: host.now)
+
+    throttle.penalise(60.0)
+    widened = throttle.interval
+    assert widened > 0.6, "a refusal must widen the spacing"
+
+    _drive(throttle, host, requests=1000)
+    assert throttle.interval < widened, "sustained success must narrow it back"
+    assert throttle.interval >= throttle.min_interval, "never below the configured floor"
+
+
+def test_the_spacing_never_exceeds_its_ceiling(monkeypatch):
+    """A host refusing everything must not stall the bot indefinitely."""
+
+    host = FakeHost(requests_per_minute=0)
+    throttle = Throttle(min_interval=0.6, max_interval=3.0, sleeper=host.sleep)
+    monkeypatch.setattr("bot.broker.http.time.monotonic", lambda: host.now)
+
+    for _ in range(50):
+        throttle.penalise(60.0)
+    assert throttle.interval == 3.0
+
+
+def test_health_reports_the_spacing_actually_in_force(monkeypatch):
+    """Rule 6 applies to the bot's own settings.
+
+    /health reported the configured floor while the loop ran wider. That
+    is the same class of untruth that sent three diagnoses of this
+    failure in the wrong direction.
+    """
+
+    wire = _transport(throttle=Throttle(min_interval=0.6, sleeper=lambda _s: None))
+    wire.throttle.penalise(60.0)
+    health = wire.health()
+    assert health["requestSpacingSeconds"] > 0.6
+    assert health["requestSpacingFloorSeconds"] == 0.6
+
+
+def test_what_one_run_learns_survives_the_next_restart(config):
+    """Railway restarts the process on every deploy.
+
+    Finding the limit costs a handful of refusals, and without this the
+    bot bought the same answer again on every push — several times a day
+    during active work.
+    """
+
+    from bot.service import BotService
+
+    throttle = Throttle(min_interval=0.6, sleeper=lambda _s: None)
+    for _ in range(3):
+        throttle.penalise(60.0)
+    learned = throttle.interval
+    assert learned > 0.6
+
+    service = object.__new__(BotService)
+    service.repos = repos_for(config)
+    service.live_broker = _broker_with(throttle)
+    service._persist_request_spacing()
+
+    fresh = Throttle(min_interval=0.6, sleeper=lambda _s: None)
+    assert fresh.interval == 0.6
+    service.live_broker = _broker_with(fresh)
+    service._restore_request_spacing()
+    assert fresh.interval == pytest.approx(learned, abs=0.01)
+
+
+def test_a_stored_spacing_is_never_trusted_past_the_configured_band(config):
+    """A value from a different configuration must not widen the floor."""
+
+    throttle = Throttle(min_interval=0.6, max_interval=3.0, sleeper=lambda _s: None)
+    throttle.restore(0.01)
+    assert throttle.interval == 0.6, "a stored value must not go below the floor"
+    throttle.restore(999.0)
+    assert throttle.interval == 3.0, "nor above the ceiling"
+    throttle.restore("not a number")  # type: ignore[arg-type]
+    assert throttle.interval == 3.0, "nor corrupt it"
+    throttle.restore(-5.0)
+    assert throttle.interval == 3.0
+
+
+def repos_for(config):
+    from bot.storage.db import in_memory_database
+    from bot.storage.repositories import Repositories
+
+    return Repositories(in_memory_database())
+
+
+def _broker_with(throttle):
+    class _Transport:
+        def __init__(self, t):
+            self.throttle = t
+
+    class _Broker:
+        def __init__(self, t):
+            self.transport = _Transport(t)
+
+    return _Broker(throttle)

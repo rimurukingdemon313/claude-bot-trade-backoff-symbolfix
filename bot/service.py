@@ -108,6 +108,8 @@ class BotService:
         # failed on "broker circuit open after 5 consecutive failures"
         # at an uptime of zero minutes. The diagnostic was preventing the
         # thing it exists to diagnose.
+        self._restore_request_spacing()
+
         if _env_flag("STARTUP_DOCTOR", default=True):
             self._log_startup_verification()
 
@@ -195,7 +197,41 @@ class BotService:
             return
         self.orchestrator.reconcile()
 
+    STATE_REQUEST_SPACING = "broker_request_spacing"
+
+    def _restore_request_spacing(self) -> None:
+        """Resume the request spacing the last run converged on."""
+
+        throttle = getattr(self.live_broker, "transport", None)
+        throttle = getattr(throttle, "throttle", None)
+        if throttle is None:
+            return
+        try:
+            stored = self.repos.state.get(self.STATE_REQUEST_SPACING)
+        except Exception:  # noqa: BLE001 - storage health is reported elsewhere
+            return
+        if stored is None:
+            return
+        throttle.restore(stored)
+        log_event(
+            "STARTUP",
+            f"resuming the request spacing learned previously: {throttle.interval:.2f}s "
+            f"({60 / throttle.interval:.0f} requests/minute)",
+            spacing_seconds=round(throttle.interval, 3),
+        )
+
+    def _persist_request_spacing(self) -> None:
+        throttle = getattr(self.live_broker, "transport", None)
+        throttle = getattr(throttle, "throttle", None)
+        if throttle is None:
+            return
+        try:
+            self.repos.state.set(self.STATE_REQUEST_SPACING, round(throttle.interval, 3))
+        except Exception:  # noqa: BLE001 - never let bookkeeping break the bot
+            pass
+
     def _maintenance(self) -> None:
+        self._persist_request_spacing()
         self.repos.equity.prune(keep=5000)
 
     @staticmethod

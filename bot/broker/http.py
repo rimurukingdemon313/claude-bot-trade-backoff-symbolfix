@@ -118,44 +118,132 @@ class CircuitBreaker:
 
 
 class Throttle:
-    """Minimum spacing between outbound requests, plus a shared cooldown.
+    """Request spacing that LEARNS the host's limit instead of guessing it.
 
     TradeLocker sits behind Cloudflare, which rate-limits bursts (HTTP
-    429 / error 1015). Spacing requests at the source is cheaper and more
-    reliable than absorbing 429s after the fact.
+    429 / error 1015). Every previous attempt on this failure picked a
+    number and hoped: 0.15s, then 0.6s, then a longer cooldown, then a
+    bigger circuit backoff. They were guesses, because the limit is not
+    published and cannot be measured without tripping it.
 
-    Two mechanisms, because spacing alone was not enough:
+    They also measured the wrong thing. Volume per HOUR fell by 64% over
+    those attempts while the BURST rate never moved: 0.6s spacing is 100
+    requests a minute for as long as a scan lasts, and a burst limit
+    counts the burst. An average of 3.6/minute means nothing to it.
 
-    1. `min_interval` — the floor between any two requests. The scan,
-       the position poll and the reconcile run on separate threads and
-       share one transport, so this lock is what keeps them from
-       interleaving into a burst.
+    So this stops guessing. Spacing is a control loop, not a constant:
 
-    2. `penalise()` — a cooldown every caller observes. Per-request
-       backoff was the original design and it does not work across
-       threads: the thread that received the 429 slept while the other
-       two carried straight on hammering the same host, which is how a
-       single rate limit became a sustained one. A limit is a property of
-       the HOST, not of the unlucky request that discovered it.
+    * a 429 WIDENS the spacing multiplicatively — the host has just said
+      the current rate is too fast, which is the only reliable
+      information about the limit anyone gets;
+    * sustained success NARROWS it back, one small step at a time, so a
+      single bad minute does not slow the bot down for the rest of the
+      day;
+    * `min_interval` is the floor it decays toward and `max_interval` the
+      ceiling it can never exceed.
+
+    That is additive-increase/multiplicative-decrease, for the same
+    reason TCP uses it: it converges on a limit nobody has to know, and
+    it re-converges by itself when the limit changes.
+
+    Three mechanisms in total, each for a different failure:
+
+    1. the learned interval above — the sustained rate;
+    2. `penalise()` — a cooldown EVERY caller observes, because a limit
+       is a property of the host, not of the unlucky request that found
+       it. Per-request backoff let the other threads carry on hammering,
+       which is how one rate limit became a sustained one;
+    3. the lock — the scan, the position poll and the reconcile run on
+       separate threads and share one transport, so without it they
+       interleave into exactly the burst this is trying to avoid.
     """
 
-    def __init__(self, min_interval: float = 0.6, *, sleeper: Any = time.sleep) -> None:
+    #: Multiplier applied to the spacing each time the host refuses us.
+    BACKOFF_FACTOR = 1.6
+    #: Successful requests required before narrowing the spacing again.
+    #: Deliberately larger than a scan, so recovery is evidence that a
+    #: whole cycle fits under the limit rather than that one request did.
+    RECOVERY_SUCCESSES = 40
+    #: How much to narrow by, per recovery step. Small: re-finding the
+    #: limit costs a 429, and the point is to stop paying for those.
+    RECOVERY_STEP = 0.05
+
+    def __init__(
+        self,
+        min_interval: float = 0.6,
+        *,
+        max_interval: float = 6.0,
+        sleeper: Any = time.sleep,
+    ) -> None:
         self.min_interval = min_interval
+        self.max_interval = max(min_interval, max_interval)
         # Injectable for the same reason the clock is (project rule 10):
         # a test that really sleeps is a test nobody runs. This class used
         # time.sleep directly while the transport beside it already took a
         # sleeper, so raising the production interval silently added
         # minutes to the suite.
         self._sleep = sleeper
+        self._interval = min_interval
+        self._successes = 0
         self._last = 0.0
         self._penalty_until = 0.0
         self._lock = threading.Lock()
 
+    @property
+    def interval(self) -> float:
+        """The spacing currently in force — learned, not configured."""
+
+        return self._interval
+
+    def restore(self, interval: float) -> None:
+        """Start from what a previous run learned.
+
+        Finding the limit costs a handful of refusals, and this deploy
+        restarts the process on every push — so without this the bot
+        re-bought the same answer several times a day. Clamped to the
+        configured band, never trusted blindly: a stored value from a
+        different configuration must not widen the floor or breach the
+        ceiling.
+        """
+
+        try:
+            value = float(interval)
+        except (TypeError, ValueError):
+            return
+        if value <= 0:
+            return
+        with self._lock:
+            self._interval = max(self.min_interval, min(self.max_interval, value))
+            self._successes = 0
+
     def penalise(self, seconds: float) -> None:
-        """Hold every caller back — the host asked us to stop, not this call."""
+        """The host refused us. Hold everyone back AND slow down for good.
+
+        The cooldown rides out this refusal; widening the interval is what
+        stops the next one. Doing only the first is why this failure kept
+        coming back: the bot waited a minute and then resumed at exactly
+        the rate that had just been refused.
+        """
 
         with self._lock:
-            self._penalty_until = max(self._penalty_until, time.monotonic() + max(0.0, seconds))
+            self._penalty_until = max(
+                self._penalty_until, time.monotonic() + max(0.0, seconds)
+            )
+            self._interval = min(
+                self.max_interval, max(self._interval, self.min_interval) * self.BACKOFF_FACTOR
+            )
+            self._successes = 0
+
+    def record_success(self) -> None:
+        """Earn a little speed back, slowly."""
+
+        with self._lock:
+            if self._interval <= self.min_interval:
+                return
+            self._successes += 1
+            if self._successes >= self.RECOVERY_SUCCESSES:
+                self._successes = 0
+                self._interval = max(self.min_interval, self._interval - self.RECOVERY_STEP)
 
     @property
     def cooling_down(self) -> float:
@@ -166,7 +254,7 @@ class Throttle:
     def wait(self) -> None:
         with self._lock:
             now = time.monotonic()
-            delay = max(self.min_interval - (now - self._last), self._penalty_until - now)
+            delay = max(self._interval - (now - self._last), self._penalty_until - now)
             if delay > 0:
                 self._sleep(delay)
             self._last = time.monotonic()
@@ -257,6 +345,7 @@ class HttpTransport:
                 self.calls += 1
                 self.last_latency_ms = (time.monotonic() - started) * 1000
                 self.circuit.record_success()
+                self.throttle.record_success()
                 return json.loads(raw) if raw.strip() else {}
             except urllib.error.HTTPError as exc:
                 detail = exc.read().decode("utf-8", errors="replace")[:500]
@@ -333,7 +422,11 @@ class HttpTransport:
             "circuit": self.circuit.state,
             "calls": self.calls,
             "lastLatencyMs": round(self.last_latency_ms, 1) if self.last_latency_ms else None,
-            "requestSpacingSeconds": self.throttle.min_interval,
+            # The learned value, not the configured floor. Reporting the
+            # floor while the loop ran wider would be the same lie that
+            # sent three diagnoses of this in the wrong direction.
+            "requestSpacingSeconds": round(self.throttle.interval, 3),
+            "requestSpacingFloorSeconds": self.throttle.min_interval,
             "circuitBackoffSeconds": (
                 round(self.circuit.current_reset_seconds)
                 if self.circuit.state != "closed"

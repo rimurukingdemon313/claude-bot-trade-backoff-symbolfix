@@ -8,7 +8,7 @@ results uninterpretable (see docs/TESTING.md, "experiment control").
 
 from __future__ import annotations
 
-SYSTEM_VERSION = "4.3.0"
+SYSTEM_VERSION = "4.4.0"
 SMC_ENGINE_VERSION = "smc-3.0.1"
 SCORING_VERSION = "score-3.0.0"
 RISK_ENGINE_VERSION = "risk-2.3.0"

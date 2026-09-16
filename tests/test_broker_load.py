@@ -491,3 +491,105 @@ def _broker_with(throttle):
             self.transport = _Transport(t)
 
     return _Broker(throttle)
+
+
+# -- the cooldown that was never applied -----------------------------------
+
+
+def test_a_short_retry_after_does_not_shorten_the_cooldown(monkeypatch):
+    """The bug the live logs actually showed.
+
+    Four symbols refused one second apart:
+
+        USDJPY  07:49:31Z   15m
+        AUDUSD  07:49:33Z   15m
+        USDCHF  07:49:34Z   1H
+        XAUUSD  07:49:35Z   4H
+
+    After the first refusal the shared cooldown should have held every
+    caller back for a minute. It held them back for one second, because
+    the code honoured Cloudflare's `Retry-After: 1` literally - and the
+    comment above it asserted that 1015 does not carry the header at all.
+
+    "Retry this REQUEST in a second" is not "your burst budget has
+    recovered". A burst limit is a window, and a window does not reopen
+    because one request may be retried.
+
+    This is why every volume reduction before it changed nothing: the
+    cooldown those fixes leaned on was never actually applied.
+    """
+
+    import io
+    import urllib.error
+
+    from bot.broker.http import MIN_RATE_LIMIT_COOLDOWN
+
+    def refuse_fast(request, timeout=None):
+        raise urllib.error.HTTPError(
+            "http://x", 429, "err", {"Retry-After": "1"}, io.BytesIO(b"1015")
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", refuse_fast)
+    wire = _transport()
+    with pytest.raises(BrokerRateLimited):
+        wire.request("GET", "http://x")
+
+    assert wire.throttle.cooling_down >= MIN_RATE_LIMIT_COOLDOWN - 1, (
+        f"a one-second Retry-After produced a "
+        f"{wire.throttle.cooling_down:.0f}s cooldown"
+    )
+
+
+def test_a_longer_retry_after_is_still_obeyed(monkeypatch):
+    """The floor raises a short answer. It never lowers a long one.
+
+    If the host asks for five minutes, five minutes it is: it knows
+    something about its own window that this process does not.
+    """
+
+    import io
+    import urllib.error
+
+    def refuse_slow(request, timeout=None):
+        raise urllib.error.HTTPError(
+            "http://x", 429, "err", {"Retry-After": "300"}, io.BytesIO(b"1015")
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", refuse_slow)
+    wire = _transport()
+    with pytest.raises(BrokerRateLimited):
+        wire.request("GET", "http://x")
+    assert wire.throttle.cooling_down > 250
+
+
+def test_the_cooldown_actually_holds_the_next_caller_back(monkeypatch):
+    """The cooldown is only worth anything if the NEXT request waits.
+
+    A scan catches each symbol's error and moves to the next symbol, so
+    the thing that must hold is the shared throttle - not the failing
+    call's own error path.
+    """
+
+    import io
+    import urllib.error
+
+    slept: list[float] = []
+    wire = _transport(
+        throttle=Throttle(min_interval=0.6, sleeper=slept.append),
+        sleeper=lambda _s: None,
+    )
+
+    def refuse(request, timeout=None):
+        raise urllib.error.HTTPError(
+            "http://x", 429, "err", {"Retry-After": "1"}, io.BytesIO(b"1015")
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", refuse)
+    with pytest.raises(BrokerRateLimited):
+        wire.request("GET", "http://x")
+
+    slept.clear()
+    with pytest.raises(BrokerRateLimited):
+        wire.request("GET", "http://x")
+    assert slept, "the second caller went straight through an active ban"
+    assert max(slept) > 30, f"it waited only {max(slept):.1f}s"

@@ -442,7 +442,12 @@ def test_a_rate_limit_storm_is_bounded_and_never_hangs(monkeypatch):
     )
     with pytest.raises(BrokerRateLimited):
         transport.request("GET", "http://x")
-    assert calls["n"] == 4, "retries must be bounded, not infinite"
+    # One. The tightest bound there is, and the right one: every retry of
+    # a 429 is another request the host counts against the same limit, so
+    # retrying extends the ban it is waiting out. The shared cooldown
+    # holds every caller back instead; the next scan retries after it.
+    assert calls["n"] == 1, "a rate limit must cost exactly one request"
+    assert transport.throttle.cooling_down > 0, "the shared cooldown must be set"
 
 
 def test_a_rate_limit_storm_never_duplicates_a_write(monkeypatch):

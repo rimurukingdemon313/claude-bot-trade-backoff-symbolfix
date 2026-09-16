@@ -192,6 +192,12 @@ class HttpTransport:
         self.throttle = throttle or Throttle(sleeper=sleeper)
         self._sleep = sleeper
         self.calls = 0
+        #: How many requests the host has refused for rate limiting. A
+        #: separate count from circuit failures on purpose: "we asked too
+        #: fast" and "the broker is down" call for opposite responses, and
+        #: reporting them as one number sent the last three diagnoses of
+        #: this in the wrong direction.
+        self.rate_limited = 0
         self.last_latency_ms: float | None = None
 
     def _backoff(self, attempt: int, retry_after: float | None = None) -> float:
@@ -268,7 +274,20 @@ class HttpTransport:
                     # is the shortest cooldown that reliably clears it, and
                     # guessing lower is how a rate limit becomes permanent.
                     self.throttle.penalise(retry_after if retry_after is not None else 60.0)
-                    last_error = BrokerRateLimited(f"{method} {url} rate limited: {detail}")
+                    self.rate_limited += 1
+                    # Raised, never retried, and NOT counted as a circuit
+                    # failure. A rate limit is not an outage: the broker is
+                    # healthy and telling us to slow down. Retrying sent
+                    # three more requests into a zone that was already
+                    # refusing us — every one of them counted against the
+                    # same Cloudflare budget, so the retry made the ban it
+                    # was trying to ride out longer. And four failures from
+                    # one symbol tripped a five-failure circuit, which then
+                    # shed every remaining symbol for a minute and doubled
+                    # its own backoff toward fifteen. The shared cooldown
+                    # above is the correct mechanism and already holds every
+                    # thread back; the circuit is for a broker that is down.
+                    raise BrokerRateLimited(f"{method} {url} rate limited: {detail}")
                 elif 500 <= exc.code < 600:
                     last_error = BrokerError(f"{method} {url} server error ({exc.code}): {detail}")
                 else:
@@ -324,4 +343,5 @@ class HttpTransport:
             # hang from outside: the bot is deliberately silent and the
             # operator has no way to tell that from a broken one.
             "rateLimitedFor": round(cooling, 1) if cooling > 0 else None,
+            "rateLimitedCalls": self.rate_limited,
         }

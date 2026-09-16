@@ -156,7 +156,6 @@ export type MtfDecision = {
   direction: string | null;
   setupType: string;
   state: SignalState;
-  h4Context: string;
   h1Bias: string;
   m15Bias: string;
   alignment: string;

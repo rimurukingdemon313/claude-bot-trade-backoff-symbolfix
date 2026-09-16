@@ -115,7 +115,6 @@ def walk_forward(
     spec: Any,
     m15: Sequence[Candle],
     h1: Sequence[Candle],
-    h4: Sequence[Candle],
     *,
     folds: int = 3,
     grid: Iterable[dict[str, Any]] = DEFAULT_GRID,
@@ -133,7 +132,7 @@ def walk_forward(
         for params in grid:
             tuned = _apply(config, params)
             train = Backtester(tuned, spec, costs=costs).run(
-                m15[fold.train[0] : fold.train[1]], h1, h4, step=step
+                m15[fold.train[0] : fold.train[1]], h1, step=step
             )
             stats = train.statistics()
             train_reports.append({"params": params, **stats})
@@ -154,10 +153,10 @@ def walk_forward(
 
         tuned = _apply(config, best_params)
         validate = Backtester(tuned, spec, costs=costs).run(
-            m15[fold.validate[0] : fold.validate[1]], h1, h4, step=step
+            m15[fold.validate[0] : fold.validate[1]], h1, step=step
         )
         test = Backtester(tuned, spec, costs=costs).run(
-            m15[fold.test[0] : fold.test[1]], h1, h4, step=step
+            m15[fold.test[0] : fold.test[1]], h1, step=step
         )
         result.folds.append(
             {

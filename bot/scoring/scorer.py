@@ -60,15 +60,13 @@ TIERS = ("A+", "A", "B", "NO_TRADE")
 CRITICAL_COMPONENTS = ("trigger", "entry_zone", "risk_reward")
 
 #: How much a setup's classification is worth on the context axis. A
-#: continuation with the primary bias is the reference; everything that
+#: continuation with the H1 trend is the reference; everything that
 #: fights something scores less here AND carries a higher floor, so the
 #: two act together rather than one excusing the other.
 CONTEXT_FRACTION = {
     "CONTINUATION": 1.0,
-    "CONTINUATION_VS_MACRO": 0.70,
     "RANGE_ROTATION": 0.60,
     "REVERSAL": 0.55,
-    "COUNTERTREND_SCALP": 0.30,
 }
 
 
@@ -115,13 +113,14 @@ def _trigger_component(candidate: SetupCandidate) -> tuple[float, str]:
 
 
 def _context_component(candidate: SetupCandidate) -> tuple[float, str]:
-    """How the setup stands to the primary bias and the macro context.
+    """How the setup stands to the H1 trend.
 
-    Graded, not boolean. Unanimity across H4/H1/M15 is not the thing being
-    measured - a reversal is by definition NOT unanimous, and scoring it
-    zero for that would reinstate the rigid filter this replaced. What is
-    measured is how much the setup has to fight, and a setup that fights
-    more simply has to be better, which is what `score_floor` enforces.
+    Graded, not boolean. Agreement between H1 and M15 is not the thing
+    being measured - a reversal is by definition NOT in agreement, and
+    scoring it zero for that would reinstate the rigid filter this
+    replaced. What is measured is how much the setup has to fight, and a
+    setup that fights more simply has to be better, which is what
+    `score_floor` enforces.
     """
 
     fraction = CONTEXT_FRACTION.get(candidate.setup_type)
@@ -129,9 +128,7 @@ def _context_component(candidate: SetupCandidate) -> tuple[float, str]:
         # An unrecognised classification is not scored generously. Rule:
         # unknown is never treated as favourable.
         return 0.0, f"unrecognised setup type {candidate.setup_type!r}"
-    detail = (
-        f"H4 {candidate.htf_bias} / H1 {candidate.h1_bias} / M15 {candidate.m15_bias}"
-    )
+    detail = f"H1 {candidate.h1_bias} / M15 {candidate.m15_bias}"
     return fraction, f"{candidate.setup_type} ({detail})"
 
 

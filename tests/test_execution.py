@@ -42,7 +42,6 @@ def make_plan(**overrides) -> TradePlan:
         setup_grade="A",
         setup_score=72.0,
         ai_confidence=80.0,
-        htf_bias="bullish",
         alignment="aligned",
         instrument_id=1,
         route_id=10,

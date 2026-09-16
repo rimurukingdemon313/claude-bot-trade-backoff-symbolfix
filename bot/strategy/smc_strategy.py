@@ -20,14 +20,13 @@ PROFILE = StrategyProfile(
     name="Smart Money Concepts",
     description=(
         "Trades a structural shift on M15: a liquidity sweep, a break of structure with "
-        "displacement, and an entry back inside the imbalance it left. H4 is macro context "
-        "and H1 the primary bias — a setup that fights either is held to a higher score "
-        "rather than refused, and a move against the primary bias must have earned the "
-        "name reversal to be taken at all."
+        "displacement, and an entry back inside the imbalance it left. H1 sets the trend — "
+        "a setup that fights it is held to a higher score rather than refused, and a move "
+        "against the trend must have earned the name reversal to be taken at all."
     ),
     min_risk_reward=2.0,
     expected_frequency="a few a week",
-    thesis="high-quality M15 execution, weighted by H1 bias and H4 context",
+    thesis="high-quality M15 execution, classified against the H1 trend",
 )
 
 

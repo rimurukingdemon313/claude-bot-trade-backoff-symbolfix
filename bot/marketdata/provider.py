@@ -6,7 +6,7 @@ stop/target prices to TradeLocker — two different price series, so every
 level was subtly wrong and could be rejected or filled at a price the
 analysis never saw.
 
-A cache exists because one scan needs H4/H1/M15 for several symbols and
+A cache exists because one scan needs H1/M15 for several symbols and
 the broker is rate limited. It holds each series until the bar that could
 CHANGE it actually closes, which is a fact rather than a guess:
 `validate_series` removes the forming candle, so a series is closed bars
@@ -72,8 +72,8 @@ class MarketDataProvider:
         Derived from the data, not from a calendar: the newest CLOSED bar
         plus one bar duration is exactly when the next one closes, so this
         needs no assumption about where session boundaries fall — which
-        matters for H4, where "the next multiple of 240 minutes" is not a
-        question the clock can answer.
+        matters for H1, where "the next whole hour" stops being the answer
+        the moment a broker's session opens on the half hour.
 
         Bounded on both sides. Never longer than one bar, so a broken
         timestamp cannot pin a stale series in memory; never shorter than
@@ -135,7 +135,7 @@ class MarketDataProvider:
     def multi_timeframe(
         self,
         spec: InstrumentSpec,
-        timeframes: tuple[str, ...] = ("H4", "H1", "M15"),
+        timeframes: tuple[str, ...] = ("H1", "M15"),
         *,
         now: datetime | None = None,
     ) -> dict[str, Series]:

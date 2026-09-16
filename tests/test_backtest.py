@@ -82,8 +82,7 @@ def test_analysis_on_bar_i_cannot_see_bar_i_plus_one(config):
 def test_a_backtest_runs_and_reports_honest_statistics(config):
     m15 = long_series(600)
     h1 = aligned_htf(m15, timeframe="H1", count=200)
-    h4 = aligned_htf(m15, timeframe="H4", count=200)
-    result = Backtester(config, DEFAULT_SPEC).run(m15, h1, h4, warmup=150, step=1)
+    result = Backtester(config, DEFAULT_SPEC).run(m15, h1, warmup=150, step=1)
     stats = result.statistics()
 
     assert stats["barsProcessed"] > 0
@@ -98,7 +97,8 @@ def test_a_backtest_runs_and_reports_honest_statistics(config):
 def test_the_backtester_rejects_most_bars_and_records_why(config):
     m15 = long_series(400)
     result = Backtester(config, DEFAULT_SPEC).run(
-        m15, aligned_htf(m15, timeframe="H1", count=200), aligned_htf(m15, timeframe="H4", count=200),
+        m15,
+        aligned_htf(m15, timeframe="H1", count=200),
         warmup=150,
     )
     assert result.setups_rejected, "a selective system must record why it stood aside"
@@ -187,7 +187,6 @@ def test_walk_forward_reports_out_of_sample_only(config):
         DEFAULT_SPEC,
         m15,
         aligned_htf(m15, timeframe="H1", count=250),
-        aligned_htf(m15, timeframe="H4", count=250),
         folds=3,
         step=3,
     )

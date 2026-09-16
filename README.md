@@ -20,7 +20,7 @@ cannot turn into an unrecoverable position or a duplicate order.
 ```
 TradeLocker candles
   → validation (closed candles only, no gaps, not stale)
-  → H4 context → H1 bias → M15 structure
+  → H1 trend → M15 structure
   → liquidity map → sweep → displacement → BOS/CHoCH
   → FVG / order block retracement → premium/discount
   → deterministic setup score → tier (A+ / A / B / NO TRADE)

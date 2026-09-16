@@ -61,7 +61,6 @@ def build_prompt(candidate: SetupCandidate, score: SetupScore) -> str:
         "symbol": candidate.symbol,
         "proposedDirection": candidate.direction,
         "context": {
-            "h4Bias": candidate.htf_bias,
             "h1Bias": candidate.h1_bias,
             "m15Bias": candidate.m15_bias,
             "alignment": candidate.alignment,

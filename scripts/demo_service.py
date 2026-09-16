@@ -43,7 +43,6 @@ def main() -> None:
     m15 = bullish_setup_m15(end=end)
     broker.set_series("EURUSD", "M15", m15)
     broker.set_series("EURUSD", "H1", aligned_htf(m15, timeframe="H1"))
-    broker.set_series("EURUSD", "H4", aligned_htf(m15, timeframe="H4"))
     print(f"[smoke] fixture anchored to {end.isoformat()}", flush=True)
 
     service = BotService(config, broker=broker)

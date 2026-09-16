@@ -150,7 +150,6 @@ class Backtester:
         self,
         m15: Sequence[Candle],
         h1: Sequence[Candle],
-        h4: Sequence[Candle],
         *,
         warmup: int = 120,
         step: int = 1,
@@ -163,7 +162,6 @@ class Backtester:
         consecutive_losses = 0
 
         h1_by_time = sorted(h1, key=lambda candle: candle.timestamp)
-        h4_by_time = sorted(h4, key=lambda candle: candle.timestamp)
 
         for index in range(warmup, len(m15)):
             bar = m15[index]
@@ -192,14 +190,12 @@ class Backtester:
             visible_m15 = list(m15[: index + 1])
             cutoff = bar.close_time
             visible_h1 = [candle for candle in h1_by_time if candle.close_time <= cutoff]
-            visible_h4 = [candle for candle in h4_by_time if candle.close_time <= cutoff]
-            if len(visible_h1) < 40 or len(visible_h4) < 40:
+            if len(visible_h1) < 40:
                 continue
 
             series = {
                 "M15": _series(self.spec.symbol, "M15", visible_m15),
                 "H1": _series(self.spec.symbol, "H1", visible_h1),
-                "H4": _series(self.spec.symbol, "H4", visible_h4),
             }
             analysis = self.smc.analyze(self.spec.symbol, series, now=cutoff)
             if analysis.candidate is None:

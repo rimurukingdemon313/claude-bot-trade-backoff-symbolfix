@@ -97,7 +97,7 @@ def test_the_levels_sent_to_the_broker_are_the_engines_not_a_models(orchestrator
 def test_a_flat_market_produces_no_trade_and_says_why(config, repos):
     broker = FakeBroker()
     flat = flat_market_m15(140)
-    for timeframe in ("M15", "H1", "H4"):
+    for timeframe in ("M15", "H1"):
         broker.set_series(
             "EURUSD", timeframe, flat if timeframe == "M15" else aligned_htf(flat, timeframe=timeframe)
         )
@@ -181,7 +181,6 @@ def test_only_the_best_opportunity_is_taken_per_cycle(config, broker, repos):
     for timeframe, data in (
         ("M15", m15),
         ("H1", aligned_htf(m15, timeframe="H1")),
-        ("H4", aligned_htf(m15, timeframe="H4")),
     ):
         broker.set_series("GBPUSD", timeframe, data)
 

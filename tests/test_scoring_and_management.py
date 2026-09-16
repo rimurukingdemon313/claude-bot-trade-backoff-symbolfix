@@ -122,10 +122,10 @@ def test_tier_ranking_orders_candidates():
 
 
 def test_context_is_graded_by_what_the_setup_has_to_fight(config, candidate):
-    """Continuation > continuation-vs-macro > rotation > reversal > scalp.
+    """Continuation > rotation > reversal.
 
     Graded rather than boolean: a reversal is not scored zero for
-    disagreeing with the primary bias (that was the rigid filter), it is
+    disagreeing with the H1 trend (that was the rigid filter), it is
     scored lower and then held to a higher floor. Both mechanisms point
     the same way, so neither excuses the other.
     """
@@ -133,10 +133,8 @@ def test_context_is_graded_by_what_the_setup_has_to_fight(config, candidate):
     scorer = SetupScorer(config)
     ordered = [
         "CONTINUATION",
-        "CONTINUATION_VS_MACRO",
         "RANGE_ROTATION",
         "REVERSAL",
-        "COUNTERTREND_SCALP",
     ]
     totals = [
         scorer.score(dataclasses.replace(candidate, setup_type=name, score_floor=0.0)).total

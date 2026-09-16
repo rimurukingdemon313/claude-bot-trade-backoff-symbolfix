@@ -78,8 +78,7 @@ def series_for(broker, config, now=SETUP_END):
 def broker_with(m15):
     broker = FakeBroker()
     broker.series[("EURUSD", "M15")] = m15
-    for timeframe in ("H1", "H4"):
-        broker.series[("EURUSD", timeframe)] = aligned_htf(m15, timeframe=timeframe)
+    broker.series[("EURUSD", "H1")] = aligned_htf(m15, timeframe="H1")
     return broker
 
 
@@ -125,10 +124,10 @@ def test_reversion_never_fades_a_decided_higher_timeframe(config):
         )
         for timeframe, data in series_for(broker, config).items()
     }
-    # Force H4 to oppose whichever way a sweep would point.
+    # Force H1 to oppose whichever way a sweep would point.
     for wanted, opposing in (("BUY", "bearish"), ("SELL", "bullish")):
         allowed, veto = strategy._htf_permits(
-            wanted, dataclasses.replace(analyses["H4"], bias=opposing), analyses["H1"]
+            wanted, dataclasses.replace(analyses["H1"], bias=opposing)
         )
         assert allowed is False
         assert "may not fade" in veto

@@ -28,7 +28,7 @@ the module contains no reference to a write path.
 | `SYMBOL:specification` | no usable contract size or lot step → **that symbol will be skipped** |
 | `SYMBOL:quote` | no usable quote, or a crossed quote |
 | `SYMBOL:conversion` | a cross pair's bridging rate does not resolve → **that symbol cannot be sized** |
-| `SYMBOL:M15/H1/H4` | candles do not arrive or fail validation |
+| `SYMBOL:M15/H1` | candles do not arrive or fail validation |
 | `SYMBOL:history_endpoint` | which endpoint shape works (see below) |
 | `profit_objective` | the profit floor is unreachable at this equity |
 

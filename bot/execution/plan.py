@@ -39,7 +39,6 @@ class TradePlan:
     setup_grade: str
     setup_score: float
     ai_confidence: float | None
-    htf_bias: str
     alignment: str
     instrument_id: int
     route_id: int
@@ -125,7 +124,6 @@ def build_plan(
         setup_grade=score.tier,
         setup_score=round(score.total, 2),
         ai_confidence=ai_confidence,
-        htf_bias=candidate.htf_bias,
         alignment=candidate.alignment,
         setup_type=candidate.setup_type,
         instrument_id=spec.tradable_instrument_id,

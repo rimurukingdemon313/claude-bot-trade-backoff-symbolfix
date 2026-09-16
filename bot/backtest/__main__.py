@@ -66,7 +66,6 @@ def main(argv: list[str] | None = None) -> int:
         spec = broker.instrument(args.symbol)
         m15 = _fetch(broker, spec, "M15", args.bars)
         h1 = _fetch(broker, spec, "H1", max(400, args.bars // 4))
-        h4 = _fetch(broker, spec, "H4", max(300, args.bars // 16))
     except BotError as exc:
         print(f"Could not load broker data: {exc}", file=sys.stderr)
         return 1
@@ -79,13 +78,13 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.walk_forward:
         result = walk_forward(
-            config, spec, m15, h1, h4, folds=args.folds, costs=costs, step=args.step
+            config, spec, m15, h1, folds=args.folds, costs=costs, step=args.step
         )
         print(json.dumps(result.summary(), indent=2, default=str))
         return 0
 
     backtester = Backtester(config, spec, costs=costs, starting_balance=args.balance)
-    result = backtester.run(m15, h1, h4, warmup=args.warmup, step=args.step)
+    result = backtester.run(m15, h1, warmup=args.warmup, step=args.step)
     payload: dict = {"symbol": args.symbol, "statistics": result.statistics()}
 
     if args.monte_carlo:

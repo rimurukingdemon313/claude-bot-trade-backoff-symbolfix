@@ -192,3 +192,106 @@ def test_a_server_error_still_retries(monkeypatch):
     with pytest.raises(BrokerError):
         _transport(max_attempts=3, circuit=circuit).request("GET", "http://x")
     assert calls["n"] == 3
+
+
+# -- the background poll ---------------------------------------------------
+
+
+def _orchestrator(config, broker, repos):
+    from bot.orchestrator import Orchestrator
+
+    return Orchestrator(
+        config,
+        broker=broker,
+        repositories=repos,
+        market_data=MarketDataProvider(broker, config),
+    )
+
+
+def test_an_empty_account_is_not_polled_every_thirty_seconds(config, broker, repos):
+    """The largest single source of broker traffic in the system.
+
+    Polling positions every 30s with none open was 2.7x the scan load -
+    360 requests an hour spent asking about positions that did not exist,
+    against a rate limit the scans needed. While flat the poll backs off.
+    """
+
+    orchestrator = _orchestrator(config, broker, repos)
+    calls = {"n": 0}
+    original = broker.positions
+
+    def counted():
+        calls["n"] += 1
+        return original()
+
+    broker.positions = counted  # type: ignore[assignment]
+
+    for _ in range(8):
+        orchestrator.manage_positions(now=SETUP_END)
+
+    assert calls["n"] == 1, "an empty account was re-read on every tick"
+    result = orchestrator.manage_positions(now=SETUP_END)
+    assert result["ok"] is True
+    assert "no open positions" in result["skipped"]
+
+
+def test_a_held_position_is_polled_at_the_fast_cadence(config, broker, repos):
+    """The back-off is for an EMPTY account and nothing else.
+
+    A position that exists has a stop to move and a structure to check,
+    and it gets the full 30-second cadence.
+    """
+
+    orchestrator = _orchestrator(config, broker, repos)
+    broker.add_position(symbol="EURUSD", direction="BUY", quantity=0.1, entry=1.1000)
+
+    calls = {"n": 0}
+    original = broker.positions
+
+    def counted():
+        calls["n"] += 1
+        return original()
+
+    broker.positions = counted  # type: ignore[assignment]
+
+    for _ in range(5):
+        orchestrator.manage_positions(now=SETUP_END)
+    assert calls["n"] == 5, "a held position must be polled on every tick"
+    assert not orchestrator._can_skip_position_poll()
+
+
+def test_opening_a_trade_restores_the_fast_cadence_immediately(config, broker, repos):
+    """Nothing has to remember to say "a trade happened".
+
+    The count is recorded in the one place that reads positions, so the
+    read the executor already triggers restores fast polling by itself.
+    """
+
+    orchestrator = _orchestrator(config, broker, repos)
+    orchestrator.manage_positions(now=SETUP_END)
+    assert orchestrator._can_skip_position_poll(), "flat: the poll should back off"
+
+    broker.add_position(  # a fill appears on the account
+        symbol="EURUSD", direction="BUY", quantity=0.1, entry=1.1000
+    )
+    orchestrator.refresh_live_positions(now=SETUP_END)
+    assert orchestrator._positions_held == 1
+    assert not orchestrator._can_skip_position_poll(), "a held position must be polled"
+
+
+def test_the_backoff_can_never_hide_a_position_from_the_reconciler(config, broker, repos):
+    """The safety argument, asserted rather than reasoned about.
+
+    Skipping is only ever safe because the reconciler reads the broker on
+    its own timer and does not consult this cadence at all.
+    """
+
+    orchestrator = _orchestrator(config, broker, repos)
+    orchestrator.manage_positions(now=SETUP_END)
+    assert orchestrator._can_skip_position_poll()
+
+    broker.add_position(
+        symbol="EURUSD", direction="BUY", quantity=0.1, entry=1.1000
+    )
+    report = orchestrator.reconciler.reconcile()
+    assert report.checked_positions == 1, "the reconciler must see it regardless"

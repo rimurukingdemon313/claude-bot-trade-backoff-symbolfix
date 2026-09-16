@@ -20,6 +20,7 @@ makes §93's "which filter is actually costing us money?" answerable.
 
 from __future__ import annotations
 
+import time
 import threading
 import uuid
 from dataclasses import dataclass, field, replace
@@ -164,6 +165,11 @@ class Orchestrator:
         #: The dashboard serves from this and never calls the broker
         #: itself — see bot/broker/cache.py for why that had to change.
         self.live = LiveCache()
+        #: When the position view was last actually read, and what it held.
+        #: An empty account needs far less polling than a loaded one, and
+        #: the difference was 2.7x the scan traffic (see SchedulerConfig).
+        self._positions_read_at: float | None = None
+        self._positions_held = 0
         self.smc = smc or SmcEngine(config)
         self.scorer = scorer or SetupScorer(config)
         self.risk = risk or RiskEngine(config, self.kill_switch)
@@ -487,7 +493,39 @@ class Orchestrator:
         self.live.put("positions", positions, now=now)
         rows = self.manager.track(positions, now=now)
         self.live.put("position_rows", rows, now=now)
+        # Recorded here, in the ONE place that reads them, so a trade the
+        # bot just opened restores fast polling without anything else
+        # having to remember to say so.
+        self._positions_read_at = time.monotonic()
+        self._positions_held = len(positions)
         return positions, rows
+
+    def _seconds_until_position_poll(self) -> float:
+        """How long until the position view must be read again."""
+
+        if self._positions_read_at is None:
+            return 0.0
+        interval = (
+            self.config.scheduler.position_poll_seconds
+            if self._positions_held
+            else self.config.scheduler.idle_position_poll_seconds
+        )
+        return max(0.0, interval - (time.monotonic() - self._positions_read_at))
+
+    def _can_skip_position_poll(self) -> bool:
+        """Is another read of an empty account worth a request?
+
+        Only skipped while FLAT, and a position can appear exactly two
+        ways, both already covered: the bot opens one - which reads this
+        view immediately and so restores fast polling - or somebody opens
+        one by hand, which the reconciler finds on its own timer. Neither
+        depends on the fast poll, so while there is nothing to manage the
+        fast poll is spending the rate limit the scans need.
+        """
+
+        if self._positions_read_at is None or self._positions_held:
+            return False
+        return self._seconds_until_position_poll() > 0
 
     def _compose_account_state(
         self,
@@ -1088,6 +1126,16 @@ class Orchestrator:
                 "skipped": "the forex market is closed for the weekend",
                 "actions": [],
             }
+        if self._can_skip_position_poll():
+            return {
+                "ok": True,
+                "skipped": (
+                    "no open positions; the next full read is due in "
+                    f"{self._seconds_until_position_poll():.0f}s"
+                ),
+                "actions": [],
+            }
+
         try:
             positions, rows = self.refresh_live_positions(now=moment)
         except BotError as exc:

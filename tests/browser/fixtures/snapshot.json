@@ -257,7 +257,7 @@
       },
       "liquidityTarget": null,
       "evidence": [
-       "BUY classified CONTINUATION (H4 range / H1 range / M15 bullish)",
+       "BUY classified CONTINUATION (H1 range / M15 bullish)",
        "continuation of M15 structure with no macro opposition",
        "no higher-timeframe bias in either direction; M15 structure is the only anchor, so the setup carries the whole burden of proof",
        "requires a score of at least 60",
@@ -295,7 +295,7 @@
       },
       "notes": [
        "trigger: sweep quality 0.85 followed by a structure shift",
-       "context: CONTINUATION (H4 range / H1 range / M15 bullish)",
+       "context: CONTINUATION (H1 range / M15 bullish)",
        "displacement: displacement 2.2x ATR",
        "entry_zone: fresh fair value gap",
        "risk_reward: R:R 1:2.00",
@@ -489,11 +489,6 @@
    "marketData": {
     "ok": true,
     "cached": {
-     "EURUSD:H4": {
-      "ageSeconds": 0.0,
-      "candles": 70,
-      "newestClose": "2026-09-10T14:00:00+00:00"
-     },
      "EURUSD:H1": {
       "ageSeconds": 0.0,
       "candles": 70,

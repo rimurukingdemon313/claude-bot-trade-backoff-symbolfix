@@ -58,7 +58,6 @@ def test_a_closed_series_is_not_refetched_before_its_next_close(config, counting
         provider.multi_timeframe(DEFAULT_SPEC, now=SETUP_END)
 
     calls = counting_broker.candle_calls  # type: ignore[attr-defined]
-    assert calls.count("H4") == 1, "H4 was re-fetched inside one 4-hour bar"
     assert calls.count("H1") == 1, "H1 was re-fetched inside one 1-hour bar"
     assert calls.count("M15") == 1
 
@@ -67,7 +66,7 @@ def test_the_cache_expires_when_the_next_bar_actually_closes(config, counting_br
     """Not a fraction of the bar - the bar."""
 
     provider = MarketDataProvider(counting_broker, config)
-    for timeframe in ("M15", "H1", "H4"):
+    for timeframe in ("M15", "H1"):
         series = provider.series(DEFAULT_SPEC, timeframe, now=SETUP_END)
         bar = TIMEFRAME_MINUTES[timeframe] * 60
         newest_close = series.candles[-1].close_time
@@ -106,9 +105,9 @@ def test_the_cache_is_never_held_longer_than_one_bar(config, counting_broker):
 def test_a_scan_costs_fewer_history_requests_than_the_old_policy(config, counting_broker):
     """The measurement that matters, across a realistic run.
 
-    Sixteen scans at the configured interval is one H4 bar. Under the old
-    fixed-fraction TTL every timeframe was re-fetched five times per bar;
-    aligned to the close, each is fetched once per bar it belongs to.
+    Sixteen scans at the configured interval is four H1 bars. Under the
+    old fixed-fraction TTL every timeframe was re-fetched five times per
+    bar; aligned to the close, each is fetched once per bar it belongs to.
     """
 
     provider = MarketDataProvider(counting_broker, config)
@@ -122,8 +121,8 @@ def test_a_scan_costs_fewer_history_requests_than_the_old_policy(config, countin
     # The fake serves a fixed series, so its newest close never advances:
     # every timeframe should settle into its floor of re-fetches rather
     # than one per scan.
-    assert len(calls) < 16 * 3, "the cache saved nothing across sixteen scans"
-    assert calls.count("H4") <= calls.count("M15")
+    assert len(calls) < 16 * 2, "the cache saved nothing across sixteen scans"
+    assert calls.count("H1") <= calls.count("M15")
 
 
 # -- the rate limit itself -------------------------------------------------

@@ -477,7 +477,7 @@ def _check_symbol(
         report.add(f"{symbol}:quote", FAIL, f"no usable quote: {exc}")
 
     # History: the discovery result is the single most useful output here.
-    for timeframe in ("M15", "H1", "H4"):
+    for timeframe in ("M15", "H1"):
         try:
             raw = broker.candles(spec, timeframe, count=120)
         except BotError as exc:

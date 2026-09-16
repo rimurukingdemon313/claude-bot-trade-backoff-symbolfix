@@ -287,8 +287,8 @@ def directional_htf(
     """A higher-timeframe series with the bias the test asks for.
 
     `aligned_htf` can only build a series that agrees with the M15 leg,
-    which makes every H4/H1 disagreement impossible to express - and those
-    are exactly the cases the MTF layer exists to classify.
+    which makes every H1/M15 disagreement impossible to express - and
+    those are exactly the cases the MTF layer exists to classify.
 
     A smooth trending path is not enough: `structural_bias` reads
     CONFIRMED swings and breaks, and a monotonic line prints neither, so
@@ -629,7 +629,6 @@ def suffixed_broker(suffix: str = ".R", symbols: tuple[str, ...] = ("EURUSD",)) 
     for symbol in symbols:
         broker.set_series(symbol, "M15", m15)
         broker.set_series(symbol, "H1", aligned_htf(m15, timeframe="H1"))
-        broker.set_series(symbol, "H4", aligned_htf(m15, timeframe="H4"))
     return broker
 
 

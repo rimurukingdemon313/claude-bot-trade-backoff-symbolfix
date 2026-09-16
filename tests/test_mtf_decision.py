@@ -1,15 +1,19 @@
 """The multi-timeframe decision layer, scenario by scenario.
 
-    H4 = MACRO CONTEXT   H1 = PRIMARY BIAS   M15 = EXECUTION
+    H1 = TREND   M15 = EXECUTION
 
 The behaviour being pinned is a deliberate replacement of a rigid rule.
 The engine used to derive direction from the M15 bias alone and refuse
-outright if either higher timeframe disagreed, which rejected the setup
-the strategy exists to take: "H4 bullish, H1 bearish, M15 bearish" is a
-short in line with the primary bias while the macro has not turned. It
-also had the inverse failure - because direction came from M15, an
-ordinary retracement inside an H1 leg looked like a signal whenever H1
-happened to be neutral.
+outright if a higher timeframe disagreed, which rejected the setup the
+strategy exists to take. It also had the inverse failure - because
+direction came from M15, an ordinary retracement inside an H1 leg looked
+like a signal whenever H1 happened to be neutral.
+
+H4 sat above H1 as macro context and is gone. At 240 minutes it was
+sixteen times the execution timeframe; H1 is four times it, which is the
+ratio trend-following actually uses. The tests that existed only to
+express an H4/H1 disagreement are gone with it, and one new test asserts
+that H4 is not merely unused but cannot be consulted.
 
 So every scenario below asserts one of two things:
 
@@ -55,16 +59,11 @@ def cfg() -> TradingConfig:
     )
 
 
-def evaluate(cfg: TradingConfig, m15_candles, *, h4: int, h1: int):
-    """Run the engine over an explicitly constructed H4/H1/M15 picture."""
+def evaluate(cfg: TradingConfig, m15_candles, *, h1: int):
+    """Run the engine over an explicitly constructed H1/M15 picture."""
 
     engine = SmcEngine(cfg)
     analyses = {
-        "H4": engine.analyze_timeframe(
-            directional_htf(m15_candles, timeframe="H4", direction=h4),
-            timeframe="H4",
-            now=SETUP_END,
-        ),
         "H1": engine.analyze_timeframe(
             directional_htf(m15_candles, timeframe="H1", direction=h1),
             timeframe="H1",
@@ -78,71 +77,100 @@ def evaluate(cfg: TradingConfig, m15_candles, *, h4: int, h1: int):
 # -- 1-2: continuation, everything agreeing ---------------------------------
 
 
-def test_1_h4_h1_m15_all_bullish_is_a_continuation(cfg):
-    candidate, rejection, decision = evaluate(cfg, bullish_setup_m15(), h4=BULLISH, h1=BULLISH)
+def test_1_h1_and_m15_both_bullish_is_a_continuation(cfg):
+    candidate, rejection, decision = evaluate(cfg, bullish_setup_m15(), h1=BULLISH)
     assert candidate is not None, rejection
     assert candidate.direction == "BUY"
     assert decision.setup_type == mtf.CONTINUATION
     assert decision.alignment == "aligned"
 
 
-def test_2_h4_h1_m15_all_bearish_is_a_continuation(cfg):
-    candidate, rejection, decision = evaluate(cfg, bearish_setup_m15(), h4=BEARISH, h1=BEARISH)
+def test_2_h1_and_m15_both_bearish_is_a_continuation(cfg):
+    candidate, rejection, decision = evaluate(cfg, bearish_setup_m15(), h1=BEARISH)
     assert candidate is not None, rejection
     assert candidate.direction == "SELL"
     assert decision.setup_type == mtf.CONTINUATION
 
 
-# -- 3-4: the headline case - H4 disagrees and the trade still stands -------
+# -- 3-4: H4 is gone, and gone means unreachable ---------------------------
 
 
-def test_3_h4_bullish_h1_bearish_m15_bearish_is_traded_not_rejected(cfg):
-    """The setup the old rule threw away.
+def test_3_the_engine_decides_on_h1_and_m15_alone(cfg):
+    """Two timeframes are the whole input. Asserted, not assumed.
 
-    H4 is the MACRO CONTEXT, not a veto. A short with the primary bias
-    while the macro has not yet turned is an ordinary state of the market.
+    An H4 series is now simply absent from what a scan fetches, so the
+    engine must produce its answer without one - and the refusal for
+    missing data must name the two it actually needs, or the next
+    operator debugs a message that describes a build that no longer
+    exists.
     """
 
-    candidate, rejection, decision = evaluate(cfg, bearish_setup_m15(), h4=BULLISH, h1=BEARISH)
+    engine = SmcEngine(cfg)
+    m15_candles = bullish_setup_m15()
+    analyses = {
+        "H1": engine.analyze_timeframe(
+            directional_htf(m15_candles, timeframe="H1", direction=BULLISH),
+            timeframe="H1",
+            now=SETUP_END,
+        ),
+        "M15": engine.analyze_timeframe(m15_candles, timeframe="M15", now=SETUP_END),
+    }
+    candidate, rejection, _ = engine.evaluate("EURUSD", analyses, now=SETUP_END)
     assert candidate is not None, rejection
-    assert candidate.direction == "SELL"
-    assert decision.setup_type == mtf.CONTINUATION_VS_MACRO
+
+    _, missing, _ = engine.evaluate("EURUSD", {"M15": analyses["M15"]}, now=SETUP_END)
+    assert "H1 and M15" in missing
+    assert "H4" not in missing
 
 
-def test_4_h4_bearish_h1_bullish_m15_bullish_is_traded_not_rejected(cfg):
-    candidate, rejection, decision = evaluate(cfg, bullish_setup_m15(), h4=BEARISH, h1=BULLISH)
-    assert candidate is not None, rejection
-    assert candidate.direction == "BUY"
-    assert decision.setup_type == mtf.CONTINUATION_VS_MACRO
+def test_4_an_h4_series_cannot_change_the_decision(cfg):
+    """The strongest form of "deleted": supplying one is inert.
 
+    A leftover consumer would show up here as a different answer rather
+    than as a stale docstring, which is the failure mode that matters -
+    an H4 quietly steering the engine while nothing in the code reads as
+    if it does.
+    """
 
-def test_3_4_macro_disagreement_raises_the_bar_rather_than_blocking(cfg):
-    """H4 opposition costs score AND demands more of it - never both nothing
-    (which would be permissive) nor an outright refusal (the old rule)."""
-
-    with_macro, _, _ = evaluate(cfg, bullish_setup_m15(), h4=BULLISH, h1=BULLISH)
-    against_macro, _, _ = evaluate(cfg, bullish_setup_m15(), h4=BEARISH, h1=BULLISH)
-    assert with_macro is not None and against_macro is not None
-
-    assert against_macro.score_floor > max(cfg.scoring.tier_b, with_macro.score_floor)
-    assert (
-        CONTEXT_FRACTION[against_macro.setup_type]
-        < CONTEXT_FRACTION[with_macro.setup_type]
+    engine = SmcEngine(cfg)
+    m15_candles = bullish_setup_m15()
+    base = {
+        "H1": engine.analyze_timeframe(
+            directional_htf(m15_candles, timeframe="H1", direction=BULLISH),
+            timeframe="H1",
+            now=SETUP_END,
+        ),
+        "M15": engine.analyze_timeframe(m15_candles, timeframe="M15", now=SETUP_END),
+    }
+    with_h4 = dict(base)
+    with_h4["H4"] = engine.analyze_timeframe(
+        directional_htf(m15_candles, timeframe="H4", direction=BEARISH),
+        timeframe="H4",
+        now=SETUP_END,
     )
+
+    plain = engine.evaluate("EURUSD", base, now=SETUP_END)
+    contradicted = engine.evaluate("EURUSD", with_h4, now=SETUP_END)
+    assert plain[2].as_dict() == contradicted[2].as_dict()
+    assert plain[0].as_dict() == contradicted[0].as_dict()
+
+    # And nothing the decision publishes still describes a macro layer.
+    assert "h4Context" not in plain[2].as_dict()
+    assert "htfBias" not in plain[0].as_dict()
 
 
 # -- 5-6: retracement is NOT a reversal ------------------------------------
 
 
 def test_5_m15_bearish_inside_a_bullish_h1_leg_is_a_retracement(cfg):
-    candidate, rejection, decision = evaluate(cfg, bearish_setup_m15(), h4=BULLISH, h1=BULLISH)
+    candidate, rejection, decision = evaluate(cfg, bearish_setup_m15(), h1=BULLISH)
     assert candidate is None
     assert decision.setup_type == mtf.RETRACEMENT
     assert "retracement rather than a reversal" in rejection
 
 
 def test_6_m15_bullish_inside_a_bearish_h1_leg_is_a_retracement(cfg):
-    candidate, rejection, decision = evaluate(cfg, bullish_setup_m15(), h4=BEARISH, h1=BEARISH)
+    candidate, rejection, decision = evaluate(cfg, bullish_setup_m15(), h1=BEARISH)
     assert candidate is None
     assert decision.setup_type == mtf.RETRACEMENT
     assert "retracement rather than a reversal" in rejection
@@ -151,7 +179,7 @@ def test_6_m15_bullish_inside_a_bearish_h1_leg_is_a_retracement(cfg):
 def test_5_6_the_refusal_names_what_the_move_was_missing(cfg):
     """A refusal an operator cannot act on is a refusal they will override."""
 
-    _, rejection, _ = evaluate(cfg, bearish_setup_m15(), h4=BULLISH, h1=BULLISH)
+    _, rejection, _ = evaluate(cfg, bearish_setup_m15(), h1=BULLISH)
     assert "CHoCH" in rejection or "sweep" in rejection or "displacement" in rejection
 
 
@@ -159,7 +187,7 @@ def test_5_6_the_refusal_names_what_the_move_was_missing(cfg):
 
 
 def test_7_sweep_displacement_choch_and_an_fvg_is_a_complete_trigger(cfg):
-    candidate, rejection, _ = evaluate(cfg, reversal_setup_m15(), h4=BULLISH, h1=BEARISH)
+    candidate, rejection, _ = evaluate(cfg, reversal_setup_m15(), h1=BEARISH)
     assert candidate is not None, rejection
     assert candidate.sweep is not None
     assert candidate.displacement is not None
@@ -168,7 +196,7 @@ def test_7_sweep_displacement_choch_and_an_fvg_is_a_complete_trigger(cfg):
 
 
 def test_8_a_flat_market_produces_no_trigger_at_all(cfg):
-    candidate, rejection, decision = evaluate(cfg, flat_market_m15(), h4=BULLISH, h1=BULLISH)
+    candidate, rejection, decision = evaluate(cfg, flat_market_m15(), h1=BULLISH)
     assert candidate is None
     assert decision.setup_type == mtf.NOISE
     assert "trigger" in rejection
@@ -207,7 +235,7 @@ def test_8_a_micro_break_below_the_significance_floor_is_not_structure(cfg):
 
 def test_8_a_trigger_below_the_quality_floor_is_classified_noise(cfg):
     blunt = dataclasses.replace(cfg, mtf=dataclasses.replace(cfg.mtf, min_trigger_quality=1.01))
-    candidate, rejection, decision = evaluate(blunt, bullish_setup_m15(), h4=BULLISH, h1=BULLISH)
+    candidate, rejection, decision = evaluate(blunt, bullish_setup_m15(), h1=BULLISH)
     assert candidate is None
     assert decision.setup_type == mtf.NOISE
     assert "noise, not a setup" in rejection
@@ -226,18 +254,18 @@ def test_9_no_classification_can_emit_a_candidate_below_the_rr_floor(cfg):
     before money - so that is where the guarantee is asserted.
     """
 
-    for builder, h4, h1 in (
-        (bullish_setup_m15, BULLISH, BULLISH),
-        (bearish_setup_m15, BULLISH, BEARISH),
-        (reversal_setup_m15, BULLISH, BEARISH),
+    for builder, h1 in (
+        (bullish_setup_m15, BULLISH),
+        (bearish_setup_m15, BEARISH),
+        (reversal_setup_m15, BEARISH),
     ):
-        candidate, rejection, _ = evaluate(cfg, builder(), h4=h4, h1=h1)
+        candidate, rejection, _ = evaluate(cfg, builder(), h1=h1)
         assert candidate is not None, rejection
         assert candidate.risk_reward >= cfg.risk.min_risk_reward
 
     # And a candidate that IS below the floor is refused by the scorer,
     # whatever its classification says.
-    candidate, _, _ = evaluate(cfg, reversal_setup_m15(), h4=BULLISH, h1=BEARISH)
+    candidate, _, _ = evaluate(cfg, reversal_setup_m15(), h1=BEARISH)
     starved = dataclasses.replace(candidate, risk_reward=0.1)
     assert SetupScorer(cfg).score(starved).tier == "NO_TRADE"
 
@@ -250,19 +278,19 @@ def test_10_a_structurally_over_wide_stop_is_refused_even_on_a_real_reversal(cfg
     """
 
     violent = reversal_setup_m15(displacement_overshoot=1.2)
-    candidate, rejection, decision = evaluate(cfg, violent, h4=BULLISH, h1=BEARISH)
+    candidate, rejection, decision = evaluate(cfg, violent, h1=BEARISH)
     assert decision.setup_type == mtf.REVERSAL
     assert candidate is None
     assert "too wide" in rejection
 
 
 def test_11_entry_stop_and_target_are_always_consistent(cfg):
-    for builder, h4, h1 in (
-        (bullish_setup_m15, BULLISH, BULLISH),
-        (bearish_setup_m15, BEARISH, BEARISH),
-        (reversal_setup_m15, BULLISH, BEARISH),
+    for builder, h1 in (
+        (bullish_setup_m15, BULLISH),
+        (bearish_setup_m15, BEARISH),
+        (reversal_setup_m15, BEARISH),
     ):
-        candidate, rejection, _ = evaluate(cfg, builder(), h4=h4, h1=h1)
+        candidate, rejection, _ = evaluate(cfg, builder(), h1=h1)
         assert candidate is not None, rejection
         if candidate.direction == "BUY":
             assert candidate.stop_loss < candidate.entry < candidate.take_profit
@@ -301,11 +329,6 @@ def test_16_a_choppy_market_demands_more_of_the_same_setup(cfg):
     engine = SmcEngine(cfg)
     m15_candles = bullish_setup_m15()
     analyses = {
-        "H4": engine.analyze_timeframe(
-            directional_htf(m15_candles, timeframe="H4", direction=BULLISH),
-            timeframe="H4",
-            now=SETUP_END,
-        ),
         "H1": engine.analyze_timeframe(
             directional_htf(m15_candles, timeframe="H1", direction=BULLISH),
             timeframe="H1",
@@ -324,52 +347,52 @@ def test_16_a_choppy_market_demands_more_of_the_same_setup(cfg):
     assert choppy.score_floor == pytest.approx(calm.score_floor + cfg.mtf.choppy_score_premium)
 
 
-def test_17_with_no_higher_timeframe_bias_the_m15_sequence_carries_the_setup(cfg):
-    """A directionless macro is the absence of opposition, not opposition.
+def test_17_with_no_h1_trend_the_m15_sequence_carries_the_setup(cfg):
+    """A trendless H1 is the absence of opposition, not opposition.
 
     Refusing these outright would be new over-filtering - but the bar is
     higher, because M15 is then the only anchor there is.
     """
 
-    candidate, rejection, decision = evaluate(cfg, bullish_setup_m15(), h4=NEUTRAL, h1=NEUTRAL)
+    candidate, rejection, decision = evaluate(cfg, bullish_setup_m15(), h1=NEUTRAL)
     assert candidate is not None, rejection
     assert decision.setup_type in (mtf.CONTINUATION, mtf.RANGE_ROTATION)
     assert candidate.score_floor >= cfg.mtf.floor_no_htf_context
 
 
 def test_17_a_trigger_against_the_only_structure_present_is_noise(cfg):
-    """No H4 bias, no H1 bias, and M15 pointing the other way: nothing
-    anchors the direction on any timeframe."""
+    """No H1 trend and M15 pointing the other way: nothing anchors the
+    direction on either timeframe."""
 
     permissive = dataclasses.replace(
         cfg, mtf=dataclasses.replace(cfg.mtf, range_rotation_min_position=0.999)
     )
     candidate, rejection, decision = evaluate(
-        permissive, bearish_setup_m15(), h4=NEUTRAL, h1=NEUTRAL
+        permissive, bearish_setup_m15(), h1=NEUTRAL
     )
     if candidate is None:
         assert decision.setup_type in (mtf.NOISE, mtf.RETRACEMENT)
 
 
 def test_18_a_strong_trend_continuation_carries_the_lowest_bar(cfg):
-    candidate, rejection, decision = evaluate(cfg, bullish_setup_m15(), h4=BULLISH, h1=BULLISH)
+    candidate, rejection, decision = evaluate(cfg, bullish_setup_m15(), h1=BULLISH)
     assert candidate is not None, rejection
     assert decision.setup_type == mtf.CONTINUATION
     assert candidate.score_floor <= max(cfg.scoring.tier_b, cfg.mtf.floor_continuation)
 
 
-# -- 19-20: countertrend ----------------------------------------------------
+# -- 19-20: against the trend -----------------------------------------------
 
 
 def test_19_a_genuine_reversal_against_h1_is_allowed(cfg):
     """The other half of the mandate.
 
     A sweep of real liquidity, displacement away from it, and a CHoCH
-    against the prevailing M15 trend is a reversal, and the primary bias
+    against the prevailing M15 trend is a reversal, and the H1 trend
     pointing the other way must not by itself refuse it.
     """
 
-    candidate, rejection, decision = evaluate(cfg, reversal_setup_m15(), h4=BULLISH, h1=BEARISH)
+    candidate, rejection, decision = evaluate(cfg, reversal_setup_m15(), h1=BEARISH)
     assert candidate is not None, rejection
     assert candidate.direction == "BUY"
     assert decision.setup_type == mtf.REVERSAL
@@ -381,43 +404,57 @@ def test_19_a_genuine_reversal_against_h1_is_allowed(cfg):
 
 
 def test_19_a_reversal_is_held_to_a_higher_bar_than_a_continuation(cfg):
-    reversal, _, _ = evaluate(cfg, reversal_setup_m15(), h4=BULLISH, h1=BEARISH)
-    continuation, _, _ = evaluate(cfg, bullish_setup_m15(), h4=BULLISH, h1=BULLISH)
+    reversal, _, _ = evaluate(cfg, reversal_setup_m15(), h1=BEARISH)
+    continuation, _, _ = evaluate(cfg, bullish_setup_m15(), h1=BULLISH)
     assert reversal is not None and continuation is not None
     assert reversal.score_floor > continuation.score_floor
     assert CONTEXT_FRACTION[reversal.setup_type] < CONTEXT_FRACTION[continuation.setup_type]
 
 
-def test_20_a_countertrend_scalp_is_refused_by_default(cfg):
-    """Against the primary bias AND the macro. Off until evidence says
-    otherwise (project rule 12), and the refusal names the switch."""
+def test_20_the_freshest_trigger_wins_the_direction(cfg):
+    """Both directions can classify. Recency decides between them.
 
-    candidate, rejection, decision = evaluate(cfg, reversal_setup_m15(), h4=BEARISH, h1=BEARISH)
-    assert candidate is None
-    assert "MTF_ALLOW_COUNTERTREND_SCALP" in rejection or "more recent opposing" in rejection
-
-
-def test_20_refusing_one_direction_never_hands_the_trade_to_the_other(cfg):
-    """A fresh signal one way must not become a trade the other way.
-
-    With the scalp disabled, the engine used to decline the fresh bullish
-    reversal and then SELL on an older bearish break - taking the side the
-    market had just turned away from, which is worse than either trading
-    or standing aside.
+    The scalp classification used to sit here: a reversal that fought the
+    macro as well as the trend, refused by default. With no macro there
+    is no such case, and what remains is the rule that always mattered on
+    an execution timeframe - the side the market moved LAST is the side
+    that is live. Ranking by classification first was tried and was
+    wrong: a stale continuation inside the age window outranked a fresh
+    reversal, so the engine took the direction the market had just turned
+    away from.
     """
 
-    candidate, rejection, _ = evaluate(cfg, reversal_setup_m15(), h4=BEARISH, h1=BEARISH)
-    assert candidate is None, "a refused direction must not flip into the opposite trade"
+    candidate, rejection, decision = evaluate(cfg, reversal_setup_m15(), h1=BEARISH)
+    assert candidate is not None, rejection
 
-
-def test_20_an_enabled_scalp_still_faces_the_highest_bar(cfg):
-    allowed = dataclasses.replace(
-        cfg, mtf=dataclasses.replace(cfg.mtf, allow_countertrend_scalp=True)
+    engine = SmcEngine(cfg)
+    m15 = engine.analyze_timeframe(reversal_setup_m15(), timeframe="M15", now=SETUP_END)
+    chosen = mtf.gather_direction_evidence(
+        m15, decision.wanted, index=m15.last_index, smc=cfg.smc, mtf=cfg.mtf
     )
-    _, _, decision = evaluate(allowed, reversal_setup_m15(), h4=BEARISH, h1=BEARISH)
-    assert decision.setup_type == mtf.COUNTERTREND_SCALP
-    assert decision.score_floor >= cfg.mtf.floor_countertrend_scalp
-    assert CONTEXT_FRACTION[mtf.COUNTERTREND_SCALP] == min(CONTEXT_FRACTION.values())
+    other = mtf.gather_direction_evidence(
+        m15,
+        "bearish" if decision.wanted == "bullish" else "bullish",
+        index=m15.last_index,
+        smc=cfg.smc,
+        mtf=cfg.mtf,
+    )
+    assert chosen.latest_trigger_index >= other.latest_trigger_index
+
+
+def test_20_a_refused_direction_never_flips_into_the_opposite_trade(cfg):
+    """A retracement is a refusal, not a signal to trade the other way.
+
+    It is also not a veto on the continuation it belongs to - that is
+    covered below. What it must never do is become a trade in its own
+    direction.
+    """
+
+    candidate, _, decision = evaluate(cfg, bearish_setup_m15(), h1=BULLISH)
+    assert candidate is None
+    assert decision.setup_type == mtf.RETRACEMENT
+    assert decision.direction is None
+    assert not decision.tradeable
 
 
 # -- the decision model itself ---------------------------------------------
@@ -427,30 +464,25 @@ def test_a_classification_can_only_ever_demand_more_than_the_build(cfg):
     """No classification may loosen a limit. The floors are a one-way
     ratchet above the configured B tier."""
 
-    for name in (
-        mtf.CONTINUATION,
-        mtf.CONTINUATION_VS_MACRO,
-        mtf.RANGE_ROTATION,
-        mtf.REVERSAL,
-        mtf.COUNTERTREND_SCALP,
-    ):
+    for name in (mtf.CONTINUATION, mtf.RANGE_ROTATION, mtf.REVERSAL):
         assert name in CONTEXT_FRACTION
+    # Every takeable classification is scored, and nothing else is: a
+    # name the scorer cannot place is scored zero, so a stale entry here
+    # would quietly grade a setup the engine can no longer produce.
+    assert set(CONTEXT_FRACTION) == set(mtf._PREFERENCE)
 
     floors = (
-        cfg.mtf.floor_continuation_vs_macro,
         cfg.mtf.floor_range_rotation,
         cfg.mtf.floor_reversal,
-        cfg.mtf.floor_countertrend_scalp,
         cfg.mtf.floor_no_htf_context,
     )
     assert all(floor >= cfg.scoring.tier_b for floor in floors)
-    assert cfg.mtf.floor_countertrend_scalp >= cfg.mtf.floor_reversal
-    assert cfg.mtf.floor_reversal >= cfg.mtf.floor_continuation_vs_macro
+    assert cfg.mtf.floor_reversal >= cfg.mtf.floor_range_rotation
 
 
 def test_the_decision_is_deterministic(cfg):
-    first = evaluate(cfg, bullish_setup_m15(), h4=BULLISH, h1=BULLISH)
-    second = evaluate(cfg, bullish_setup_m15(), h4=BULLISH, h1=BULLISH)
+    first = evaluate(cfg, bullish_setup_m15(), h1=BULLISH)
+    second = evaluate(cfg, bullish_setup_m15(), h1=BULLISH)
     assert first[2].as_dict() == second[2].as_dict()
     assert (first[0] is None) == (second[0] is None)
     if first[0] is not None:
@@ -459,18 +491,17 @@ def test_the_decision_is_deterministic(cfg):
 
 def test_every_outcome_carries_a_signal_state(cfg):
     engine = SmcEngine(cfg)
-    for builder, h4, h1, expected in (
+    for builder, h1, expected in (
         # A complete setup.
-        (bullish_setup_m15, BULLISH, BULLISH, mtf.TRADE),
+        (bullish_setup_m15, BULLISH, mtf.TRADE),
         # A retracement inside the H1 leg: a definite refusal.
-        (bearish_setup_m15, BULLISH, BULLISH, mtf.NO_TRADE),
+        (bearish_setup_m15, BULLISH, mtf.NO_TRADE),
         # Favourable context, no execution trigger yet - which is exactly
         # what WATCH is for, and is more use than a flat NO_TRADE.
-        (flat_market_m15, BULLISH, BULLISH, mtf.WATCH),
+        (flat_market_m15, BULLISH, mtf.WATCH),
     ):
         m15 = builder()
         series = {
-            "H4": directional_htf(m15, timeframe="H4", direction=h4),
             "H1": directional_htf(m15, timeframe="H1", direction=h1),
             "M15": m15,
         }
@@ -491,7 +522,7 @@ def test_every_outcome_carries_a_signal_state(cfg):
 
 def _reversal_candidate(cfg):
     candidate, rejection, decision = evaluate(
-        cfg, reversal_setup_m15(), h4=BULLISH, h1=BEARISH
+        cfg, reversal_setup_m15(), h1=BEARISH
     )
     assert candidate is not None, rejection
     assert decision.setup_type == mtf.REVERSAL
@@ -739,9 +770,11 @@ def test_recency_is_measured_on_the_latest_trigger_not_the_graded_one(cfg):
 def test_a_neutral_timeframe_is_never_read_as_opposed(cfg):
     """`_opposite("range")` returned "bullish" from a bare else.
 
-    That makes `h4.bias == opposing` accidentally true for a neutral H4
-    against a bearish setup - a timeframe with no opinion reading as one
-    that disagrees, which is the exact failure this layer exists to end.
+    That makes `opposes_h1()` accidentally true for a neutral H1 against
+    a bearish setup - a timeframe with no opinion reading as one that
+    disagrees, which is the exact failure this layer exists to end, and
+    `_against_primary_bias` would then be asked to classify a setup that
+    fights nothing.
     """
 
     assert mtf._opposite("bullish") == "bearish"
@@ -749,86 +782,116 @@ def test_a_neutral_timeframe_is_never_read_as_opposed(cfg):
     assert mtf._opposite("range") == ""
     assert mtf._opposite("") == ""
 
-    # And a neutral H4 still scores as context, not as opposition.
-    candidate, rejection, decision = evaluate(cfg, bullish_setup_m15(), h4=NEUTRAL, h1=BULLISH)
+    # And a neutral H1 is trendless, not opposed.
+    candidate, rejection, decision = evaluate(cfg, bullish_setup_m15(), h1=NEUTRAL)
     assert candidate is not None, rejection
-    assert decision.setup_type == mtf.CONTINUATION
+    assert decision.setup_type in (mtf.CONTINUATION, mtf.RANGE_ROTATION)
     assert decision.alignment == "partial"
 
 
-# -- the veto must not reject the setup it exists to protect ---------------
+# -- the pullback must not lose the trade to its own continuation ---------
 
 
-def test_a_retracement_does_not_veto_the_continuation_it_belongs_to(cfg):
+def test_a_retracement_does_not_take_the_trade_from_its_continuation(cfg):
     """The blocker that dominated live scans, on three symbols at once.
 
-    The recency veto exists so that declining a fresh reversal never
-    hands the trade to the opposite side on staler evidence. It was
-    written as "any more recent opposing trigger that is not noise",
-    which is far too broad: a RETRACEMENT is this layer stating that the
-    counter move has NOT earned the name reversal - the definition of a
-    pullback - and a pullback into the imbalance is the entry the whole
-    strategy is built around.
+    A recency veto used to sit in `decide`: a direction the configuration
+    had refused could stand down a staler opposite one. It was written as
+    "any more recent opposing trigger that is not noise", which is far
+    too broad - a RETRACEMENT is this layer stating that the counter move
+    has NOT earned the name reversal, the definition of a pullback, and a
+    pullback into the imbalance is the entry the whole strategy is built
+    around. So the veto rejected the setup it existed to protect.
 
-    So the veto was rejecting the setup it exists to protect. It now keys
-    on the CLASSIFICATION: only a refusal carrying real counter-evidence
-    overrides a staler opposite direction.
+    The veto is gone with H4 (the only refusal that ever carried real
+    counter-evidence was the macro case), so this asserts the behaviour
+    through the engine rather than through stubs of a mechanism that no
+    longer exists: a bullish setup inside a bullish H1 leg is taken even
+    though the bearish direction is simultaneously refused as a pullback.
     """
 
-    from bot.smc.mtf import _drop_directions_the_market_has_overtaken
-
-    def refusal(setup_type: str, at: int):
-        decision = MtfDecisionStub(setup_type)
-        evidence = EvidenceStub(latest_trigger_index=at, trigger_quality=0.9)
-        return decision, evidence
-
-    takeable = [
-        (0, "bullish", MtfDecisionStub(mtf.CONTINUATION_VS_MACRO), EvidenceStub(50, 0.9))
-    ]
-
-    # A pullback, more recent than the setup: must NOT veto.
-    kept, dropped = _drop_directions_the_market_has_overtaken(
-        takeable, [refusal(mtf.RETRACEMENT, 60)], cfg.mtf
+    engine = SmcEngine(cfg)
+    m15_candles = bullish_setup_m15()
+    m15 = engine.analyze_timeframe(m15_candles, timeframe="M15", now=SETUP_END)
+    h1 = engine.analyze_timeframe(
+        directional_htf(m15_candles, timeframe="H1", direction=BULLISH),
+        timeframe="H1",
+        now=SETUP_END,
     )
-    assert kept == takeable and not dropped, "a pullback vetoed its own continuation"
+    assert h1.bias == "bullish"
 
-    # Noise, likewise.
-    kept, _ = _drop_directions_the_market_has_overtaken(
-        takeable, [refusal(mtf.NOISE, 60)], cfg.mtf
+    # Built, not hunted: no fixture happens to carry a counter-trigger
+    # NEWER than the setup's own, which is the only arrangement in which
+    # the old veto could fire. A bearish sweep on the last bar, with no
+    # bearish displacement and no bearish CHoCH behind it, is exactly the
+    # pullback the strategy waits to buy.
+    template = max(m15.sweeps, key=lambda sweep: sweep.index)
+    pullback = dataclasses.replace(
+        template,
+        direction="bearish",
+        index=m15.last_index,
+        confirmed_index=m15.last_index,
     )
-    assert kept == takeable
+    tampered = dataclasses.replace(m15, sweeps=m15.sweeps + (pullback,))
 
-    # A completed reversal case that configuration declined: MUST veto.
-    kept, dropped = _drop_directions_the_market_has_overtaken(
-        takeable, [refusal(mtf.COUNTERTREND_SCALP, 60)], cfg.mtf
+    counter = mtf.gather_direction_evidence(
+        tampered, "bearish", index=m15.last_index, smc=cfg.smc, mtf=cfg.mtf
     )
-    assert not kept and dropped, "a declined reversal must still stand the trade down"
-
-    # And only when it is genuinely more recent.
-    kept, _ = _drop_directions_the_market_has_overtaken(
-        takeable, [refusal(mtf.COUNTERTREND_SCALP, 40)], cfg.mtf
+    with_trend = mtf.gather_direction_evidence(
+        tampered, "bullish", index=m15.last_index, smc=cfg.smc, mtf=cfg.mtf
     )
-    assert kept == takeable, "a STALER counter-signal must not veto"
+    assert counter.has_trigger, "no opposing trigger: this test proves nothing"
+    assert counter.latest_trigger_index > with_trend.latest_trigger_index, (
+        "the pullback must be the FRESHER signal, or there is nothing to veto with"
+    )
+    assert (
+        mtf.classify(
+            h1=h1,
+            m15=tampered,
+            wanted="bearish",
+            evidence=counter,
+            mtf=cfg.mtf,
+            tier_b=cfg.scoring.tier_b,
+        ).setup_type
+        == mtf.RETRACEMENT
+    )
+
+    decision, evidence = mtf.decide(
+        h1=h1,
+        m15=tampered,
+        index=m15.last_index,
+        smc=cfg.smc,
+        mtf=cfg.mtf,
+        tier_b=cfg.scoring.tier_b,
+    )
+    assert decision.direction == "BUY", decision.rationale
+    assert decision.setup_type == mtf.CONTINUATION
+    assert evidence is not None
 
 
-def test_declining_a_fresh_reversal_still_stands_the_trade_down(cfg):
-    """The case the veto was written for, still covered end to end."""
+def test_no_refusal_can_silently_stand_a_direction_down(cfg):
+    """Rule 6, applied to this layer: a refusal always says why.
 
-    candidate, rejection, _ = evaluate(cfg, reversal_setup_m15(), h4=BEARISH, h1=BEARISH)
-    assert candidate is None
-    assert "more recent opposing" in rejection or "countertrend scalp" in rejection
+    Whatever the outcome, `decide` returns a rationale naming the
+    classification it reached. A blank or generic refusal is how an
+    operator ends up overriding the engine, which is the failure the
+    whole layer is written against.
+    """
 
-
-class MtfDecisionStub:
-    """Only the field the veto reads."""
-
-    def __init__(self, setup_type: str) -> None:
-        self.setup_type = setup_type
-
-
-class EvidenceStub:
-    """Only the fields the veto reads."""
-
-    def __init__(self, latest_trigger_index: int, trigger_quality: float) -> None:
-        self.latest_trigger_index = latest_trigger_index
-        self.trigger_quality = trigger_quality
+    for builder, h1 in (
+        (bullish_setup_m15, BULLISH),
+        (bearish_setup_m15, BULLISH),
+        (flat_market_m15, BULLISH),
+        (bullish_setup_m15, NEUTRAL),
+        (reversal_setup_m15, BEARISH),
+    ):
+        _, _, decision = evaluate(cfg, builder(), h1=h1)
+        assert decision.rationale.strip(), "a silent decision is not a decision"
+        assert decision.setup_type in (
+            mtf.CONTINUATION,
+            mtf.RANGE_ROTATION,
+            mtf.REVERSAL,
+            mtf.RETRACEMENT,
+            mtf.NOISE,
+        )
+        assert decision.tradeable == (decision.direction is not None)

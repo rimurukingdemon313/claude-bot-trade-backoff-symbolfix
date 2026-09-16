@@ -1,9 +1,10 @@
 """Sweep reversion: the high-frequency mode.
 
-SMC mode is a structure-continuation strategy. It demands H4, H1 and M15
-agreement, a break of structure, displacement, and an entry back inside a
-fresh imbalance. Every one of those is a filter, and together they are why
-it stands aside most days — correctly, but rarely.
+SMC mode is a structure-continuation strategy. It demands an H1 trend the
+M15 trigger can be classified against, a break of structure, displacement,
+and an entry back inside a fresh imbalance. Every one of those is a filter,
+and together they are why it stands aside most days — correctly, but
+rarely.
 
 This mode trades a different, far more common event with the SAME measured
 primitives. Nothing new is invented (project rule 12): the sweeps, the
@@ -26,11 +27,11 @@ structure is required, and a ranging M15 — which SMC rejects outright as
 "no confirmed directional structure", the single largest cause of NO
 TRADE — is the regime this strategy is FOR.
 
-Where it stays disciplined: it will not fade a higher-timeframe trend.
-When H4 has a direction, only sweeps that resolve WITH it are taken (a
-sell-side sweep in a bullish H4 is a dip, not a top). When H4 is ranging,
-either side is allowed. Fading a strong trend is how a high-hit-rate
-strategy earns its one catastrophic loss.
+Where it stays disciplined: it will not fade the H1 trend. When H1 has a
+direction, only sweeps that resolve WITH it are taken (a sell-side sweep
+in a bullish H1 is a dip, not a top). When H1 is ranging, either side is
+allowed. Fading a decided trend is how a high-hit-rate strategy earns its
+one catastrophic loss.
 
 Nothing here promises a win rate. A tighter target is hit more often than
 a distant one, which is arithmetic; whether that nets out ahead of SMC on
@@ -129,9 +130,8 @@ class ReversionStrategy:
     ) -> tuple[SetupCandidate | None, str | None]:
         m15 = analyses.get("M15")
         h1 = analyses.get("H1")
-        h4 = analyses.get("H4")
-        if m15 is None or h1 is None or h4 is None:
-            return None, "multi-timeframe analysis incomplete (H4, H1 and M15 are all required)"
+        if m15 is None or h1 is None:
+            return None, "multi-timeframe analysis incomplete (H1 and M15 are both required)"
 
         index = m15.last_index
         price = m15.price
@@ -155,7 +155,7 @@ class ReversionStrategy:
         # A bullish sweep took SELL-side liquidity (the lows) and points up.
         direction = "BUY" if sweep.direction == "bullish" else "SELL"
 
-        allowed, veto = self._htf_permits(direction, h4, h1)
+        allowed, veto = self._htf_permits(direction, h1)
         if not allowed:
             return None, veto
 
@@ -208,7 +208,6 @@ class ReversionStrategy:
                 atr=m15.atr,
                 session=session,
                 regime=m15.regime,
-                htf_bias=h4.bias,
                 h1_bias=h1.bias,
                 m15_bias=m15.bias,
                 alignment="counter",
@@ -235,7 +234,7 @@ class ReversionStrategy:
                     f"{direction} reversion after a {sweep.level.label} sweep",
                     f"rejection {sweep.rejection_ratio:.0%}, quality {sweep.quality:.2f}",
                     f"target is 1:{self.profile.min_risk_reward:g} of the swept-wick stop",
-                    f"H4 {h4.bias}, H1 {h1.bias}, M15 {m15.bias}",
+                    f"H1 {h1.bias}, M15 {m15.bias}",
                 ),
                 timestamp=m15.candles[index].close_time,
             ),
@@ -264,39 +263,36 @@ class ReversionStrategy:
             return None
         return max(usable, key=lambda s: (s.confirmed_index, s.quality))
 
-    def _htf_permits(
-        self, direction: str, h4: TimeframeAnalysis, h1: TimeframeAnalysis
-    ) -> tuple[bool, str]:
-        """Never fade a higher timeframe that has made up its mind.
+    def _htf_permits(self, direction: str, h1: TimeframeAnalysis) -> tuple[bool, str]:
+        """Never fade the trend when it has made up its mind.
 
-        A ranging H4 has no opinion, so either side is available — and that
+        A ranging H1 has no opinion, so either side is available — and that
         is the common case, which is where the frequency comes from. But a
-        trending H4 is not something a reversion trade should stand in
+        trending H1 is not something a reversion trade should stand in
         front of: the one loss that does not come back is the one taken
         against the dominant flow.
 
         This is DELIBERATELY not `bot.smc.mtf`, and it is not a leftover of
         the rigid agreement rule that module replaced. The SMC engine takes
-        a turn against the primary bias when the turn has earned the name
-        reversal — a swept level of real significance, displacement away
-        from it, a CHoCH. This mode has no such trigger to appeal to: it
-        fades a stretched move on the strength of the stretch alone, and a
-        stretch is not evidence of a turn. So it keeps the stricter rule,
-        and it applies only while this strategy is the selected one. Both
+        a turn against the trend when the turn has earned the name reversal
+        — a swept level of real significance, displacement away from it, a
+        CHoCH. This mode has no such trigger to appeal to: it fades a
+        stretched move on the strength of the stretch alone, and a stretch
+        is not evidence of a turn. So it keeps the stricter rule, and it
+        applies only while this strategy is the selected one. Both
         strategies then meet the same risk engine, unchanged (rule 14).
+
+        Removing H4 made this strictly tighter, never looser: the old rule
+        let an H1 that opposed the trade through whenever H4 agreed with
+        it, and that combination is now refused.
         """
 
         opposing = "bearish" if direction == "BUY" else "bullish"
 
-        if h4.bias == opposing:
+        if h1.bias == opposing:
             return False, (
-                f"{direction} reversion refused: H4 is {h4.bias} and a reversion trade "
-                "may not fade a decided higher timeframe"
-            )
-        if h4.bias == "range" and h1.bias == opposing:
-            return False, (
-                f"{direction} reversion refused: H4 has no bias and H1 is {h1.bias} — "
-                "nothing supports the reversion"
+                f"{direction} reversion refused: H1 is {h1.bias} and a reversion trade "
+                "may not fade a decided trend"
             )
         return True, ""
 

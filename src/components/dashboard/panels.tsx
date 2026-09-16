@@ -339,11 +339,9 @@ function setupTone(setupType: string | undefined): "good" | "warn" | "neutral" {
   switch (setupType) {
     case "CONTINUATION":
       return "good";
-    case "CONTINUATION_VS_MACRO":
     case "RANGE_ROTATION":
       return "neutral";
     case "REVERSAL":
-    case "COUNTERTREND_SCALP":
       return "warn";
     default:
       return "neutral";
@@ -380,15 +378,14 @@ function SymbolCard({ entry }: { entry: ScanSymbol }) {
             <Field label="Session" value={candidate.session?.name ?? "—"} />
           </div>
           <div className="mt-3 flex flex-wrap gap-1.5">
-            <Badge tone="info">H4 {candidate.htfBias}</Badge>
             <Badge tone="info">H1 {candidate.h1Bias}</Badge>
             <Badge tone="info">M15 {candidate.m15Bias}</Badge>
             {/*
-              The classification, not a unanimity score. H4/H1/M15 all
-              agreeing is not what makes a setup good - a reversal
-              disagrees with the primary bias by definition - so what is
-              shown is how the setup stands to the context, and the score
-              it therefore had to clear.
+              The classification, not an agreement score. H1 and M15
+              pointing the same way is not what makes a setup good - a
+              reversal disagrees with the trend by definition - so what is
+              shown is how the setup stands to the trend, and the score it
+              therefore had to clear.
             */}
             <Badge tone={setupTone(candidate.setupType)}>
               {String(candidate.setupType ?? candidate.alignment).replace(/_/g, " ")}

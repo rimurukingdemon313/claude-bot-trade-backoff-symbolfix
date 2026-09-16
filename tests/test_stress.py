@@ -100,7 +100,7 @@ def test_a_flash_crash_makes_the_regime_untradeable():
 def test_a_flash_crash_produces_no_setup(config, repos):
     broker = FakeBroker()
     crash = flash_crash_series()
-    for timeframe in ("M15", "H1", "H4"):
+    for timeframe in ("M15", "H1"):
         broker.set_series(
             "EURUSD",
             timeframe,
@@ -153,7 +153,7 @@ def test_a_frozen_market_of_identical_candles_yields_no_setup(config):
     analysis = SmcEngine(config).analyze_timeframe(frozen, timeframe="M15", now=SETUP_END)
     assert analysis.atr == pytest.approx(0.0, abs=1e-12)
     candidate, rejection = SmcEngine(config).build_candidate(
-        "EURUSD", {"M15": analysis, "H1": analysis, "H4": analysis}, now=SETUP_END
+        "EURUSD", {"M15": analysis, "H1": analysis}, now=SETUP_END
     )
     assert candidate is None
     assert rejection is not None
@@ -672,7 +672,6 @@ def test_overlapping_scans_do_not_both_execute(config, broker, repos):
     m15 = bullish_setup_m15()
     broker.set_series("EURUSD", "M15", m15)
     broker.set_series("EURUSD", "H1", aligned_htf(m15, timeframe="H1"))
-    broker.set_series("EURUSD", "H4", aligned_htf(m15, timeframe="H4"))
     orchestrator = Orchestrator(
         config, broker=broker, repositories=repos, market_data=MarketDataProvider(broker, config)
     )

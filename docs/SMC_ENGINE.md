@@ -30,9 +30,14 @@ produce the identical verdict it produced with the later bars present.
 
 | Timeframe | Role |
 | --- | --- |
-| **H4** | Macro context. Raises the bar when it disagrees; never a veto. |
-| **H1** | Primary directional bias. |
+| **H1** | The trend. Disagreement raises the bar; it is never a veto. |
 | **M15** | Execution: the trigger, the entry zone, the levels. |
+
+Two, not three. H4 sat above H1 as macro context and was removed: at 240
+minutes it is sixteen times the execution timeframe, and a bias that coarse
+is stale relative to the entries it was judging. H1 is four times M15 — the
+ratio trend-following actually uses — so the trend is now read where it can
+still be acted on.
 
 Direction is **not** taken from any single timeframe's bias. `bot/smc/mtf.py`
 classifies *both* directions from the M15 evidence and takes the better one,
@@ -46,26 +51,37 @@ rather than a yes/no:
 
 | Classification | Meaning | Floor |
 | --- | --- | --- |
-| `CONTINUATION` | With H1; H4 agrees or is neutral | the configured B tier |
-| `CONTINUATION_VS_MACRO` | With H1, against H4 | `MTF_FLOOR_CONTINUATION_VS_MACRO` |
-| `RANGE_ROTATION` | No HTF bias; swept range extreme | `MTF_FLOOR_RANGE_ROTATION` |
+| `CONTINUATION` | With the H1 trend | the configured B tier |
+| `CONTINUATION` | H1 trendless; M15 structure is the only anchor | `MTF_FLOOR_NO_HTF_CONTEXT` |
+| `RANGE_ROTATION` | H1 trendless; swept range extreme | `MTF_FLOOR_RANGE_ROTATION` |
 | `REVERSAL` | Against H1, with sweep + displacement + CHoCH | `MTF_FLOOR_REVERSAL` |
-| `COUNTERTREND_SCALP` | Against H1 **and** H4 | `MTF_FLOOR_COUNTERTREND_SCALP`, off by default |
 | `RETRACEMENT` / `NOISE` | Against H1 without that evidence | never traded |
 
 A floor is a one-way ratchet: it is `max(tier_b, floor)`, so a classification
 can demand more evidence than the build does and never less.
 
 **Retracement vs reversal** is the distinction the whole layer turns on. A
-move against the primary bias is only a reversal when it has swept liquidity
+move against the H1 trend is only a reversal when it has swept liquidity
 of real significance, displaced away from it, and printed a **CHoCH** — a
 break against the prevailing M15 trend. A break in the direction the move was
 already travelling is continuation of a pullback. Distance travelled is not
 evidence, and treating it as evidence is how a system sells the bottom of one.
 
-A refused direction never hands the trade to the other: if the most recent
-meaningful trigger points the way we will not trade, the answer is no trade,
-not a trade the other way on staler evidence.
+Between two directions that both classify, the **most recent** trigger wins:
+on an execution timeframe recency is the signal, and ranking by
+classification first let a stale continuation outrank a fresh reversal — the
+engine took the side the market had just turned away from. Quality breaks a
+tie on the same candle, and the classification preference breaks a tie on
+both, so the result never depends on loop order.
+
+A recency *veto* used to sit alongside that sort, letting a refused direction
+stand down a staler opposite one. It is gone with H4, which is what made it
+reachable: the only refusal that ever carried counter-evidence was a reversal
+declined for fighting the macro as well as the trend. What remains is
+`RETRACEMENT` — this layer saying the counter move has **not** earned the name
+reversal, which is the definition of the pullback the strategy enters on.
+Letting that veto rejected the setup the guard existed to protect, on three
+symbols in one live scan.
 
 ### Signal states
 

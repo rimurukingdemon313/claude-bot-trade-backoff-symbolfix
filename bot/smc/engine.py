@@ -1,15 +1,14 @@
-"""Multi-timeframe SMC engine.
+"""Two-timeframe SMC engine.
 
-    H4 macro context -> H1 primary bias -> M15 execution
+    H1 trend -> M15 execution
       -> liquidity map -> sweep -> displacement -> BOS/CHoCH
       -> FVG/OB retracement -> premium/discount -> priced candidate
 
 Direction and the bar it must clear come from `bot.smc.mtf`, which
-classifies the setup against the primary bias and the macro context
-instead of requiring the three timeframes to agree. Read that module for
-why: in short, unanimity is not what makes a setup good, and demanding it
-threw away the ordinary case of a short with the primary bias while the
-macro has not yet turned.
+classifies the setup against the H1 trend instead of requiring the
+timeframes to agree. Read that module for why: in short, unanimity is not
+what makes a setup good, and demanding it threw away the ordinary case of
+a pullback entry inside a trend.
 
 This engine then does the part that unanimity was never a substitute for:
 finding a real M15 trigger, an entry zone price has actually reached, and
@@ -119,7 +118,6 @@ class SetupCandidate:
     atr: float
     session: SessionState
     regime: Regime
-    htf_bias: str
     h1_bias: str
     m15_bias: str
     alignment: str           # aligned | partial | counter
@@ -129,10 +127,10 @@ class SetupCandidate:
     point_of_interest: dict[str, Any] | None
     dealing_range: DealingRange | None
     liquidity_target: dict[str, Any] | None
-    #: How this setup relates to the primary bias and the macro context:
-    #: CONTINUATION, CONTINUATION_VS_MACRO, RANGE_ROTATION, REVERSAL or
-    #: COUNTERTREND_SCALP. Recorded on every trade, because averaging a
-    #: reversal's results with a continuation's describes neither.
+    #: How this setup relates to the H1 trend: CONTINUATION,
+    #: RANGE_ROTATION or REVERSAL. Recorded on every trade, because
+    #: averaging a reversal's results with a continuation's describes
+    #: neither.
     setup_type: str = "CONTINUATION"
     #: Minimum total score this classification must reach. Set by the MTF
     #: layer and only ever ABOVE the configured B tier - a classification
@@ -153,7 +151,6 @@ class SetupCandidate:
             "atr": self.atr,
             "session": self.session.as_dict(),
             "regime": self.regime.as_dict(),
-            "htfBias": self.htf_bias,
             "h1Bias": self.h1_bias,
             "m15Bias": self.m15_bias,
             "alignment": self.alignment,
@@ -316,9 +313,8 @@ class SmcEngine:
     ) -> tuple[SetupCandidate | None, str | None, MtfDecision | None]:
         m15 = analyses.get("M15")
         h1 = analyses.get("H1")
-        h4 = analyses.get("H4")
-        if m15 is None or h1 is None or h4 is None:
-            return None, "multi-timeframe analysis incomplete (H4, H1 and M15 are all required)", None
+        if m15 is None or h1 is None:
+            return None, "multi-timeframe analysis incomplete (H1 and M15 are both required)", None
 
         index = m15.last_index
         price = m15.price
@@ -332,9 +328,8 @@ class SmcEngine:
         if m15.atr <= 0:
             return None, "ATR is zero — cannot normalise structure or size a stop", None
 
-        # --- H4 context, H1 bias, M15 execution: weighted, not unanimous ---
+        # --- H1 trend, M15 execution: classified, not unanimous ---
         decision, evidence = decide_mtf(
-            h4=h4,
             h1=h1,
             m15=m15,
             index=index,
@@ -455,7 +450,6 @@ class SmcEngine:
             atr=m15.atr,
             session=session,
             regime=m15.regime,
-            htf_bias=h4.bias,
             h1_bias=h1.bias,
             m15_bias=m15.bias,
             alignment=alignment,
@@ -586,7 +580,7 @@ class SmcEngine:
     ) -> tuple[str, ...]:
         items = [
             f"{direction} classified {decision.setup_type} "
-            f"(H4 {decision.h4_context} / H1 {decision.h1_bias} / M15 {decision.m15_bias})",
+            f"(H1 {decision.h1_bias} / M15 {decision.m15_bias})",
             decision.rationale,
         ]
         items.extend(decision.evidence)

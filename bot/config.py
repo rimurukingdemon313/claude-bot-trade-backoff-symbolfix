@@ -277,9 +277,9 @@ class MtfConfig:
     per account without editing logic, and so a change is visible in one
     place rather than buried across the engine.
 
-    The model is H4 = CONTEXT, H1 = PRIMARY BIAS, M15 = EXECUTION. H4
-    disagreement raises the bar; it does not veto. What DOES veto is a
-    move against the primary bias that has not earned the name reversal.
+    The model is H1 = TREND, M15 = EXECUTION. Disagreement raises the
+    bar; it does not veto. What DOES veto is a move against the trend
+    that has not earned the name reversal.
     """
 
     #: A trigger weaker than this is noise whatever else agrees with it.
@@ -289,7 +289,7 @@ class MtfConfig:
     #: would read as a break of structure.
     min_structure_clearance_atr: float = 0.12
 
-    # -- what a REVERSAL against the primary bias must show ---------------
+    # -- what a REVERSAL against the H1 trend must show --------------------
     #: The swept level's own significance (see liquidity.LEVEL_WEIGHTS).
     #: A random intraday pivot is not the liquidity a reversal runs on.
     reversal_min_level_weight: float = 0.6
@@ -301,25 +301,18 @@ class MtfConfig:
     reversal_requires_choch: bool = True
 
     # -- score floors by classification ------------------------------------
-    #: Minimum total score (0..100) for each setup type. Continuation with
-    #: context is the baseline; everything that fights something has to be
-    #: better than baseline, in proportion to what it fights.
+    #: Minimum total score (0..100) for each setup type. Continuation
+    #: with the trend is the baseline; everything that fights something
+    #: has to be better than baseline, in proportion to what it fights.
     floor_continuation: float = 0.0          # 0 = use the configured B tier
-    floor_continuation_vs_macro: float = 62.0
     floor_range_rotation: float = 60.0
-    #: Neither H4 nor H1 has confirmed directional structure. The M15
-    #: sequence is then the only anchor there is, so it must be a good
-    #: one - but a directionless macro is the ABSENCE of opposition,
-    #: not opposition, and refusing these outright would be exactly the
-    #: over-filtering this layer exists to remove.
+    #: H1 has no confirmed directional structure. The M15 sequence is
+    #: then the only anchor there is, so it must be a good one - but a
+    #: trendless H1 is the ABSENCE of opposition, not opposition, and
+    #: refusing these outright would be exactly the over-filtering this
+    #: layer exists to remove.
     floor_no_htf_context: float = 60.0
     floor_reversal: float = 70.0
-    floor_countertrend_scalp: float = 78.0
-
-    #: Countertrend scalps fight BOTH the primary bias and the macro
-    #: context. Off by default: rule 12 — a mode earns its place with
-    #: evidence, and there is none yet.
-    allow_countertrend_scalp: bool = False
 
     # -- regime handling ---------------------------------------------------
     #: A transitional market with directional strength below this and no
@@ -716,18 +709,11 @@ def load_config(env: Mapping[str, str] | None = None) -> TradingConfig:
             "MTF_REVERSAL_MIN_DISPLACEMENT_QUALITY", 0.45, low=0.0, high=1.0
         ),
         reversal_requires_choch=_env_bool("MTF_REVERSAL_REQUIRES_CHOCH", True),
-        floor_continuation_vs_macro=_env_float(
-            "MTF_FLOOR_CONTINUATION_VS_MACRO", 62.0, low=0.0, high=100.0
-        ),
         floor_range_rotation=_env_float("MTF_FLOOR_RANGE_ROTATION", 60.0, low=0.0, high=100.0),
         floor_no_htf_context=_env_float(
             "MTF_FLOOR_NO_HTF_CONTEXT", 60.0, low=0.0, high=100.0
         ),
         floor_reversal=_env_float("MTF_FLOOR_REVERSAL", 70.0, low=0.0, high=100.0),
-        floor_countertrend_scalp=_env_float(
-            "MTF_FLOOR_COUNTERTREND_SCALP", 78.0, low=0.0, high=100.0
-        ),
-        allow_countertrend_scalp=_env_bool("MTF_ALLOW_COUNTERTREND_SCALP", False),
         choppy_directional_strength=_env_float(
             "MTF_CHOPPY_DIRECTIONAL_STRENGTH", 0.28, low=0.0, high=1.0
         ),

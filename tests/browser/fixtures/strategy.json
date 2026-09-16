@@ -18,7 +18,7 @@
    {
     "key": "smc",
     "name": "Smart Money Concepts",
-    "description": "Trades continuation after a structural shift: a liquidity sweep, a break of structure with displacement, and an entry back inside the imbalance it left. Requires H4, H1 and M15 to agree, so it stands aside often and aims far.",
+    "description": "Trades continuation after a structural shift: a liquidity sweep, a break of structure with displacement, and an entry back inside the imbalance it left. H1 sets the trend and M15 the trigger, so it stands aside often and aims far.",
     "minRiskReward": 2.0,
     "expectedFrequency": "a few a week",
     "thesis": "structure breaks in the direction institutional flow has already committed to",

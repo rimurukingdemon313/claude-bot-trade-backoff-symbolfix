@@ -51,7 +51,6 @@ def broker() -> FakeBroker:
     m15 = bullish_setup_m15()
     fake.set_series("EURUSD", "M15", m15)
     fake.set_series("EURUSD", "H1", aligned_htf(m15, timeframe="H1"))
-    fake.set_series("EURUSD", "H4", aligned_htf(m15, timeframe="H4"))
     return fake
 
 

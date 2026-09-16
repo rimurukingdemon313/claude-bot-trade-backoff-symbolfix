@@ -414,7 +414,7 @@ class TradeRepository:
 #: The lookbehind matters: a digit attached to a letter or to another
 #: digit of the same token is part of a NAME,
 #: not a measurement. Without it "M15 has no structure" folds to "M# has
-#: no structure" and silently merges M15 with M5, H1 with H4 — destroying
+#: no structure" and silently merges M15 with M5 — destroying
 #: exactly the distinction the histogram exists to show.
 _NUMBER = re.compile(r"(?<![A-Za-z0-9])\d+(?:[.,]\d+)?%?")
 

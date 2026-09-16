@@ -62,6 +62,16 @@ COUNTERTREND_SCALP = "COUNTERTREND_SCALP"
 RETRACEMENT = "RETRACEMENT"
 NOISE = "NOISE"
 
+#: A refused direction may override a staler opposite one ONLY when its
+#: refusal implies real counter-evidence: a completed reversal case that
+#: configuration declined. A RETRACEMENT is the opposite of that - it is
+#: this layer saying "the move against the primary bias has NOT earned
+#: the name reversal", which is the definition of a pullback. Letting a
+#: pullback veto the continuation it belongs to rejected the textbook
+#: entry this strategy exists to take, and it did so on three symbols at
+#: once in production.
+_VETOING_REFUSALS = frozenset({COUNTERTREND_SCALP, REVERSAL})
+
 #: Ordered best-first. Used to break a tie between two directions that
 #: both classified, AFTER recency - see `decide`.
 _PREFERENCE = (
@@ -74,12 +84,12 @@ _PREFERENCE = (
 
 # -- signal states -----------------------------------------------------------
 
-#: Nothing here is worth watching.
 #: How near a displacement must be to the trigger to count as the move
 #: that produced it. Wider and it picks up an unrelated impulse; narrower
 #: and a displacement one candle late is missed.
 DISPLACEMENT_PROXIMITY_CANDLES = 6
 
+#: Nothing here is worth watching.
 NO_TRADE = "NO_TRADE"
 #: Context is favourable but the execution trigger is incomplete.
 WATCH = "WATCH"
@@ -640,9 +650,10 @@ def decide(
 
     results: list[tuple[int, str, MtfDecision, DirectionEvidence]] = []
     rejected: list[MtfDecision] = []
-    #: Evidence for each direction that did NOT qualify, so a refused
-    #: direction can still veto a staler opposite one.
-    rejected_triggers: list[DirectionEvidence] = []
+    #: (decision, evidence) for each direction that did NOT qualify. The
+    #: decision is what decides whether it may veto a staler opposite
+    #: direction; the evidence is how recent it was.
+    rejected_triggers: list[tuple[MtfDecision, DirectionEvidence]] = []
 
     for wanted in ("bullish", "bearish"):
         evidence = gather_direction_evidence(
@@ -693,7 +704,7 @@ def decide(
             )
         else:
             rejected.append(decision)
-            rejected_triggers.append(evidence)
+            rejected_triggers.append((decision, evidence))
 
     if results:
         results, blocked = _drop_directions_the_market_has_overtaken(
@@ -752,13 +763,13 @@ def decide(
 
 def _drop_directions_the_market_has_overtaken(
     results: list[tuple[int, str, MtfDecision, DirectionEvidence]],
-    rejected: Sequence[DirectionEvidence],
+    rejected: Sequence[tuple[MtfDecision, DirectionEvidence]],
     mtf: MtfConfig,
 ) -> tuple[
     list[tuple[int, str, MtfDecision, DirectionEvidence]],
     list[tuple[int, str, MtfDecision, DirectionEvidence]],
 ]:
-    """Remove any takeable direction the market has since traded against.
+    """Remove a takeable direction the market has genuinely turned against.
 
     Refusing one direction must never hand the trade to the other by
     default. With the countertrend scalp disabled, a fresh bullish
@@ -766,16 +777,25 @@ def _drop_directions_the_market_has_overtaken(
     break - taking the side the market had just turned away from, which is
     strictly worse than either trading or standing aside.
 
-    A refused direction only vetoes when its trigger is genuinely more
-    recent AND cleared the noise floor: weak noise does not get to block a
-    real setup. Returns (still takeable, overtaken).
+    But "more recent and not noise" was far too broad a test for that, and
+    production showed it: a RETRACEMENT was allowed to veto, on three
+    symbols in one scan. A retracement is this layer stating that the move
+    against the primary bias has NOT earned the name reversal - which is
+    the definition of a pullback, and a pullback into the imbalance is the
+    entry the whole strategy is built around. The veto was rejecting the
+    setup it exists to protect.
+
+    So the test is the CLASSIFICATION, not the trigger's strength: only a
+    refusal carrying real counter-evidence overrides a staler opposite
+    one. Returns (still takeable, overtaken).
     """
 
     newest_refused = max(
         (
             evidence.latest_trigger_index
-            for evidence in rejected
-            if evidence.trigger_quality >= mtf.min_trigger_quality
+            for decision, evidence in rejected
+            if decision.setup_type in _VETOING_REFUSALS
+            and evidence.trigger_quality >= mtf.min_trigger_quality
         ),
         default=-1,
     )

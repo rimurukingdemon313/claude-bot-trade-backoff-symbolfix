@@ -754,3 +754,81 @@ def test_a_neutral_timeframe_is_never_read_as_opposed(cfg):
     assert candidate is not None, rejection
     assert decision.setup_type == mtf.CONTINUATION
     assert decision.alignment == "partial"
+
+
+# -- the veto must not reject the setup it exists to protect ---------------
+
+
+def test_a_retracement_does_not_veto_the_continuation_it_belongs_to(cfg):
+    """The blocker that dominated live scans, on three symbols at once.
+
+    The recency veto exists so that declining a fresh reversal never
+    hands the trade to the opposite side on staler evidence. It was
+    written as "any more recent opposing trigger that is not noise",
+    which is far too broad: a RETRACEMENT is this layer stating that the
+    counter move has NOT earned the name reversal - the definition of a
+    pullback - and a pullback into the imbalance is the entry the whole
+    strategy is built around.
+
+    So the veto was rejecting the setup it exists to protect. It now keys
+    on the CLASSIFICATION: only a refusal carrying real counter-evidence
+    overrides a staler opposite direction.
+    """
+
+    from bot.smc.mtf import _drop_directions_the_market_has_overtaken
+
+    def refusal(setup_type: str, at: int):
+        decision = MtfDecisionStub(setup_type)
+        evidence = EvidenceStub(latest_trigger_index=at, trigger_quality=0.9)
+        return decision, evidence
+
+    takeable = [
+        (0, "bullish", MtfDecisionStub(mtf.CONTINUATION_VS_MACRO), EvidenceStub(50, 0.9))
+    ]
+
+    # A pullback, more recent than the setup: must NOT veto.
+    kept, dropped = _drop_directions_the_market_has_overtaken(
+        takeable, [refusal(mtf.RETRACEMENT, 60)], cfg.mtf
+    )
+    assert kept == takeable and not dropped, "a pullback vetoed its own continuation"
+
+    # Noise, likewise.
+    kept, _ = _drop_directions_the_market_has_overtaken(
+        takeable, [refusal(mtf.NOISE, 60)], cfg.mtf
+    )
+    assert kept == takeable
+
+    # A completed reversal case that configuration declined: MUST veto.
+    kept, dropped = _drop_directions_the_market_has_overtaken(
+        takeable, [refusal(mtf.COUNTERTREND_SCALP, 60)], cfg.mtf
+    )
+    assert not kept and dropped, "a declined reversal must still stand the trade down"
+
+    # And only when it is genuinely more recent.
+    kept, _ = _drop_directions_the_market_has_overtaken(
+        takeable, [refusal(mtf.COUNTERTREND_SCALP, 40)], cfg.mtf
+    )
+    assert kept == takeable, "a STALER counter-signal must not veto"
+
+
+def test_declining_a_fresh_reversal_still_stands_the_trade_down(cfg):
+    """The case the veto was written for, still covered end to end."""
+
+    candidate, rejection, _ = evaluate(cfg, reversal_setup_m15(), h4=BEARISH, h1=BEARISH)
+    assert candidate is None
+    assert "more recent opposing" in rejection or "countertrend scalp" in rejection
+
+
+class MtfDecisionStub:
+    """Only the field the veto reads."""
+
+    def __init__(self, setup_type: str) -> None:
+        self.setup_type = setup_type
+
+
+class EvidenceStub:
+    """Only the fields the veto reads."""
+
+    def __init__(self, latest_trigger_index: int, trigger_quality: float) -> None:
+        self.latest_trigger_index = latest_trigger_index
+        self.trigger_quality = trigger_quality

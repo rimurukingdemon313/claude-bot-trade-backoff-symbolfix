@@ -117,6 +117,13 @@ class CircuitBreaker:
         return "half-open" if self._half_open else "open"
 
 
+#: The shortest cooldown a rate limit may impose on this process,
+#: whatever the host's own Retry-After says. A burst limit is a window,
+#: and a window does not reopen because one request was allowed to be
+#: retried.
+MIN_RATE_LIMIT_COOLDOWN = 60.0
+
+
 class Throttle:
     """Request spacing that LEARNS the host's limit instead of guessing it.
 
@@ -359,10 +366,25 @@ class HttpTransport:
                     self.circuit.record_success()  # an auth error is not an outage
                     raise BrokerAuthError(f"{method} {url} unauthorized ({exc.code}): {detail}")
                 if exc.code == 429:
-                    # Cloudflare's 1015 does not carry Retry-After. A minute
-                    # is the shortest cooldown that reliably clears it, and
-                    # guessing lower is how a rate limit becomes permanent.
-                    self.throttle.penalise(retry_after if retry_after is not None else 60.0)
+                    # Retry-After is a FLOOR, never the answer.
+                    #
+                    # The comment that used to sit here said Cloudflare's
+                    # 1015 does not carry Retry-After. It does, and it
+                    # carries a small number - so honouring it literally
+                    # set a one-second cooldown and the bot walked straight
+                    # back into an active ban, once a second, for as long
+                    # as the scan lasted. Four refusals one second apart is
+                    # exactly what the live logs showed, and it is why
+                    # every volume reduction before this changed nothing:
+                    # the cooldown those fixes relied on was never applied.
+                    #
+                    # "Retry this REQUEST in a second" is not "your burst
+                    # budget has recovered". Only the host knows the
+                    # second; only we know we are mid-scan. So take
+                    # whichever is longer.
+                    self.throttle.penalise(
+                        max(retry_after or 0.0, MIN_RATE_LIMIT_COOLDOWN)
+                    )
                     self.rate_limited += 1
                     # Raised, never retried, and NOT counted as a circuit
                     # failure. A rate limit is not an outage: the broker is

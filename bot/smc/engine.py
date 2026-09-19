@@ -484,8 +484,16 @@ class SmcEngine:
             index=index,
         )
         if levels is None:
-            chain.failed("stop_loss", "no structurally valid stop and target")
-            return refuse("could not construct a structurally valid stop and target", decision)
+            chain.failed(
+                "stop_loss",
+                "no structurally valid stop, or no opposing liquidity to target",
+            )
+            return refuse(
+                "could not construct a structurally valid stop and target: the stop must sit "
+                "behind the invalidation level and the target must be real opposing liquidity, "
+                "never a projection chosen to make the ratio work",
+                decision,
+            )
         entry, stop_loss, take_profit, target_level = levels
 
         stop_distance = abs(entry - stop_loss)
@@ -512,8 +520,7 @@ class SmcEngine:
         chain.passed("stop_loss", f"{stop_atr:.2f} ATR behind the invalidation level")
         chain.passed(
             "take_profit",
-            f"{take_profit:.5f}"
-            + (f" ({target_level.get('label')})" if target_level else " (R projection)"),
+            f"{take_profit:.5f} ({target_level['label']})" if target_level else f"{take_profit:.5f}",
         )
 
         risk_reward = reward_distance / stop_distance
@@ -643,27 +650,56 @@ class SmcEngine:
         if stop_distance <= 0:
             return None
 
-        # Target: the next opposing liquidity pool, if it is far enough to
-        # be worth the risk; otherwise a clean R-multiple projection.
-        target = analysis.liquidity.nearest_target(entry, direction, index)
-        target_level: dict[str, Any] | None = None
+        # Target: real opposing liquidity when the map can see some, and
+        # said out loud when it cannot.
+        #
+        # The map is asked for the nearest pool ALREADY far enough to pay
+        # for the stop, rather than the nearest pool full stop. Closer
+        # pools are not targets, they are hurdles the trade has to pass
+        # through, and a discretionary trader treats them the same way.
+        #
+        # When no such pool exists the target is a projection at the
+        # minimum R, and `target_level` is None to say so. That distinction
+        # used to exist only as this silence: nothing downstream could tell
+        # a structural target from a manufactured one, the R:R gate could
+        # never fail on the projected path, and a setup whose nearest real
+        # liquidity sat at 0.23R went into the record as exactly 1:2 —
+        # because 1:2 was the number being tested against. The primary test
+        # fixture had been doing that, unnoticed, for the life of the suite.
+        #
+        # The projection is kept because the alternative is worse in a
+        # specific way: the map is built from this M15 window, so "no pool
+        # above" usually means price has run past everything the window
+        # holds, not that the market has no liquidity up there. Refusing on
+        # the strength of a horizon is its own fabrication. What is not
+        # kept is the silence — `projected` rides on the candidate, the
+        # scorer grades it lower, and the dashboard shows which it was.
+        #
+        # The offset is applied after the distance test, so shaving the
+        # fill cannot smuggle the reward back under the floor.
+        offset = atr_value * 0.1
         minimum_reward = stop_distance * self.config.risk.min_risk_reward
-
+        target = analysis.liquidity.nearest_target(
+            entry, direction, index, min_distance=minimum_reward + offset
+        )
+        target_level: dict[str, Any] | None = None
         if target is not None:
             # Stop just short of the pool: the fill happens on the way in,
             # not at the exact level where everyone else's orders sit.
-            offset = atr_value * 0.1
-            candidate_tp = target.price - offset if direction == "BUY" else target.price + offset
-            reward = abs(candidate_tp - entry)
-            if reward >= minimum_reward:
-                target_level = target.as_dict()
-                take_profit = candidate_tp
-            else:
-                take_profit = (
-                    entry + minimum_reward if direction == "BUY" else entry - minimum_reward
-                )
+            take_profit = target.price - offset if direction == "BUY" else target.price + offset
+            target_level = {**target.as_dict(), "kind": "liquidity", "projected": False}
         else:
             take_profit = entry + minimum_reward if direction == "BUY" else entry - minimum_reward
+            target_level = {
+                "kind": "projection",
+                "projected": True,
+                "price": take_profit,
+                "label": f"{self.config.risk.min_risk_reward:g}R projection",
+                "reason": (
+                    "no opposing liquidity in this window sits far enough to pay for the "
+                    "stop, so the target is a projection rather than a level"
+                ),
+            }
 
         if direction == "BUY" and not (stop_loss < entry < take_profit):
             return None

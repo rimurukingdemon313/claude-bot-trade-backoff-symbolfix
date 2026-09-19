@@ -282,3 +282,106 @@ def test_the_checks_reach_the_journal_and_the_dashboard(config):
     payload = result.candidate.as_dict()
     assert [check["name"] for check in payload["checks"]] == list(CHAIN)
     assert payload["setupId"] == result.candidate.setup_id
+
+
+# -- the chain the user specified, link by link ---------------------------
+#
+# LIQUIDITY SWEEP -> DISPLACEMENT -> BOS -> FVG -> FVG RETEST -> ENTRY
+# -> STRUCTURAL SL -> LIQUIDITY TP -> RR -> RISK ENGINE -> AI -> EXECUTION
+#
+# Each link is asserted as a REFUSAL when it is missing, because that is
+# the claim worth pinning: an incomplete chain is NO TRADE. The happy path
+# is covered by `test_a_complete_setup_records_every_condition` above and
+# end to end by `test_a_complete_setup_flows_all_the_way_to_a_persisted_trade`.
+
+
+def test_a_sweep_with_no_structure_break_is_a_weaker_trigger_not_a_free_pass(config):
+    """Sweep alone is not an entry.
+
+    A sweep with no break of structure behind it can still classify - the
+    engine grades a displaced break and a sweep as independent triggers -
+    but `trigger_quality` scores a sweep-only case lower, so it faces the
+    same floors with less credit. What it can never do is skip the rest of
+    the chain: entry zone, retest, stop, target and ratio all still apply.
+    """
+
+    engine, analyses = _analysed(config)
+    m15 = analyses["M15"]
+    without_bos = dict(analyses)
+    without_bos["M15"] = dataclasses.replace(m15, structure_events=())
+
+    result = engine.evaluate("EURUSD", without_bos, now=SETUP_END)
+    by_name = {check.name: check for check in result.checks}
+    if result.candidate is None:
+        # Refused somewhere down the chain, which is the expected answer.
+        assert result.rejection
+        assert by_name["structure_break"].status in (PENDING, FAIL)
+    else:
+        # Taken on the sweep alone - then every later link must have passed
+        # on its own merit, not been waived.
+        for name in ("entry_zone", "zone_retest", "stop_loss", "take_profit", "risk_reward"):
+            assert by_name[name].status == PASS, summarise(result.checks)
+
+
+def test_a_projected_target_is_labelled_as_one_and_never_claimed_as_liquidity(config):
+    """The defect a wrong test premise uncovered.
+
+    The engine falls back to an R-multiple projection when no opposing
+    pool in this window sits far enough to pay for the stop. That fallback
+    is defensible - the map is built from one M15 window, so "no pool
+    above" usually means price has run past everything the window holds
+    rather than that the market has no liquidity up there.
+
+    What was NOT defensible was the silence. `liquidity_target` was set to
+    None on that path and nothing downstream could tell a structural
+    target from a manufactured one, so the R:R gate could never fail on it
+    and a setup whose nearest real liquidity sat at 0.23R was recorded as
+    exactly 1:2 - because 1:2 was the number it was being tested against.
+    This fixture had been doing that for the life of the suite.
+    """
+
+    engine, analyses = _analysed(config)
+    candidate = engine.evaluate("EURUSD", analyses, now=SETUP_END).candidate
+    assert candidate is not None
+
+    target = candidate.liquidity_target
+    assert target is not None, "a target must always say what it is"
+    assert "projected" in target
+    if target["projected"]:
+        assert target["kind"] == "projection"
+        assert candidate.risk_reward == pytest.approx(config.risk.min_risk_reward, abs=1e-6)
+        assert "no opposing liquidity" in target["reason"]
+    else:
+        assert target["kind"] == "liquidity"
+        assert target["label"]
+        # A structural target stands where the level is, so it lands on
+        # whatever the market offered rather than on the floor exactly.
+        assert candidate.risk_reward >= config.risk.min_risk_reward
+
+
+def test_a_target_is_never_the_first_pool_when_that_pool_is_too_close(config):
+    """A pool closer than the stop is a hurdle, not a destination.
+
+    Asserted on the map directly: asking for the nearest pool and asking
+    for the nearest pool that pays for the stop must give different
+    answers here, or this fixture proves nothing about the distinction.
+    """
+
+    engine, analyses = _analysed(config)
+    m15 = analyses["M15"]
+    index, price = m15.last_index, m15.price
+
+    closest = m15.liquidity.nearest_target(price, "BUY", index)
+    assert closest is not None
+    assert (closest.price - price) < 0.0035, "the fixture's first pool must be a close one"
+
+    qualifying = m15.liquidity.nearest_target(price, "BUY", index, min_distance=0.0035)
+    assert qualifying is None or qualifying.price > closest.price
+
+
+def test_the_take_profit_matches_the_target_the_engine_recorded(config):
+    """Whatever the target is, the price and the record agree."""
+
+    engine, analyses = _analysed(config)
+    candidate = engine.evaluate("EURUSD", analyses, now=SETUP_END).candidate
+    assert candidate.liquidity_target["price"] == pytest.approx(candidate.take_profit)

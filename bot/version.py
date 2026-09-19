@@ -8,9 +8,9 @@ results uninterpretable (see docs/TESTING.md, "experiment control").
 
 from __future__ import annotations
 
-SYSTEM_VERSION = "6.1.0"
-SMC_ENGINE_VERSION = "smc-4.1.0"
-SCORING_VERSION = "score-3.0.0"
+SYSTEM_VERSION = "6.2.0"
+SMC_ENGINE_VERSION = "smc-4.2.0"
+SCORING_VERSION = "score-3.1.0"
 RISK_ENGINE_VERSION = "risk-3.1.0"
 EXECUTION_VERSION = "exec-2.6.0"
 AI_PROMPT_VERSION = "ai-prompt-2.2.0"

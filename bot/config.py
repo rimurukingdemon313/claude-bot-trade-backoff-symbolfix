@@ -166,7 +166,16 @@ class RiskConfig:
     max_consecutive_losses: int = 4
     max_trades_per_day: int = 6
     max_trades_per_session: int = 3
-    min_risk_reward: float = 2.0
+    min_risk_reward: float = 1.2
+    #: How long a setup identity stays blocked after it has been traded.
+    #:
+    #: The evidence is what ages out, not the trade: a sweep stops being a
+    #: usable trigger after `sweep_max_age_candles` (20 bars = 5h on M15),
+    #: so a window comfortably longer than that means a blocked identity
+    #: can never still be live. 24h also covers the overnight case where
+    #: the same level is swept again on the next session - which IS a new
+    #: setup, and gets a new identity because the sweep candle differs.
+    setup_reentry_block_hours: float = 24.0
     loss_cooldown_minutes: int = 45
     execution_failure_cooldown_minutes: int = 20
     drawdown_derisk_pct: float = 0.05
@@ -175,41 +184,31 @@ class RiskConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class OpportunityConfig:
-    """The profit objective. A FILTER, never a mandate: if a setup cannot
-    reach it inside the risk limits, the answer is NO TRADE — the system
-    never inflates size, widens leverage, or shrinks the stop to get there.
+class RewardConfig:
+    """The reward objective, in R. Never in dollars.
 
-    Two numbers, not one:
+    This used to be `target_profit=$50 / minimum_profit=$40`, and that was
+    a bug with a plausible face. Expected profit at the structural target
+    is `risk x R`, and risk is a FIXED PERCENTAGE of equity, so a dollar
+    floor is a statement about account size pretending to be a statement
+    about setup quality: at $5,000 equity a $40 floor quietly demands 1:2
+    on every trade, and at $1,000 it demands 1:4 and the bot stands aside
+    for weeks while every individual refusal looks correct. The market
+    does not know the balance; the same setup must not grade differently
+    on two accounts.
 
-      * `target_profit` is what the system aims for;
-      * `minimum_profit` is an ABSOLUTE FLOOR. No tier, no tolerance and no
-        configuration can take a trade whose expected profit at its
-        structural target is below it.
+    R is the same number on every account, it is what the structure
+    actually offers, and it cannot be improved by taking more risk.
 
-    Note the arithmetic this imposes. With a 1:2 minimum R:R, a $40 floor
-    means at least $20 of risk per trade, which at the 0.5% base risk needs
-    roughly $4,000 of equity. Below that the floor is unreachable and the
-    system would simply never trade — so `profit_floor_feasibility()`
-    computes that explicitly and the health endpoint reports it, rather than
-    leaving a silent do-nothing bot.
+    `preferred_reward_r` is a LABEL, not a second gate: a setup at or
+    above it is reported as strong. Nothing is refused for missing it.
     """
 
-    target_profit: float = 50.0
-    #: Hard floor on expected profit at the structural target.
-    minimum_profit: float = 40.0
+    #: The floor. A setup below this is refused however large the account.
+    min_reward_r: float = 1.2
+    #: Reported as a stronger setup. Never a permission, never a refusal.
+    preferred_reward_r: float = 1.5
     enabled: bool = True
-    #: A top-tier setup may clear the target at this fraction — but never
-    #: below `minimum_profit`.
-    tolerance_fraction: float = 0.8
-
-    def required_profit(self, tier: str) -> float:
-        """The bar this tier must clear. Never below the absolute floor."""
-
-        required = self.target_profit
-        if tier == "A+":
-            required = self.target_profit * self.tolerance_fraction
-        return max(required, self.minimum_profit)
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,11 +259,31 @@ class SmcConfig:
     displacement_atr_multiple: float = 1.3
     displacement_body_ratio: float = 0.55
     bos_atr_buffer: float = 0.08
-    sweep_max_age_candles: int = 12
+    #: How long a liquidity sweep or a displaced structure break stays
+    #: usable as a trigger. 12 bars is three hours on M15, which is
+    #: shorter than the sequence the strategy waits for: sweep, then
+    #: displacement away, then the break, then the retrace back into the
+    #: imbalance. Measured across 24 days of M15 decision points,
+    #: widening this to 20 raised approvals and LOWERED the share of
+    #: setups graded below tier, so the extra triggers were not junk.
+    #: It saturates by 24; there is no evidence for going wider.
+    sweep_max_age_candles: int = 20
     sweep_reaction_candles: int = 4
     fvg_min_atr_fraction: float = 0.12
     fvg_max_age_candles: int = 60
     ob_max_age_candles: int = 60
+    #: How far BEFORE the trigger an entry zone may have formed and still
+    #: count as belonging to the move that produced it.
+    #:
+    #: Fair value gaps used a hardcoded 2 and order blocks a hardcoded 12,
+    #: for no stated reason. The 2 has the causality backwards: the gap is
+    #: left by the DISPLACEMENT, and the structure break that displacement
+    #: causes is confirmed after it - so the imbalance the entry is meant
+    #: to use routinely forms BEFORE `reference_index` and was discarded.
+    #: Measured over 24 days of M15 decision points, 342 of the 747 "no
+    #: live fair value gap or order block" refusals had a live, correctly
+    #: directed gap that failed only this test.
+    poi_reference_lookback_candles: int = 12
     atr_period: int = 14
     min_candles: int = 60
 
@@ -415,7 +434,7 @@ class TradingConfig:
     symbols: tuple[str, ...]
     broker: BrokerConfig
     risk: RiskConfig = field(default_factory=RiskConfig)
-    opportunity: OpportunityConfig = field(default_factory=OpportunityConfig)
+    reward: RewardConfig = field(default_factory=RewardConfig)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     smc: SmcConfig = field(default_factory=SmcConfig)
     mtf: MtfConfig = field(default_factory=MtfConfig)
@@ -458,8 +477,11 @@ class TradingConfig:
             raise ConfigError("max_daily_loss_pct must be in (0, 6%]")
         if risk.max_drawdown_pct <= 0 or risk.max_drawdown_pct > 0.25:
             raise ConfigError("max_drawdown_pct must be in (0, 25%]")
-        if risk.min_risk_reward < 1.5:
-            raise ConfigError("min_risk_reward below 1.5 is refused by this build")
+        if risk.min_risk_reward < 1.0:
+            # Below 1:1 a winner is worth less than a loser costs, and no
+            # hit rate this system can honestly claim recovers that. 1.2
+            # is the default; the hard refusal is at parity.
+            raise ConfigError("min_risk_reward below 1:1 is refused by this build")
         if risk.max_open_positions < 1:
             raise ConfigError("max_open_positions must be at least 1")
         if not self.symbols:
@@ -478,130 +500,39 @@ class TradingConfig:
             raise ConfigError(f"unknown execution mode {self.mode!r}")
         if self.paper.starting_balance is not None and self.paper.starting_balance <= 0:
             raise ConfigError("paper starting balance must be positive when set")
-        opportunity = self.opportunity
-        if opportunity.minimum_profit < 0:
-            raise ConfigError("minimum_profit cannot be negative")
-        if opportunity.enabled and opportunity.minimum_profit > opportunity.target_profit:
+        reward = self.reward
+        if reward.min_reward_r <= 0:
+            raise ConfigError("min_reward_r must be positive")
+        if reward.preferred_reward_r < reward.min_reward_r:
             raise ConfigError(
-                f"minimum_profit (${opportunity.minimum_profit:g}) cannot exceed "
-                f"target_profit (${opportunity.target_profit:g}) — the floor would make the "
-                "target unreachable by definition"
+                f"preferred_reward_r ({reward.preferred_reward_r:g}) cannot sit below "
+                f"min_reward_r ({reward.min_reward_r:g}) — the label would be weaker than "
+                "the gate it describes"
+            )
+        if reward.enabled and self.risk.min_risk_reward < reward.min_reward_r:
+            # Two floors on the same quantity, and the risk engine checks
+            # the structural one first. If they disagreed, the reward
+            # verdict would be unreachable and its reason would never be
+            # the one an operator read.
+            raise ConfigError(
+                f"risk.min_risk_reward ({self.risk.min_risk_reward:g}) is below "
+                f"reward.min_reward_r ({reward.min_reward_r:g}); the reward objective would "
+                "never be the binding constraint"
             )
 
     def with_overrides(self, **changes: Any) -> "TradingConfig":
         return replace(self, **changes)
 
 
-def profit_floor_feasibility(config: "TradingConfig", equity: float) -> dict[str, Any]:
-    """Can the profit floor be reached at all, at this equity?
-
-    `min_risk_reward` is a floor, not a ceiling — targets are structural,
-    so a setup's R:R is whatever the liquidity above it happens to be
-    worth. An earlier version of this function multiplied the risk ceiling
-    by the *minimum* R:R and called the shortfall impossible, which was
-    simply wrong: it declared "no setup can pass" on an account where any
-    setup reaching 1:4 would have passed comfortably.
-
-    So the question is split in two, because they have different answers
-    and different remedies:
-
-    * **Infeasible** — not even an exceptional setup clears the floor.
-      Nothing but more equity (or a lower floor) changes that.
-    * **Demanding** — reachable, but only by setups whose R:R exceeds the
-      configured minimum. The bot will trade; it will just say NO TRADE
-      far more often, which is the profit objective working as a filter
-      (project rule 8), not a fault.
-
-    Risk is never raised to close the gap. That direction is forbidden.
-    """
-
-    opportunity = config.opportunity
-    if not opportunity.enabled:
-        return {"feasible": True, "reason": "profit objective disabled"}
-
-    max_risk = max(0.0, equity) * config.risk.max_risk_pct
-    floor = opportunity.minimum_profit
-    min_rr = config.risk.min_risk_reward
-
-    # The largest R:R this build will entertain as realistic. It is the
-    # same ceiling `RISK_MIN_RR` is clamped to, and structural targets
-    # beyond it are rare enough that promising them would be dishonest.
-    ceiling_rr = ATTAINABLE_RISK_REWARD_CEILING
-
-    comfortable_profit = max_risk * min_rr
-    best_case_profit = max_risk * ceiling_rr
-    feasible = best_case_profit >= floor
-    demanding = feasible and comfortable_profit < floor
-
-    required_rr = floor / max_risk if max_risk > 0 else None
-    required_equity = (
-        floor / (config.risk.max_risk_pct * ceiling_rr)
-        if config.risk.max_risk_pct > 0
-        else None
-    )
-    comfortable_equity = (
-        floor / (config.risk.max_risk_pct * min_rr)
-        if config.risk.max_risk_pct > 0 and min_rr > 0
-        else None
-    )
-
-    if not feasible:
-        reason = (
-            f"at ${equity:,.2f} equity the maximum allowed risk is ${max_risk:,.2f}, which even at "
-            f"an exceptional 1:{ceiling_rr:g} R:R yields at best ${best_case_profit:,.2f} — below "
-            f"the ${floor:,.2f} profit floor. No setup can pass this filter until equity reaches "
-            f"about ${required_equity:,.2f}, or the floor is lowered. Risk is never raised to "
-            f"close this gap."
-        )
-    elif demanding:
-        # Name the lever. An operator told only that setups are being
-        # filtered cannot tell whether that is the strategy or the
-        # configuration — and here it is the configuration, by arithmetic.
-        affordable = max_risk * min_rr
-        reason = (
-            f"reachable but demanding: at ${equity:,.2f} equity the ${max_risk:,.2f} risk ceiling "
-            f"needs a setup worth 1:{required_rr:.1f} R:R to clear the ${floor:,.2f} floor, above "
-            f"the 1:{min_rr:g} minimum. Expect NO TRADE most days. Three honest ways out, and "
-            f"raising risk is not one of them: grow equity to about ${comfortable_equity:,.2f}, "
-            f"set OPPORTUNITY_MINIMUM_PROFIT to ${affordable:,.0f} or less to accept what this "
-            f"account can actually produce, or accept the low frequency as the cost of the floor."
-        )
-    else:
-        reason = (
-            f"reachable: ${comfortable_profit:,.2f} at the ${max_risk:,.2f} risk ceiling and the "
-            f"1:{min_rr:g} minimum R:R, versus a ${floor:,.2f} floor"
-        )
-
-    return {
-        "feasible": feasible,
-        "demanding": demanding,
-        "equity": round(equity, 2),
-        "maxRiskPerTrade": round(max_risk, 2),
-        "comfortableProfit": round(comfortable_profit, 2),
-        "bestCaseProfit": round(best_case_profit, 2),
-        "minimumProfit": floor,
-        "requiredRiskReward": round(required_rr, 2) if required_rr else None,
-        "requiredEquity": round(required_equity, 2) if required_equity else None,
-        "comfortableEquity": round(comfortable_equity, 2) if comfortable_equity else None,
-        "reason": reason,
-    }
-
-
 #: Tolerance for comparing R-multiples.
 #:
 #: An R:R is a ratio of two floats, and a target constructed to sit EXACTLY
-#: on a floor recomputes as 1.4999999999999998 about as often as
-#: 1.5000000000000555. Without this, a setup priced precisely at the
+#: on a floor recomputes as 1.1999999999999998 about as often as
+#: 1.2000000000000555. Without this, a setup priced precisely at the
 #: minimum is accepted or rejected by the last bit of a double — measured
 #: at 40 rejections in 600 on targets built to land on the floor. The same
 #: constant already guards the break-even trigger, for the same reason.
 R_EPSILON = 1e-6
-
-#: The largest risk:reward this build treats as attainable when judging
-#: whether the profit floor is reachable. Matches the upper clamp on
-#: `RISK_MIN_RR`; structural targets beyond it exist but are too rare to
-#: base a feasibility promise on.
-ATTAINABLE_RISK_REWARD_CEILING = 10.0
 
 #: The instruments scanned when TRADED_SYMBOLS is not set.
 #:
@@ -667,12 +598,12 @@ def load_config(env: Mapping[str, str] | None = None) -> TradingConfig:
         max_drawdown_pct=_env_float("RISK_MAX_DRAWDOWN_PCT", 0.10, low=0.02, high=0.25),
         max_open_positions=_env_int("RISK_MAX_OPEN_POSITIONS", 3, low=1, high=10),
         max_trades_per_day=_env_int("RISK_MAX_TRADES_PER_DAY", 6, low=1, high=30),
-        min_risk_reward=_env_float("RISK_MIN_RR", 2.0, low=1.5, high=10.0),
+        min_risk_reward=_env_float("RISK_MIN_RR", 1.2, low=1.0, high=10.0),
     )
-    opportunity = OpportunityConfig(
-        target_profit=_env_float("OPPORTUNITY_TARGET_PROFIT", 50.0, low=0.0, high=100000.0),
-        minimum_profit=_env_float("OPPORTUNITY_MINIMUM_PROFIT", 40.0, low=0.0, high=100000.0),
-        enabled=_env_bool("OPPORTUNITY_ENABLED", True),
+    reward = RewardConfig(
+        min_reward_r=_env_float("REWARD_MIN_R", 1.2, low=1.0, high=10.0),
+        preferred_reward_r=_env_float("REWARD_PREFERRED_R", 1.5, low=1.0, high=20.0),
+        enabled=_env_bool("REWARD_ENABLED", True),
     )
     ai = AIConfig(
         enabled=_env_bool("AI_ENABLED", True),
@@ -752,7 +683,7 @@ def load_config(env: Mapping[str, str] | None = None) -> TradingConfig:
         broker=broker,
         risk=risk,
         mtf=mtf,
-        opportunity=opportunity,
+        reward=reward,
         ai=ai,
         storage=storage,
         scheduler=scheduler,

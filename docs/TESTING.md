@@ -188,7 +188,7 @@ way; commission reduces the balance. A fill landing outside the plan's levels
 is refused. Paper refuses what the live broker would refuse (non-positive
 quantity, missing stop or target, a stop already through the market). A stop
 closes worse than its price; a target closes exactly at the target; **the
-configured $40 profit floor is actually booked at target**; both levels in
+configured minimum R is actually booked at target**; both levels in
 one window resolves as the stop; a level reached between polls is not missed;
 an unreadable price leaves the position open rather than closing it. Equity
 marks to live prices while balance moves only on a realised close; positions
@@ -229,7 +229,7 @@ trade; an enormous equity is still capped by the broker's max lot; **risk
 taken never exceeds risk approved across a sweep of five equities × three
 tiers**; an absurd conversion rate cannot produce an absurd position; a
 one-tick stop is refused; compound breaches all report their reasons; the
-profit floor reports as unreachable rather than silently never trading.
+reward objective is a ratio, so no equity can make it unreachable.
 
 **Infrastructure:** a rate-limit storm is bounded and never duplicates a
 write; the circuit breaker sheds load instead of burning the scan budget; a

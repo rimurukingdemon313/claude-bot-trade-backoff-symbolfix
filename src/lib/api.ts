@@ -147,6 +147,15 @@ export type ScanSymbol = {
   } | null;
   risk: Record<string, any> | null;
   ai: Record<string, any> | null;
+  /**
+   * The strategy chain, condition by condition, in evaluation order.
+   *
+   * PENDING is not a quiet FAIL: it means the engine stopped before
+   * reaching that condition. A setup that failed at `risk_reward` got
+   * everything else right and was priced out; one that failed at
+   * `liquidity_sweep` never started. They call for opposite reactions.
+   */
+  checks?: Array<{ name: string; status: "PASS" | "FAIL" | "PENDING"; detail: string }>;
 };
 
 /** NO_TRADE | WATCH | VALID_SETUP | TRADE — see bot/smc/mtf.py. */
@@ -193,19 +202,18 @@ export type RiskState = {
   openPositions: number;
   killSwitch: { active: boolean; reason: string | null; detail: string | null; trippedAt: string | null };
   limits: Record<string, number>;
-  opportunityTarget: number;
-  opportunityMinimum: number;
-  profitObjective: {
-    feasible: boolean;
-    /** Reachable, but only by setups above the configured minimum R:R. */
-    demanding?: boolean;
-    reason: string;
-    comfortableProfit?: number;
-    bestCaseProfit?: number;
-    minimumProfit?: number;
-    requiredRiskReward?: number | null;
-    requiredEquity?: number | null;
-    comfortableEquity?: number | null;
+  /**
+   * The objective, in R. It used to be a pair of dollar figures, and a
+   * dollar figure is really a statement about account size: expected
+   * profit is `risk x R` and risk is a fixed percentage of equity, so the
+   * same setup graded differently on a $1,000 account and a $10,000 one.
+   */
+  rewardObjective: {
+    minimumR: number;
+    preferredR: number;
+    enabled: boolean;
+    /** What one R is worth at current equity. Information, not a gate. */
+    riskPerTrade: number;
   };
 };
 

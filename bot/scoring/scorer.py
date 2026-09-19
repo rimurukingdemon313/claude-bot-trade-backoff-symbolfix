@@ -152,18 +152,40 @@ def _entry_zone_component(candidate: SetupCandidate) -> tuple[float, str]:
     return 0.0, "no entry zone"
 
 
+#: What a projected target keeps of its TOTAL score.
+#:
+#: A structural target is a level the market has a reason to reach. A
+#: projection is a distance chosen because it pays for the stop, and the
+#: two are not the same evidence even when they produce the same ratio -
+#: so they must not score the same.
+#:
+#: Applied to the total rather than to the R:R component, and the
+#: difference matters. `risk_reward` is a CRITICAL component with a floor
+#: of its own, and at the minimum ratio it already sits near that floor -
+#: so any discount worth the name pushed it under, and a quality penalty
+#: silently became a structural veto through an interaction nobody
+#: designed. A projection is weaker evidence about the whole setup, which
+#: is what a total is for.
+PROJECTED_TARGET_FRACTION = 0.85
+
+
 def _risk_reward_component(candidate: SetupCandidate, minimum: float) -> tuple[float, str]:
     """Scales from the minimum acceptable R:R up to 4R, then saturates.
 
     Saturation is deliberate: rewarding an 8R target encourages picking
-    targets price will never reach.
+    targets price will never reach. A PROJECTED target is discounted for
+    a related reason - the ratio was derived from the stop rather than
+    measured off a level, so on that path the number carries less
+    information than the same number would from real liquidity.
     """
 
     ratio = candidate.risk_reward
     if ratio < minimum:
         return 0.0, f"R:R 1:{ratio:.2f} below minimum"
     span = max(0.5, 4.0 - minimum)
-    return min(1.0, (ratio - minimum) / span * 0.7 + 0.3), f"R:R 1:{ratio:.2f}"
+    score = min(1.0, (ratio - minimum) / span * 0.7 + 0.3)
+    label = (candidate.liquidity_target or {}).get("label")
+    return score, f"R:R 1:{ratio:.2f}" + (f" to {label}" if label else "")
 
 
 def _regime_component(candidate: SetupCandidate) -> tuple[float, str]:
@@ -205,6 +227,14 @@ class SetupScorer:
         }
         notes = tuple(f"{name}: {note}" for name, (_, note) in parts.items())
         total = sum(components.values())
+
+        projected = bool((candidate.liquidity_target or {}).get("projected"))
+        if projected:
+            total *= PROJECTED_TARGET_FRACTION
+            notes += (
+                "target: projected at the minimum R, not measured off a level — "
+                f"total scaled to {PROJECTED_TARGET_FRACTION:.0%}",
+            )
 
         # Hard structural gates. These are not score penalties — a setup
         # missing its trigger or its entry zone is not a weak trade, it is

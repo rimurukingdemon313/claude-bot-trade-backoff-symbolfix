@@ -58,7 +58,9 @@ const REFRESH_MS = 15_000;
 
 export default function Dashboard() {
   const [tab, setTab] = useState<TabId>("overview");
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNotice] = useState<{ message: string; tone: "info" | "error" } | null>(
+    null,
+  );
   const queryClient = useQueryClient();
 
   const snapshot = useQuery<Snapshot>({
@@ -106,14 +108,27 @@ export default function Dashboard() {
     };
   }, [strategy.data]);
 
+  // Whether the command surface will accept a switch, asked of the server
+  // rather than inferred from holding a string. `UnlockPanel` pushes its
+  // result here so unlocking takes effect on the other controls at once.
+  const [lock, setLock] = useState<"ok" | "wrong" | "unset" | "checking" | "empty">("checking");
+
   const invalidate = useCallback(() => {
     void queryClient.invalidateQueries({ queryKey: ["snapshot"] });
     void queryClient.invalidateQueries({ queryKey: ["journal"] });
   }, [queryClient]);
 
-  const announce = useCallback((message: string) => {
-    setNotice(message);
-    window.setTimeout(() => setNotice(null), 6000);
+  /**
+   * A one-line result banner.
+   *
+   * A failure stays until the next action replaces it. It used to clear
+   * itself after six seconds like everything else, so a control the
+   * server had refused read as a button that simply did nothing — which
+   * is how a locked strategy switch gets reported as a broken one.
+   */
+  const announce = useCallback((message: string, tone: "info" | "error" = "info") => {
+    setNotice({ message, tone });
+    if (tone === "info") window.setTimeout(() => setNotice(null), 6000);
   }, []);
 
   const switchStrategy = useMutation({
@@ -125,7 +140,10 @@ export default function Dashboard() {
       announce(`Strategy switched to ${active?.name ?? result?.data?.active}.`);
     },
     onError: (error: unknown) =>
-      announce(error instanceof Error ? error.message : "Could not switch strategy."),
+      announce(
+        error instanceof Error ? error.message : "Could not switch strategy.",
+        "error",
+      ),
   });
 
   const scanning = useMutation({
@@ -134,7 +152,7 @@ export default function Dashboard() {
       announce(result.enabled ? "Scanning resumed." : "Scanning paused. Open positions are still managed.");
       invalidate();
     },
-    onError: (error: Error) => announce(`Could not change scanning: ${error.message}`),
+    onError: (error: Error) => announce(`Could not change scanning: ${error.message}`, "error"),
   });
 
   const killSwitch = useMutation({
@@ -144,7 +162,7 @@ export default function Dashboard() {
       announce("Kill switch updated.");
       invalidate();
     },
-    onError: (error: Error) => announce(`Kill switch change failed: ${error.message}`),
+    onError: (error: Error) => announce(`Kill switch change failed: ${error.message}`, "error"),
   });
 
   const manualScan = useMutation({
@@ -153,7 +171,7 @@ export default function Dashboard() {
       announce(`Scan finished: ${result.decision ?? "NO TRADE"}`);
       invalidate();
     },
-    onError: (error: Error) => announce(`Scan failed: ${error.message}`),
+    onError: (error: Error) => announce(`Scan failed: ${error.message}`, "error"),
   });
 
   const reconcile = useMutation({
@@ -162,7 +180,7 @@ export default function Dashboard() {
       announce("Reconciled against the broker.");
       invalidate();
     },
-    onError: (error: Error) => announce(`Reconcile failed: ${error.message}`),
+    onError: (error: Error) => announce(`Reconcile failed: ${error.message}`, "error"),
   });
 
   const data = snapshot.data;
@@ -283,9 +301,18 @@ export default function Dashboard() {
         </div>
 
         {notice && (
-          <div className="border-t border-slate-800 bg-slate-900/80 px-4 py-2 text-center text-xs text-slate-300">
-            {notice}
-          </div>
+          <button
+            type="button"
+            onClick={() => setNotice(null)}
+            className={cn(
+              "block w-full border-t px-4 py-2 text-center text-xs",
+              notice.tone === "error"
+                ? "border-rose-900 bg-rose-950/60 text-rose-200"
+                : "border-slate-800 bg-slate-900/80 text-slate-300",
+            )}
+          >
+            {notice.message}
+          </button>
         )}
       </header>
 
@@ -330,9 +357,10 @@ export default function Dashboard() {
             <HealthPanel health={health} />
             {setup.data?.ready && <ConfigurationPanel setup={setup.data} />}
             <DoctorPanel />
-            <UnlockPanel />
+            <UnlockPanel onChange={(state) => setLock(state as typeof lock)} />
             <StrategyPanel
               status={strategy.data?.data}
+              lock={lock === "empty" ? "wrong" : lock}
               onSelect={(key) => switchStrategy.mutate(key)}
               pending={switchStrategy.isPending}
             />

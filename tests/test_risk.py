@@ -16,7 +16,7 @@ import pytest
 from bot.broker.models import InstrumentSpec
 from bot.risk.correlation import analyse_exposure, correlation_score, currency_exposure
 from bot.risk.engine import AccountRiskState, RiskEngine
-from bot.risk.opportunity import evaluate_opportunity
+from bot.risk.reward import evaluate_reward
 from bot.risk.sizing import SizingError, calculate_position_size, conversion_rate, expected_profit
 from bot.safety.kill_switch import KillSwitch
 from fakes import DEFAULT_SPEC, SETUP_END
@@ -326,30 +326,129 @@ def test_risk_is_clamped_even_with_absurd_configuration(config):
     assert any("clamped" in note for note in notes)
 
 
-# -- profit objective -----------------------------------------------------
+# -- the reward objective, in R ------------------------------------------
+#
+# This replaced a fixed dollar floor. Expected profit at the structural
+# target is `risk x R`, and risk is a fixed percentage of equity, so a
+# dollar floor was a statement about ACCOUNT SIZE wearing the costume of a
+# statement about setup quality: $40 demanded 1:2 on a $5,000 account and
+# 1:4 on a $1,000 one, and the market does not know the balance.
 
 
-def test_profit_objective_rejects_a_trade_that_cannot_reach_the_target(config, candidate):
-    """The objective filters; it never inflates risk to reach the number."""
+def _reward(rr: float, profit: float = 0.0, **overrides):
+    from bot.config import RewardConfig
 
-    tiny = dataclasses.replace(
-        config, opportunity=dataclasses.replace(config.opportunity, target_profit=100_000.0)
+    return evaluate_reward(
+        risk_reward=rr, expected_profit=profit, config=RewardConfig(**overrides)
     )
-    decision = RiskEngine(tiny).evaluate(
-        candidate=candidate, tier="A", account=make_account(), spec=DEFAULT_SPEC, now=SETUP_END
+
+
+@pytest.mark.parametrize(
+    "equity,rr,reward_dollars",
+    [
+        # A $5,000 account risking 0.5% puts one R at $25.
+        (5_000.0, 1.2, 30.0),
+        (5_000.0, 1.5, 37.5),
+        (5_000.0, 2.0, 50.0),
+    ],
+)
+def test_a_setup_is_judged_on_its_ratio_whatever_the_dollars_come_to(
+    equity, rr, reward_dollars
+):
+    """$30, $37.50 and $50 are all takeable — the ratio is what is checked.
+
+    The dollar column is asserted so the arithmetic is visible: it is what
+    one R is worth at this equity times R, and the old $40 floor would
+    have refused the first of these while accepting the third, for a
+    difference the market had no part in.
+    """
+
+    assert equity * 0.005 * rr == pytest.approx(reward_dollars)
+    verdict = _reward(rr, reward_dollars)
+    assert verdict.meets_objective, verdict.reason
+    assert verdict.expected_profit == reward_dollars
+
+
+def test_below_the_minimum_r_is_refused_however_large_the_account():
+    """The mirror image: a big account does not buy a worse ratio."""
+
+    verdict = _reward(1.19, 11_900.0)
+    assert not verdict.meets_objective
+    assert "below the 1:1.2 minimum" in verdict.reason
+    # And the refusal says what is NOT done about it.
+    assert "size is not raised" in verdict.reason
+
+
+def test_the_preferred_bar_is_a_label_and_never_a_second_gate():
+    weak = _reward(1.3, 32.5)
+    strong = _reward(1.6, 40.0)
+    assert weak.meets_objective and not weak.preferred
+    assert strong.meets_objective and strong.preferred
+    assert "a strong setup" in strong.reason
+
+
+def test_the_reward_verdict_cannot_change_entry_stop_target_or_size():
+    """It is a judgement on numbers computed elsewhere, and nothing more."""
+
+    import dataclasses as dc
+
+    verdict = _reward(2.0, 50.0)
+    fields = {f.name for f in dc.fields(verdict)}
+    assert fields == {
+        "meets_objective",
+        "risk_reward",
+        "expected_profit",
+        "minimum_r",
+        "preferred_r",
+        "reason",
+    }
+
+
+def test_no_dollar_figure_can_refuse_a_trade_that_clears_the_ratio():
+    """The guarantee the user asked for, asserted rather than assumed.
+
+    A $2 reward on a microscopic account still clears 1:2, and a $2,000
+    reward still fails 1:1.1. If any dollar threshold survived anywhere in
+    this module, one of these two would come out the other way.
+    """
+
+    assert _reward(2.0, 2.0).meets_objective
+    assert not _reward(1.1, 2_000.0).meets_objective
+
+
+def test_the_risk_engine_refuses_a_thin_setup_without_touching_size(config, candidate):
+    """End to end: the ratio is refused and the position is not inflated."""
+
+    thin = dataclasses.replace(candidate, risk_reward=1.05)
+    decision = RiskEngine(config).evaluate(
+        candidate=thin, tier="A", account=make_account(), spec=DEFAULT_SPEC, now=SETUP_END
     )
     assert decision.approved is False
-    assert "short of the" in " ".join(decision.reasons)
-    assert "Risk is NOT increased" in " ".join(decision.reasons)
+    reasons = " ".join(decision.reasons)
+    assert "1:1.05" in reasons or "below the required" in reasons
 
 
-def test_a_plus_setups_get_a_tolerance_but_never_a_size_increase():
-    from bot.config import OpportunityConfig
+def test_position_size_is_never_raised_to_reach_a_dollar_figure():
+    """Rounding UP to the broker minimum would exceed the approved risk.
 
-    config = OpportunityConfig(target_profit=50.0, tolerance_fraction=0.8)
-    assert evaluate_opportunity(expected_profit=42.0, config=config, tier="A+").meets_objective
-    assert not evaluate_opportunity(expected_profit=42.0, config=config, tier="A").meets_objective
-    assert not evaluate_opportunity(expected_profit=39.0, config=config, tier="A+").meets_objective
+    This is the one place where "make the trade bigger" could sneak in as
+    a rounding convenience, so it is asserted directly: the sizer declines
+    instead, and says why.
+    """
+
+    import dataclasses as dc
+
+    chunky = dc.replace(DEFAULT_SPEC, min_lot=5.0, lot_step=1.0)
+    with pytest.raises(SizingError) as caught:
+        calculate_position_size(
+            spec=chunky,
+            risk_amount=25.0,      # 0.5% of $5,000
+            entry=1.1000,
+            stop_loss=1.0900,      # a wide, structural stop
+        )
+    message = str(caught.value)
+    assert "below the broker minimum" in message
+    assert "would exceed the approved risk" in message
 
 
 # -- auto kill switch -----------------------------------------------------

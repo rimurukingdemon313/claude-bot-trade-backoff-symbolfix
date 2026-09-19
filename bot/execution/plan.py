@@ -40,6 +40,9 @@ class TradePlan:
     setup_score: float
     ai_confidence: float | None
     alignment: str
+    #: The setup this plan came from. Persisted so a restart cannot lose
+    #: the fact that it has already been traded.
+    setup_id: str
     instrument_id: int
     route_id: int
     created_at: str
@@ -125,6 +128,7 @@ def build_plan(
         setup_score=round(score.total, 2),
         ai_confidence=ai_confidence,
         alignment=candidate.alignment,
+        setup_id=candidate.setup_id,
         setup_type=candidate.setup_type,
         instrument_id=spec.tradable_instrument_id,
         route_id=spec.route_id,

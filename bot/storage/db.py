@@ -27,11 +27,16 @@ from ..observability import log_event
 #: Bump when ddl() changes. Every statement is CREATE ... IF NOT EXISTS, so
 #: migration stays idempotent and safe to run on every boot; the version is
 #: recorded so a deployment's schema generation is attributable.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 #: (table, column, definition) added after the first release. Applied on
 #: every boot and safe to re-run: an existing column raises and is ignored.
-ADDED_COLUMNS = (("equity_snapshots", "account_id", "TEXT"),)
+ADDED_COLUMNS = (
+    ("equity_snapshots", "account_id", "TEXT"),
+    # Which setup this trade came from, so the same one is not taken
+    # twice - see bot/smc/identity.py.
+    ("trades", "setup_id", "TEXT"),
+)
 
 
 class Database:

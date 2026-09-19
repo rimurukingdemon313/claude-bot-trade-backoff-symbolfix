@@ -24,7 +24,9 @@ PROFILE = StrategyProfile(
         "a setup that fights it is held to a higher score rather than refused, and a move "
         "against the trend must have earned the name reversal to be taken at all."
     ),
-    min_risk_reward=2.0,
+    # The structural target decides the ratio; this is the bar it must
+    # clear, not a number the engine moves a target to reach.
+    min_risk_reward=1.2,
     expected_frequency="a few a week",
     thesis="high-quality M15 execution, classified against the H1 trend",
 )

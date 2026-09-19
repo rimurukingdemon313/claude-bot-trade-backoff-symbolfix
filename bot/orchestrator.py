@@ -32,7 +32,7 @@ from .ai.validator import AIValidation, validate_ai_decision
 from .broker.cache import CachedRead, LiveCache
 from .broker.models import InstrumentSpec
 from .clock import trading_day, utc_now
-from .config import TradingConfig, profit_floor_feasibility
+from .config import TradingConfig
 from .errors import (
     AIError,
     BotError,
@@ -97,6 +97,13 @@ class SymbolOutcome:
             "score": self.score.as_dict() if self.score else None,
             "risk": self.risk.as_dict() if self.risk else None,
             "ai": self.ai.as_dict() if self.ai else None,
+            # The strategy chain travels with the OUTCOME, not only with a
+            # candidate, because the case it earns its place in is the one
+            # where there is no candidate: a refusal that says what
+            # passed first is the half a reason string cannot carry.
+            "checks": (
+                [check.as_dict() for check in self.smc.checks] if self.smc else []
+            ),
         }
         if detail and self.smc is not None:
             payload["smc"] = self.smc.as_dict()
@@ -189,7 +196,6 @@ class Orchestrator:
         self.last_demo: DemoVerification | None = None
         self.startup_complete = False
         self.startup_error: str | None = None
-        self.feasibility: dict[str, Any] = {}
 
     # -- strategy selection ----------------------------------------------
 
@@ -280,28 +286,24 @@ class Orchestrator:
         """
 
         active = self.strategy_key
-        equity = float(self.feasibility.get("equity") or 0.0)
-        max_risk = float(self.feasibility.get("maxRiskPerTrade") or 0.0)
-        floor = float(self.config.opportunity.minimum_profit)
+        risk_pct = self.config.risk.base_risk_pct
+        read = self.live.get("account")
+        equity = read.value.equity if read.present else None
 
         options = []
         for profile in strategies.available():
             payload = profile.as_dict()
             payload["active"] = profile.key == active
-            if self.config.opportunity.enabled and max_risk > 0:
-                typical = max_risk * profile.min_risk_reward
-                payload["typicalProfitAtFloorRisk"] = round(typical, 2)
-                payload["clearsProfitFloor"] = typical >= floor
-                payload["note"] = (
-                    None
-                    if typical >= floor
-                    else (
-                        f"at ${equity:,.0f} equity this mode's 1:{profile.min_risk_reward:g} "
-                        f"target is worth about ${typical:,.0f}, under the ${floor:,.0f} profit "
-                        f"floor — it will find setups and the floor will reject them. Lower "
-                        f"OPPORTUNITY_MINIMUM_PROFIT or grow the account."
-                    )
-                )
+            if equity:
+                # What one R is worth here, so the switch shows the size of
+                # a trade rather than promising anything about it. There is
+                # no floor to clear any more: the objective is measured in
+                # R (bot/risk/reward.py), which is the same number on every
+                # account, so a mode cannot be "unaffordable" at one equity
+                # and fine at another.
+                one_r = equity * risk_pct
+                payload["riskPerTrade"] = round(one_r, 2)
+                payload["rewardAtMinimumR"] = round(one_r * profile.min_risk_reward, 2)
             options.append(payload)
         return {"active": active, "options": options}
 
@@ -394,17 +396,11 @@ class Orchestrator:
                 report=report.as_dict(),
             )
 
-        # A profit floor that cannot be reached at this equity would make the
-        # bot silently never trade. Say so at boot instead.
-        self.feasibility = profit_floor_feasibility(self.config, account.equity)
-        if not self.feasibility.get("feasible"):
-            log_event(
-                "STARTUP",
-                f"profit objective is UNREACHABLE at current equity: {self.feasibility['reason']}",
-                severity="error",
-                **{k: v for k, v in self.feasibility.items() if k != "reason"},
-            )
-
+        # There is no feasibility check here any more. The one that stood
+        # here asked whether a fixed DOLLAR profit floor was reachable at
+        # this equity, and it existed only because the objective was in
+        # dollars; a floor of 1:1.2 R is the same demand on a $500 account
+        # and a $500,000 one, so no account can fail it.
         self.startup_complete = True
         log_event(
             "STARTUP",
@@ -413,7 +409,7 @@ class Orchestrator:
             demo=verification.verified,
             positions=report.checked_positions,
             adopted=len(report.adopted_orphans),
-            profit_floor_feasible=self.feasibility.get("feasible"),
+            minimum_r=self.config.reward.min_reward_r,
         )
         return {
             "ok": True,
@@ -578,7 +574,32 @@ class Orchestrator:
             open_positions=open_rows,
             last_loss_at=last_loss,
             last_execution_failure_at=last_failure,
+            traded_setup_ids=self._traded_setup_ids(moment),
         )
+
+    def _traded_setup_ids(self, moment: datetime) -> frozenset[str]:
+        """Setups already taken inside the re-entry window.
+
+        Fails OPEN on a storage error, deliberately, and this is the one
+        place in the system where that is the right direction: an empty
+        set means "block nothing", and every other gate - the kill switch,
+        the per-symbol position limit, the daily trade limit, the loss
+        cooldown - still stands between here and an order. Failing closed
+        would let one unreadable query stop all trading, which is a much
+        larger failure than one duplicate.
+        """
+
+        try:
+            return self.repos.trades.traded_setup_ids(
+                hours=self.config.risk.setup_reentry_block_hours, now=moment
+            )
+        except Exception as exc:  # noqa: BLE001 - see the docstring
+            log_event(
+                "RISK",
+                f"could not read traded setup ids; duplicate protection is degraded: {exc}",
+                severity="warning",
+            )
+            return frozenset()
 
     def _implied_risk(self, position: Any) -> float:
         """Risk for a position the database has no plan for (an orphan).
@@ -1226,9 +1247,13 @@ class Orchestrator:
                     else "real orders are placed on the TradeLocker DEMO account"
                 ),
             },
-            "profitObjective": {
-                "ok": bool(self.feasibility.get("feasible", True)),
-                **self.feasibility,
+            "rewardObjective": {
+                # Always ok: an R floor cannot be unreachable at any
+                # equity. Reported so the number in force is visible.
+                "ok": True,
+                "minimumR": self.config.reward.min_reward_r,
+                "preferredR": self.config.reward.preferred_reward_r,
+                "enabled": self.config.reward.enabled,
             },
             "database": {
                 "ok": database_ok,

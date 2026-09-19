@@ -34,7 +34,7 @@ from ..smc.engine import SetupCandidate
 from ..smc.sessions import classify_session, is_forex_weekend
 from ..version import RISK_ENGINE_VERSION
 from .correlation import ExposureReport, analyse_exposure
-from .opportunity import OpportunityVerdict, evaluate_opportunity
+from .reward import RewardVerdict, evaluate_reward
 from .sizing import PositionSize, RateLookup, SizingError, calculate_position_size, expected_profit
 
 
@@ -54,6 +54,11 @@ class AccountRiskState:
     open_positions: Sequence[Mapping[str, Any]]
     last_loss_at: datetime | None = None
     last_execution_failure_at: datetime | None = None
+    #: Setup identities already traded inside the re-entry window - see
+    #: `bot/smc/identity.py`. A stop-out does not remove the sweep or the
+    #: break of structure from the chart, so without this the next scan
+    #: re-derives the same setup and takes it again.
+    traded_setup_ids: frozenset[str] = frozenset()
 
     @property
     def drawdown_pct(self) -> float:
@@ -94,7 +99,7 @@ class RiskDecision:
     risk_amount: float | None = None
     size: PositionSize | None = None
     expected_profit: float | None = None
-    opportunity: OpportunityVerdict | None = None
+    reward: RewardVerdict | None = None
     exposure: ExposureReport | None = None
     limits: dict[str, Any] = field(default_factory=dict)
     version: str = RISK_ENGINE_VERSION
@@ -114,7 +119,7 @@ class RiskDecision:
             "riskAmount": round(self.risk_amount, 2) if self.risk_amount else None,
             "size": self.size.as_dict() if self.size else None,
             "expectedProfit": round(self.expected_profit, 2) if self.expected_profit else None,
-            "opportunity": self.opportunity.as_dict() if self.opportunity else None,
+            "reward": self.reward.as_dict() if self.reward else None,
             "exposure": self.exposure.as_dict() if self.exposure else None,
             "limits": self.limits,
             "version": self.version,
@@ -234,6 +239,16 @@ class RiskEngine:
         ]
         if len(same_symbol) >= limits.max_open_per_symbol:
             reasons.append(f"already holding a position in {candidate.symbol}")
+
+        # A setup is traded once. Not once per scan, and not again after
+        # its stop: the evidence that produced it is still on the chart,
+        # so "the engine found it again" is not new information.
+        if candidate.setup_id and candidate.setup_id in account.traded_setup_ids:
+            reasons.append(
+                f"this exact setup has already been traded ({candidate.setup_id}); "
+                f"a repeat inside {limits.setup_reentry_block_hours:g}h would be the same "
+                "trade twice, not a second opportunity"
+            )
 
         if account.trades_today >= limits.max_trades_per_day:
             reasons.append(
@@ -416,20 +431,25 @@ class RiskEngine:
             take_profit=candidate.take_profit,
             conversion=size.conversion_rate,
         )
-        opportunity = evaluate_opportunity(
-            expected_profit=profit, config=self.config.opportunity, tier=tier
+        # Judged on R, never on the dollar figure. `profit` is computed
+        # from a size that is already fixed, so gating on it would be
+        # gating on the account balance - see bot/risk/reward.py.
+        reward = evaluate_reward(
+            risk_reward=candidate.risk_reward,
+            expected_profit=profit,
+            config=self.config.reward,
         )
-        if not opportunity.meets_objective:
+        if not reward.meets_objective:
             return RiskDecision(
                 False,
                 candidate.symbol,
                 candidate.direction,
-                (opportunity.reason,),
+                (reward.reason,),
                 risk_pct=risk_pct,
                 risk_amount=risk_amount,
                 size=size,
                 expected_profit=profit,
-                opportunity=opportunity,
+                reward=reward,
                 exposure=exposure,
                 limits=limits_snapshot,
             )
@@ -439,7 +459,7 @@ class RiskEngine:
             + [
                 f"risking ${size.actual_risk:.2f} ({risk_pct:.2%} of ${account.equity:.2f} equity)",
                 f"{size.lots} lots, expected ${profit:.2f} at target, R:R 1:{candidate.risk_reward:.2f}",
-                opportunity.reason,
+                reward.reason,
             ]
         )
         decision = RiskDecision(
@@ -451,7 +471,7 @@ class RiskEngine:
             risk_amount=risk_amount,
             size=size,
             expected_profit=profit,
-            opportunity=opportunity,
+            reward=reward,
             exposure=exposure,
             limits=limits_snapshot,
         )

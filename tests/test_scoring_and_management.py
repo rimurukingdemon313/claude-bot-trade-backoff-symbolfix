@@ -442,3 +442,69 @@ def test_tracking_reads_the_injected_clock_not_the_wall(config, repos, broker):
         now=datetime(2026, 9, 9, 14, 0, tzinfo=timezone.utc),
     )
     assert rows[0]["durationMinutes"] == pytest.approx(120.0)
+
+
+def test_a_projected_target_scores_lower_than_a_measured_one(config, candidate):
+    """Same ratio, different evidence, different score.
+
+    A structural target is a level the market has a reason to reach. A
+    projection is a distance chosen because it pays for the stop. The
+    ratio can be identical and the evidence is not, so the score must not
+    be either.
+    """
+
+    from bot.scoring.scorer import PROJECTED_TARGET_FRACTION
+
+    scorer = SetupScorer(config)
+    measured = dataclasses.replace(
+        candidate,
+        liquidity_target={"kind": "liquidity", "projected": False, "price": candidate.take_profit,
+                          "label": "London high"},
+    )
+    projected = dataclasses.replace(
+        candidate,
+        liquidity_target={"kind": "projection", "projected": True, "price": candidate.take_profit,
+                          "label": "1.2R projection"},
+    )
+
+    high = scorer.score(measured)
+    low = scorer.score(projected)
+    assert low.total == pytest.approx(high.total * PROJECTED_TARGET_FRACTION)
+    assert any("projected at the minimum R" in note for note in low.notes)
+    assert not any("projected" in note for note in high.notes)
+
+
+def test_the_projection_penalty_is_not_a_structural_veto_in_disguise(config, candidate):
+    """It scales the total, deliberately, and not the R:R component.
+
+    `risk_reward` is a CRITICAL component with a floor of its own, and at
+    the minimum ratio it already sits near that floor — so a discount
+    applied there pushed it under, and a quality penalty became a
+    structural refusal through an interaction nobody designed. This pins
+    the separation: the component is untouched, only the total moves.
+    """
+
+    scorer = SetupScorer(config)
+    at_floor = dataclasses.replace(
+        candidate,
+        risk_reward=config.risk.min_risk_reward,
+        liquidity_target={"kind": "projection", "projected": True, "price": candidate.take_profit,
+                          "label": "1.2R projection"},
+    )
+    measured = dataclasses.replace(
+        at_floor,
+        liquidity_target={"kind": "liquidity", "projected": False, "price": candidate.take_profit,
+                          "label": "London high"},
+    )
+    projected_score = scorer.score(at_floor)
+    measured_score = scorer.score(measured)
+
+    assert projected_score.components["risk_reward"] == pytest.approx(
+        measured_score.components["risk_reward"]
+    )
+    # The tier may legitimately drop a grade — that is the penalty doing
+    # its job. What it must not do is reach NO_TRADE through the critical
+    # gate, because that is a veto wearing a score's clothes.
+    assert measured_score.tradeable
+    assert projected_score.tradeable
+    assert not any("gate:" in note for note in projected_score.notes)

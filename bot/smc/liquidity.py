@@ -85,17 +85,45 @@ class LiquidityMap:
             (l for l in self.visible(at_index) if l.side == "sell"), key=lambda l: l.price, reverse=True
         )
 
-    def nearest_target(self, price: float, direction: str, at_index: int) -> LiquidityLevel | None:
+    def nearest_target(
+        self,
+        price: float,
+        direction: str,
+        at_index: int,
+        *,
+        min_distance: float = 0.0,
+    ) -> LiquidityLevel | None:
         """The liquidity pool price is likely heading toward.
 
         For a long that means the nearest untouched buy-side pool ABOVE
         the current price — a natural, non-arbitrary take-profit anchor.
+
+        `min_distance` skips pools too close to pay for the stop. This is
+        not the same thing as moving the target: every candidate here is a
+        real level with real resting orders, and the ones skipped become
+        hurdles the trade has to pass through rather than places to aim
+        at. A discretionary trader does the same — the first minor high is
+        not a target, it is something in the way.
+
+        The alternative, and what this replaced, was projecting a target
+        at exactly the minimum R whenever the nearest pool fell short.
+        That could never fail the ratio check downstream, so the check was
+        decorative, and a setup whose real structural reward was 0.23R
+        went into the record as 1:2.
         """
 
         if direction == "BUY":
-            above = [l for l in self.buy_side(at_index) if l.price > price]
+            above = [
+                level
+                for level in self.buy_side(at_index)
+                if level.price > price and (level.price - price) >= min_distance
+            ]
             return above[0] if above else None
-        below = [l for l in self.sell_side(at_index) if l.price < price]
+        below = [
+            level
+            for level in self.sell_side(at_index)
+            if level.price < price and (price - level.price) >= min_distance
+        ]
         return below[0] if below else None
 
     def as_dict(self, at_index: int, limit: int = 12) -> dict[str, Any]:

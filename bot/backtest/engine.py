@@ -27,6 +27,7 @@ from ..marketdata.candles import Candle
 from ..marketdata.provider import Series
 from ..marketdata.validation import ValidationReport
 from ..risk.engine import AccountRiskState, RiskEngine
+from ..risk.reward import evaluate_reward
 from ..risk.sizing import SizingError, calculate_position_size, expected_profit
 from ..scoring.scorer import SetupScorer
 from ..smc.engine import SmcEngine
@@ -259,11 +260,17 @@ class Backtester:
                 take_profit=candidate.take_profit,
                 conversion=size.conversion_rate,
             )
-            if self.config.opportunity.enabled and profit < self.config.opportunity.target_profit * (
-                self.config.opportunity.tolerance_fraction if score.tier == "A+" else 1.0
-            ):
-                result.setups_rejected["profit objective"] = (
-                    result.setups_rejected.get("profit objective", 0) + 1
+            # The same objective the live risk engine applies, in R.
+            # A backtest that filtered on dollars while production
+            # filtered on ratio would be measuring a different system.
+            reward = evaluate_reward(
+                risk_reward=candidate.risk_reward,
+                expected_profit=profit,
+                config=self.config.reward,
+            )
+            if not reward.meets_objective:
+                result.setups_rejected["reward objective"] = (
+                    result.setups_rejected.get("reward objective", 0) + 1
                 )
                 continue
 

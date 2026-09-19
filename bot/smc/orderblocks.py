@@ -114,6 +114,23 @@ def detect_order_blocks(
         if not broke_structure and not has_imbalance and not move.leaves_gap:
             continue
 
+        # Mitigation is measured at the FAR edge, not the near one.
+        #
+        # This read `candle.low <= origin.high` for a bullish block: the
+        # instant price came back and TOUCHED the top of the demand zone,
+        # the block was marked mitigated and `is_live` refused it from
+        # then on. That touch is the entry. So a block died on exactly
+        # the bar it was meant to be used, and the two conditions the
+        # engine needs - "price is at the block" and "the block is still
+        # live" - could never hold at the same time. `best_entry_block`
+        # was unreachable code, and measuring it said so: across 24 days
+        # of M15 decision points, 661 of the 747 refusals for "no live
+        # fair value gap or order block" had every order block dead.
+        #
+        # A fair value gap has always used the far edge (`candle.low <=
+        # lower`, a full fill), and the two are the same idea: the zone
+        # is spent once price has traded THROUGH it. Touching it is
+        # arrival.
         mitigated_index: int | None = None
         invalidated_index: int | None = None
         for probe in range(move.index + 1, len(candles)):
@@ -122,14 +139,14 @@ def detect_order_blocks(
                 if candle.close < origin.low - current_atr * 0.1:
                     invalidated_index = probe
                     break
-                if candle.low <= origin.high:
+                if candle.low <= origin.low:
                     mitigated_index = probe
                     break
             else:
                 if candle.close > origin.high + current_atr * 0.1:
                     invalidated_index = probe
                     break
-                if candle.high >= origin.low:
+                if candle.high >= origin.high:
                     mitigated_index = probe
                     break
 
@@ -167,6 +184,7 @@ def best_entry_block(
     at_index: int,
     max_age: int,
     reference_index: int | None = None,
+    lookback: int = 12,
 ) -> OrderBlock | None:
     wanted = "bullish" if direction == "BUY" else "bearish"
     live = [
@@ -174,7 +192,7 @@ def best_entry_block(
         for block in blocks
         if block.direction == wanted
         and block.is_live(at_index, max_age)
-        and (reference_index is None or block.index >= reference_index - 12)
+        and (reference_index is None or block.index >= reference_index - lookback)
     ]
     if not live:
         return None

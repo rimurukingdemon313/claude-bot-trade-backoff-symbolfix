@@ -211,18 +211,29 @@ def test_the_switch_refuses_an_unknown_mode(orchestrator):
     assert orchestrator.strategy_key == "smc"
 
 
-def test_status_says_whether_a_mode_can_clear_the_profit_floor(orchestrator):
-    """An operator must learn this at the switch, not after a silent week."""
+def test_the_switch_shows_what_a_trade_is_worth_without_promising_anything(orchestrator):
+    """What replaced "this mode cannot clear the profit floor".
 
-    orchestrator.feasibility = {"equity": 988.76, "maxRiskPerTrade": 9.89}
+    That warning was correct while the objective was a dollar figure, and
+    it is meaningless now: 1:1.2 R is the same demand at any equity, so no
+    mode can be unaffordable. What an operator still wants at the switch
+    is the size of a trade in this mode, which is one R times the mode's
+    own floor — a measurement, not a forecast (project rule 13).
+    """
+
     status = orchestrator.strategy_status()
-
     assert status["active"] == "smc"
+
+    equity = orchestrator.live.get("account").value.equity
+    risk_pct = orchestrator.config.risk.base_risk_pct
     for option in status["options"]:
-        # $9.89 risk at 1:1.5 or 1:2 cannot reach a $40 floor, and the
-        # status must say so rather than leave it to be discovered.
-        assert option["clearsProfitFloor"] is False
-        assert "profit floor" in option["note"]
+        assert "clearsProfitFloor" not in option
+        assert option["riskPerTrade"] == pytest.approx(equity * risk_pct, abs=0.01)
+        assert option["rewardAtMinimumR"] == pytest.approx(
+            equity * risk_pct * option["minRiskReward"], abs=0.01
+        )
+        # No mode declares a floor under the build's own.
+        assert option["minRiskReward"] >= orchestrator.config.reward.min_reward_r
 
 
 def test_a_switch_cannot_bypass_the_demo_guard(orchestrator, broker):

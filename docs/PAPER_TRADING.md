@@ -30,7 +30,7 @@ the module contains no reference to a write path.
 | `SYMBOL:conversion` | a cross pair's bridging rate does not resolve → **that symbol cannot be sized** |
 | `SYMBOL:M15/H1` | candles do not arrive or fail validation |
 | `SYMBOL:history_endpoint` | which endpoint shape works (see below) |
-| `profit_objective` | the profit floor is unreachable at this equity |
+| `reward_objective` | the minimum R in force, and what one R is worth here |
 
 Nothing it prints contains a credential — the report goes through the same
 redaction sink as the structured logs.
@@ -66,7 +66,7 @@ TRADING_MODE=paper npm start
 | --- | --- |
 | Broker session, instruments, quotes, candles | **real** (live TradeLocker DEMO) |
 | Market-data validation, SMC engine, scoring | **real** |
-| Risk engine, sizing, limits, correlation, profit floor | **real** |
+| Risk engine, sizing, limits, correlation, reward objective | **real** |
 | Execution intent, idempotency guard, DEMO guard, spread gate | **real** |
 | Position management, reconciliation, journal, dashboard | **real** |
 | **The fill itself** | **simulated** |
@@ -192,29 +192,37 @@ If your account lists both `EURUSD.R` and `EURUSD.RAW`, the bot **refuses to
 guess** and tells you both names. Set `TRADED_SYMBOLS` to the exact one you
 want.
 
-## 5. The profit floor and account size
+## 5. The reward objective and account size
 
-The configured floor is **$40 minimum expected profit at the structural
-target** (`OPPORTUNITY_MINIMUM_PROFIT`), with $50 as the target. No tier,
-tolerance or configuration can take a trade below the floor.
+There is no longer an account size at which the bot cannot trade.
 
-That imposes arithmetic worth understanding:
+The objective used to be **$40 of expected profit at the structural
+target**, and that made account size a hidden filter. Expected profit is
 
 ```
-minimum profit  = risk × R:R
-$40             = $20   × 2        (the minimum R:R)
-$20 of risk     = 1% of $2,000     (the risk ceiling)
+expected_profit = risk × R          risk = 0.5% of equity
 ```
 
-So the floor is unreachable below roughly **$2,000 of equity** — and at the
-0.5% base risk, comfortable headroom starts around **$4,000**.
+so $40 demanded 1:2 on a $5,000 account and 1:4 on a $1,000 one — the same
+chart, graded differently, for a reason the market had no part in. Below
+roughly $2,000 the floor was unreachable outright and the bot stood aside
+indefinitely while every individual refusal looked correct.
 
-Rather than returning NO TRADE forever with no explanation,
-`profit_floor_feasibility()` computes this at startup and on every health
-read. When it is unreachable you get an error-level log line, a failing
-`profitObjective` health component, and a banner on the dashboard naming the
-equity required.
+The objective is now **1:1.2 R minimum** (`REWARD_MIN_R`), with 1:1.5
+(`REWARD_PREFERRED_R`) reported as a stronger setup but never required. A
+ratio is the same demand at every equity, so the feasibility check that
+used to live here is gone with the floor that caused it.
 
-Your options if that fires: fund the demo account higher, lower
-`OPPORTUNITY_MINIMUM_PROFIT`, or raise `RISK_MAX_PCT` (the build refuses
-anything above 2%).
+On a $5,000 account one R is $25:
+
+```
+1.2R ≈ $30      1.5R ≈ $37.50      2.0R = $50      3.0R = $75
+```
+
+All of those are takeable. **None of them is a prediction** — they are what
+the position is worth *if* the structural target is reached.
+
+What can still stop a small account is the **broker's minimum lot**: if
+0.5% of equity divided by the stop distance comes to fewer lots than the
+symbol allows, the sizer declines rather than round up, because rounding up
+would risk more than was approved. That refusal names itself in the journal.

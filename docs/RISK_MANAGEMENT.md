@@ -134,25 +134,44 @@ Two pairs sharing one leg in the same direction score 0.50, which is why the
 threshold is 0.45 — that stacking is exactly what the limit exists to
 prevent.
 
-## The $50+ profit objective
+## The reward objective, in R
 
-**A filter, never a mandate.** The system may not reach the target by taking
-more risk, using more leverage, tightening the stop, or forcing a trade. The
-only lever available is *selection*.
+**A filter, never a mandate**, and a ratio rather than a sum.
 
-Expected profit is computed from the **already-sized** position — risk
-percentage fixed, stop structural, target structural:
+It was a fixed dollar floor — $40 minimum expected profit, $50 target — and
+that was a bug with a plausible face. Expected profit at the structural
+target is
 
 ```
-expected_profit = |take_profit − entry| × contract_size × conversion × lots
+expected_profit = risk × R        risk = 0.5% of equity
 ```
 
-If it falls short of the objective, the answer is **NO TRADE**. Nothing in
-`bot/risk/opportunity.py` can change entry, stop, target or size; it returns
-a verdict on numbers computed elsewhere.
+so a dollar floor is a statement about **account size** wearing the costume
+of a statement about setup quality. $40 silently demanded 1:2 on a $5,000
+account and 1:4 on a $1,000 one; the market does not know the balance, and
+the same chart must not grade differently on two accounts.
 
-A+ setups clear a slightly lower bar (80% of the target) because the quality
-of the *setup* is what is being rewarded — never the size of the position.
+| | |
+| --- | --- |
+| `REWARD_MIN_R` | 1.2 — below this, NO TRADE, at any equity |
+| `REWARD_PREFERRED_R` | 1.5 — reported as a stronger setup. A label, never a gate |
+
+The three ways to inflate a dollar figure are each forbidden elsewhere and
+would each be invisible here, which is the other reason the unit matters:
+
+* **size** comes from `sizing.calculate_position_size`, which rounds *down*
+  and declines rather than round up to a broker minimum;
+* **the stop** is structural, from `smc/engine.py`;
+* **the target** is the nearest meaningful opposing liquidity, also
+  structural.
+
+So `bot/risk/reward.py` judges a ratio that is already fixed by the time it
+sees it. Expected profit is still computed and still reported — an operator
+wants to know what a trade is worth — but it is **information, never a
+gate**.
+
+On a $5,000 account one R is $25, so 1.2R ≈ $30, 1.5R ≈ $37.50 and 2R = $50.
+All three are takeable. None of them is a prediction.
 
 ## Kill switch
 

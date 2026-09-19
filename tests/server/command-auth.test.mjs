@@ -100,6 +100,28 @@ describe("command surface authentication", () => {
     assert.equal(status, 401);
   });
 
+  it("DOES allow switching strategy once the token is supplied", async () => {
+    // The other half of the rule, and the half an operator notices: a
+    // locked control that stays locked with the right key is just a
+    // broken control. This reaches the router and fails only because no
+    // bot process is running behind it, which is the point — it passed
+    // auth rather than being refused by it.
+    const { status, body } = await post(
+      "/api/control/strategy",
+      { strategy: "reversion" },
+      { "X-Dashboard-Token": TOKEN },
+    );
+    assert.notEqual(status, 401, "the right token must unlock the switch");
+    // 503 here is the proxy reporting the bot process unreachable, which
+    // is expected with nothing running behind it. The auth refusal is a
+    // 503 too, so the status alone cannot tell them apart - the body can.
+    assert.notEqual(
+      body?.code,
+      "NO_TOKEN_CONFIGURED",
+      "a configured token must not read as unconfigured",
+    );
+  });
+
   it("refuses to resume scanning without the token", async () => {
     const { status } = await post("/api/control/scanning", { enabled: true });
     assert.equal(status, 401, "resuming is not a safe direction");

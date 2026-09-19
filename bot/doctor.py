@@ -29,7 +29,7 @@ from typing import Any
 from .broker.tradelocker import TradeLockerBroker
 from .clock import utc_now
 from .broker.symbols import broker_suffix, canonical_symbol
-from .config import ExecutionMode, TradingConfig, load_config, profit_floor_feasibility
+from .config import ExecutionMode, TradingConfig, load_config
 from .errors import BotError, ConfigError, SymbolUnavailable
 from .marketdata.candles import to_candles
 from .marketdata.validation import validate_series
@@ -395,15 +395,27 @@ def run(
         except BotError as exc:
             report.add(name, FAIL, f"could not decode: {exc}")
 
-    # 9. profit objective feasibility ------------------------------------
-    if equity > 0:
-        feasibility = profit_floor_feasibility(config, equity)
-        report.add(
-            "profit_objective",
-            OK if feasibility["feasible"] else FAIL,
-            feasibility["reason"],
-            **feasibility,
-        )
+    # 9. reward objective --------------------------------------------------
+    # Stated, not checked. The objective is a ratio now, so unlike the
+    # dollar floor it replaced there is no equity at which it becomes
+    # unreachable — what an operator needs is the number in force and
+    # what one R is worth on this account.
+    reward = config.reward
+    one_r = equity * config.risk.base_risk_pct if equity > 0 else None
+    report.add(
+        "reward_objective",
+        OK,
+        f"minimum 1:{reward.min_reward_r:g} R, preferred 1:{reward.preferred_reward_r:g}"
+        + (
+            f"; at ${equity:,.2f} equity one R is ${one_r:,.2f}, so the minimum target is "
+            f"worth about ${one_r * reward.min_reward_r:,.2f}"
+            if one_r
+            else ""
+        ),
+        minimumR=reward.min_reward_r,
+        preferredR=reward.preferred_reward_r,
+        riskPerTrade=round(one_r, 2) if one_r else None,
+    )
 
     return report
 

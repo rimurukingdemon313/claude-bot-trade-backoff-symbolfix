@@ -27,7 +27,7 @@ import pytest
 from bot.broker.http import CircuitBreaker, HttpTransport, Throttle
 from bot.broker.models import InstrumentSpec, Quote
 from bot.broker.paper import PaperBroker
-from bot.config import ExecutionMode, profit_floor_feasibility
+from bot.config import ExecutionMode
 from bot.errors import (
     AmbiguousExecution,
     BrokerError,
@@ -380,44 +380,53 @@ def test_simultaneous_limit_breaches_all_report(config, candidate):
     assert len(decision.reasons) >= 3, decision.reasons
 
 
-def test_the_profit_floor_is_reported_as_unreachable_rather_than_silently_never_trading(config):
-    """A tiny account would otherwise return NO TRADE forever with no clue why."""
+def test_the_same_setup_is_graded_identically_on_a_small_and_a_large_account(config):
+    """The defect that made the old dollar floor a bug rather than a filter.
 
-    feasibility = profit_floor_feasibility(config, 300.0)
-    assert feasibility["feasible"] is False
-    assert "No setup can pass this filter" in feasibility["reason"]
-    assert feasibility["requiredEquity"] > 300.0
-
-
-def test_feasibility_is_judged_against_attainable_rr_not_the_minimum(config):
-    """`min_risk_reward` is a floor, not a cap.
-
-    Targets are structural, so a setup's R:R is whatever the liquidity
-    above it is worth. Judging feasibility by the *minimum* R:R declared a
-    $1,000 account incapable of a $40 win, when any 1:4 setup clears it —
-    the bot was reported as permanently blocked while it was merely
-    selective.
+    A $40 minimum profit is really `risk x R >= 40`, and risk is a fixed
+    percentage of equity — so it silently demanded 1:2 at $5,000 and 1:4
+    at $1,000. Two accounts, the same chart, different answers. Here the
+    identical candidate is judged at both, and the verdict must match.
     """
 
-    feasibility = profit_floor_feasibility(config, 1_000.0)
-    assert feasibility["feasible"] is True
-    assert feasibility["demanding"] is True
-    # $10 risk, $40 floor -> a setup must be worth 1:4.
-    assert feasibility["requiredRiskReward"] == pytest.approx(4.0, abs=0.05)
-    assert "reachable but demanding" in feasibility["reason"]
+    from bot.risk.reward import evaluate_reward
+
+    poor_risk = 1_000.0 * config.risk.base_risk_pct
+    rich_risk = 100_000.0 * config.risk.base_risk_pct
+    ratio = 1.4  # above the 1.2 floor, below the 1.5 "strong" label
+
+    poor = evaluate_reward(
+        risk_reward=ratio, expected_profit=poor_risk * ratio, config=config.reward
+    )
+    rich = evaluate_reward(
+        risk_reward=ratio, expected_profit=rich_risk * ratio, config=config.reward
+    )
+
+    assert poor.meets_objective is rich.meets_objective is True
+    assert poor.preferred is rich.preferred is False
+    # $7 and $700 of expected reward, the same verdict.
+    assert poor.expected_profit == pytest.approx(7.0)
+    assert rich.expected_profit == pytest.approx(700.0)
 
 
-def test_the_profit_floor_never_raises_risk_to_close_the_gap(config):
-    """Rule 2: risk may be reduced by account state, never increased by it.
+def test_no_dollar_threshold_survives_anywhere_in_the_decision_path(config):
+    """The audit the user asked for, as a test rather than a promise.
 
-    A profit objective that could bid the risk ceiling up would be exactly
-    the martingale the risk engine forbids, arriving through the back door.
+    A grep is a claim about today's source. This walks the objects that
+    actually decide, so a dollar floor reintroduced under any name in any
+    of them fails here.
     """
 
-    poor = profit_floor_feasibility(config, 300.0)
-    rich = profit_floor_feasibility(config, 30_000.0)
-    assert poor["maxRiskPerTrade"] == pytest.approx(300.0 * config.risk.max_risk_pct)
-    assert rich["maxRiskPerTrade"] == pytest.approx(30_000.0 * config.risk.max_risk_pct)
+    import dataclasses as dc
+
+    assert not hasattr(config, "opportunity")
+    reward_fields = {f.name for f in dc.fields(config.reward)}
+    assert reward_fields == {"min_reward_r", "preferred_reward_r", "enabled"}
+    for name in reward_fields:
+        assert "profit" not in name
+
+    # And the risk engine's own floor is a ratio, not a sum.
+    assert config.risk.min_risk_reward == pytest.approx(config.reward.min_reward_r)
 
 
 # =========================================================================

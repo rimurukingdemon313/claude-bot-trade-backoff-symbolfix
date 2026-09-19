@@ -18,7 +18,7 @@ from typing import Any
 
 from .analytics.performance import breakdown, compute_performance
 from .clock import ensure_utc, utc_now
-from .config import TradingConfig, profit_floor_feasibility
+from .config import TradingConfig
 from .broker.cache import CachedRead
 from .errors import BotError
 from .orchestrator import Orchestrator
@@ -287,17 +287,12 @@ class DashboardApi:
                 return default
 
         funnel = safely(lambda: self.repos.journal.funnel(days=days), {})
-        equity = safely(self._cached_equity, None)
-        feasibility = (
-            profit_floor_feasibility(self.config, equity) if equity is not None else None
-        )
         news = safely(self.orchestrator.news.health, {})
         ai_gate = safely(self.orchestrator._ai_gate_status, {})
         kill = safely(lambda: self.orchestrator.kill_switch.read().active, False)
 
         return diagnose(
             funnel=funnel,
-            feasibility=feasibility,
             last_trade_at=safely(self._last_trade_at, None),
             ai_required_but_unavailable=bool(ai_gate.get("blockingAllTrades")),
             news_failing_closed=bool(
@@ -393,9 +388,14 @@ class DashboardApi:
                     "maxConsecutiveLosses": limits.max_consecutive_losses,
                     "minRiskReward": limits.min_risk_reward,
                 },
-                "opportunityTarget": self.config.opportunity.target_profit,
-                "opportunityMinimum": self.config.opportunity.minimum_profit,
-                "profitObjective": profit_floor_feasibility(self.config, state.equity),
+                "rewardObjective": {
+                    "minimumR": self.config.reward.min_reward_r,
+                    "preferredR": self.config.reward.preferred_reward_r,
+                    "enabled": self.config.reward.enabled,
+                    # What one R is worth here. Information for the
+                    # operator, never a threshold - see bot/risk/reward.py.
+                    "riskPerTrade": round(state.equity * self.config.risk.base_risk_pct, 2),
+                },
             },
         }
 

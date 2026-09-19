@@ -26,7 +26,7 @@ TradeLocker candles
   → deterministic setup score → tier (A+ / A / B / NO TRADE)
   → session · news · spread
   → RISK ENGINE (single authority: sizing, limits, correlation)
-  → $50+ opportunity check
+  → reward objective (R, never a dollar floor)
   → AI validation (veto only)
   → final execution guard → TradeLocker DEMO
   → broker verification → position management → exit
@@ -120,7 +120,7 @@ npm start
 check, exactly what it found: whether DEMO verification passes, which
 history endpoint shape your broker uses, whether each instrument exposes a
 usable contract size and lot step, whether the currency conversion path
-resolves, and whether the profit floor is reachable at your equity. It is
+resolves, and what one R is worth at your equity. It is
 read-only — it never places, modifies or closes an order.
 
 Run it before every deployment and after any broker-side change. Add
@@ -153,7 +153,7 @@ python3 -m bot.backtest --symbol EURUSD --walk-forward --folds 3
 | --- | --- |
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Module map, data flow, process model |
 | [SMC_ENGINE.md](docs/SMC_ENGINE.md) | Every detector, and why it rejects what it rejects |
-| [RISK_MANAGEMENT.md](docs/RISK_MANAGEMENT.md) | Position sizing maths, limits, the $50 objective |
+| [RISK_MANAGEMENT.md](docs/RISK_MANAGEMENT.md) | Position sizing maths, limits, the R objective |
 | [EXECUTION_ENGINE.md](docs/EXECUTION_ENGINE.md) | Idempotency, reconciliation, crash recovery |
 | [DEPLOYMENT.md](docs/DEPLOYMENT.md) | Railway setup, environment, persistence |
 | [DEPLOY_RAILWAY.md](docs/DEPLOY_RAILWAY.md) | Deploying and verifying with no terminal at all |

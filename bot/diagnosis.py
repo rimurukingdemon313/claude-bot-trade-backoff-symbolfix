@@ -16,6 +16,13 @@ The order below is deliberate. A configuration trap outranks a market
 verdict, because "the calendar feed is down and the filter fails closed"
 and "no setup qualified" produce the same silence, and only one of them
 is the operator's to fix.
+
+There used to be a PROFIT_FLOOR verdict here, and it was the most useful
+one this module had: a fixed dollar floor makes a small account silently
+untradeable, and naming that saved an operator a week. It is gone because
+the floor is gone - the reward objective is measured in R now, which is
+the same demand at any equity (bot/risk/reward.py). A verdict that can
+never fire is worse than no verdict, so it went with the cause.
 """
 
 from __future__ import annotations
@@ -53,7 +60,6 @@ def _days_since(moment: datetime | None, now: datetime) -> float | None:
 def diagnose(
     *,
     funnel: Mapping[str, Any],
-    feasibility: Mapping[str, Any] | None = None,
     last_trade_at: datetime | None = None,
     ai_required_but_unavailable: bool = False,
     news_failing_closed: bool = False,
@@ -138,15 +144,6 @@ def diagnose(
             ),
         }
 
-    if feasibility and feasibility.get("feasible") is False:
-        return {
-            **base,
-            "binding": "PROFIT_FLOOR",
-            "severity": "warning",
-            "headline": "The profit floor cannot be reached at this equity by any setup.",
-            "remedy": str(feasibility.get("reason") or ""),
-        }
-
     # -- 3. not enough evidence to name a constraint ---------------------
 
     if evaluations < MIN_EVALUATIONS_FOR_A_VERDICT:
@@ -177,23 +174,6 @@ def diagnose(
     top = reasons[0] if reasons else None
     if top:
         evidence.append(f"most common reason: {top.get('reason')} ({top.get('count')}x)")
-
-    if feasibility and feasibility.get("demanding"):
-        # Reachable but only by exceptional setups. This is the single
-        # most common reason a correctly-working bot looks broken, and it
-        # is arithmetic rather than opinion, so it is named even when the
-        # funnel points elsewhere.
-        return {
-            **base,
-            "binding": "PROFIT_FLOOR",
-            "severity": "info",
-            "headline": (
-                "Nothing is broken: the profit floor is reachable only by exceptional "
-                f"setups at this equity, and {meaning} is where most evaluations stop."
-            ),
-            "remedy": str(feasibility.get("reason") or ""),
-            "evidence": evidence,
-        }
 
     if candidates > 0:
         return {

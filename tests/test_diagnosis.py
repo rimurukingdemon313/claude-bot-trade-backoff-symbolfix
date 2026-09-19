@@ -171,28 +171,22 @@ def test_too_little_evidence_says_so_instead_of_naming_a_constraint():
     assert verdict["evidence"] == ["sample: insufficient"]
 
 
-def test_an_unreachable_profit_floor_is_reported_as_arithmetic_not_a_fault():
-    verdict = diagnose(
-        funnel=_funnel(900, binding="SMC", lost=890),
-        feasibility={"feasible": False, "reason": "at $300.00 equity nothing clears $40.00"},
-        now=NOW,
-    )
-    assert verdict["binding"] == "PROFIT_FLOOR"
-    assert "$40.00" in verdict["remedy"]
+def test_no_verdict_still_talks_about_a_dollar_profit_floor():
+    """The floor is gone, so the verdict that named it must be gone too.
 
+    It was the most useful verdict this module had - a fixed dollar floor
+    makes a small account silently untradeable - but the objective is
+    measured in R now, so nothing can reach that branch. A verdict that
+    can never fire is worse than no verdict.
+    """
 
-def test_a_demanding_profit_floor_is_named_even_when_the_funnel_points_elsewhere():
-    """The most common reason a WORKING bot looks broken."""
+    import inspect
 
-    verdict = diagnose(
-        funnel=_funnel(900, binding="SMC", lost=880),
-        feasibility={"feasible": True, "demanding": True, "reason": "needs 1:4.0 R:R"},
-        now=NOW,
-    )
-    assert verdict["binding"] == "PROFIT_FLOOR"
-    assert verdict["severity"] == "info"
-    assert "Nothing is broken" in verdict["headline"]
-    assert "1:4.0" in verdict["remedy"]
+    import bot.diagnosis as module
+
+    source = inspect.getsource(module)
+    assert "PROFIT_FLOOR" not in source.split('"""', 2)[2], "a dead verdict is still reachable"
+    assert "feasibility" not in inspect.signature(diagnose).parameters
 
 
 def test_the_narrowest_stage_is_named_with_what_it_means():
@@ -242,11 +236,7 @@ def test_the_diagnosis_never_proposes_raising_risk():
         diagnose(funnel=_funnel(900, binding="SMC", lost=900), kill_switch_active=True, now=NOW),
         diagnose(funnel=_funnel(900, binding="SMC", lost=900), now=NOW),
         diagnose(funnel=_funnel(20, binding="SMC", lost=20), now=NOW),
-        diagnose(
-            funnel=_funnel(900, binding="SMC", lost=900),
-            feasibility={"feasible": True, "demanding": True, "reason": "grow equity or lower the floor"},
-            now=NOW,
-        ),
+        diagnose(funnel=_funnel(900, binding="RISK", lost=900, candidates=3), now=NOW),
     ]
     for verdict in verdicts:
         text = f"{verdict['headline']} {verdict['remedy']}".lower()

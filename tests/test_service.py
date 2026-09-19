@@ -304,31 +304,23 @@ def test_demo_live_mode_is_warned_about(monkeypatch):
     assert any("real orders" in warning.lower() for warning in report.warnings)
 
 
-def test_an_unreachable_profit_floor_is_warned_about(monkeypatch):
-    from bot.config import load_config
-    from bot.setup_status import build_setup_report
+def test_no_equity_makes_the_setup_report_warn_about_the_objective(monkeypatch):
+    """The warning that stood here is gone, with the floor that caused it.
 
-    # $300 at the 1% ceiling risks $3; even an exceptional 1:10 structural
-    # target returns $30, short of the $40 floor. Nothing but more equity
-    # fixes that, and the operator must be told rather than left watching
-    # a bot that never trades.
-    report = build_setup_report(load_config(), equity=300.0)
-    assert any("No setup can pass this filter" in warning for warning in report.warnings)
-
-
-def test_a_reachable_but_demanding_profit_floor_is_also_warned_about(monkeypatch):
-    """The quiet-bot case: it CAN trade, but only on exceptional setups.
-
-    Silence here is what made the last deployment look broken — a healthy
-    bot returning NO TRADE every day is indistinguishable from a stuck one
-    unless it says why.
+    A $300 account used to be told "no setup can pass this filter", and
+    that was true and useful while the objective was $40. The objective is
+    1:1.2 R now, which is the same demand at any equity — so an equity
+    warning here could only be false.
     """
 
     from bot.config import load_config
     from bot.setup_status import build_setup_report
 
-    report = build_setup_report(load_config(), equity=1_000.0)
-    assert any("reachable but demanding" in warning for warning in report.warnings)
+    for equity in (300.0, 1_000.0, 5_000.0, 250_000.0):
+        report = build_setup_report(load_config(), equity=equity)
+        joined = " ".join(report.warnings)
+        assert "profit floor" not in joined.lower()
+        assert "no setup can pass" not in joined.lower()
 
 
 def test_ai_enabled_without_a_provider_is_flagged_as_blocking(monkeypatch):

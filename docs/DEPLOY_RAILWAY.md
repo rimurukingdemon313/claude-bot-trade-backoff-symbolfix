@@ -35,8 +35,8 @@ TRADELOCKER_URL=https://demo.tradelocker.com/backend-api
 TRADING_MODE=paper
 TRADED_SYMBOLS=EURUSD,GBPUSD,USDJPY,AUDUSD,USDCHF,XAUUSD
 
-OPPORTUNITY_MINIMUM_PROFIT=40
-OPPORTUNITY_TARGET_PROFIT=50
+REWARD_MIN_R=1.2
+REWARD_PREFERRED_R=1.5
 ```
 
 Notes:
@@ -97,7 +97,7 @@ fixed.
 It will mostly say **NO TRADE**, and that is correct behaviour. The system is
 built to be selective: it wants multi-timeframe agreement, a liquidity sweep
 or a displaced structure break, an unmitigated entry zone, an acceptable
-spread, no news blackout, and at least $40 of expected profit at the
+spread, no news blackout, and at least 1:1.2 of structural reward at the
 structural target — all at once. Days can pass without a trade.
 
 The **System → Decision journal** shows why it stood aside each time. That is
@@ -111,5 +111,5 @@ the most useful screen in the whole dashboard.
 | `/healthz` returns 503 | open `/api/health` and read `components` — one of database, broker, demo or startup will be false |
 | `demo_guard` FAIL | `TRADELOCKER_URL` is not a demo endpoint, or the account does not self-identify as demo |
 | `SYMBOL:specification` FAIL | the broker does not expose a contract size for that symbol; it will be skipped |
-| `profit_objective` FAIL | the $40 floor is unreachable at your equity — see [PAPER_TRADING.md §5](PAPER_TRADING.md) |
+| `reward_objective` | informational: the minimum R and what one R is worth — see [PAPER_TRADING.md §5](PAPER_TRADING.md) |
 | Never trades, no errors | expected. Read the decision journal. |

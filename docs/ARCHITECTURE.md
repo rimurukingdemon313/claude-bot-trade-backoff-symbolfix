@@ -97,7 +97,7 @@ bot/
 ├── risk/
 │   ├── sizing.py        Lots from real broker specs and real FX conversion.
 │   ├── correlation.py   Currency-exposure-based portfolio correlation.
-│   ├── opportunity.py   The $50+ objective (a filter, never a target).
+│   ├── reward.py        The R objective (a filter, never a target).
 │   └── engine.py        THE risk authority. The only approver of a trade.
 │
 ├── ai/

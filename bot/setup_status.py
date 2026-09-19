@@ -18,7 +18,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
-from .config import ExecutionMode, TradingConfig, profit_floor_feasibility
+from .config import ExecutionMode, TradingConfig
 
 REQUIRED = "required"
 RECOMMENDED = "recommended"
@@ -177,14 +177,6 @@ def build_setup_report(config: TradingConfig, *, equity: float | None = None) ->
             "TRADING_MODE=demo_live: real orders will be placed on the DEMO account. "
             "Set it to 'paper' to simulate against live prices instead."
         )
-    if equity is not None:
-        feasibility = profit_floor_feasibility(config, equity)
-        # Both bands are worth saying out loud. "Unreachable" means the bot
-        # can never trade; "demanding" means it will trade rarely — and an
-        # operator who is not told the second one reads a quiet bot as a
-        # broken one.
-        if not feasibility.get("feasible") or feasibility.get("demanding"):
-            warnings.append(feasibility["reason"])
 
     # Only the settings still missing, so there is nothing to hunt through.
     outstanding = [s for s in SETTINGS if not s.present and s.example]

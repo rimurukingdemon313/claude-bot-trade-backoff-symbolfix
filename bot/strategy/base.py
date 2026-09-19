@@ -33,8 +33,16 @@ from ..marketdata.provider import Series
 from ..smc.engine import SmcResult
 
 #: The lowest risk:reward this build will run under any strategy. Mirrors
-#: the clamp in `load_config`; a profile below it is a bug, not a choice.
-BUILD_MINIMUM_RISK_REWARD = 1.5
+#: `RewardConfig.min_reward_r` and the clamp in `load_config`; a profile
+#: below it is a bug, not a choice.
+#:
+#: It was 1.5, alongside a fixed $40 profit floor. Both are gone for the
+#: same reason (bot/risk/reward.py): a target is the nearest meaningful
+#: opposing liquidity, so demanding 1:2 or 1:1.5 of every setup does not
+#: make the market offer it - it discards structurally sound trades whose
+#: next pool happens to sit closer. 1.2 is the floor; a strategy may
+#: still choose higher, and the reversion mode does.
+BUILD_MINIMUM_RISK_REWARD = 1.2
 
 
 @dataclass(frozen=True, slots=True)

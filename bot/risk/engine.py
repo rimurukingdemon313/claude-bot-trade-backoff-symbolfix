@@ -34,7 +34,7 @@ from ..smc.engine import SetupCandidate
 from ..smc.sessions import classify_session, is_forex_weekend
 from ..version import RISK_ENGINE_VERSION
 from .correlation import ExposureReport, analyse_exposure
-from .opportunity import OpportunityVerdict, evaluate_opportunity
+from .reward import RewardVerdict, evaluate_reward
 from .sizing import PositionSize, RateLookup, SizingError, calculate_position_size, expected_profit
 
 
@@ -94,7 +94,7 @@ class RiskDecision:
     risk_amount: float | None = None
     size: PositionSize | None = None
     expected_profit: float | None = None
-    opportunity: OpportunityVerdict | None = None
+    reward: RewardVerdict | None = None
     exposure: ExposureReport | None = None
     limits: dict[str, Any] = field(default_factory=dict)
     version: str = RISK_ENGINE_VERSION
@@ -114,7 +114,7 @@ class RiskDecision:
             "riskAmount": round(self.risk_amount, 2) if self.risk_amount else None,
             "size": self.size.as_dict() if self.size else None,
             "expectedProfit": round(self.expected_profit, 2) if self.expected_profit else None,
-            "opportunity": self.opportunity.as_dict() if self.opportunity else None,
+            "reward": self.reward.as_dict() if self.reward else None,
             "exposure": self.exposure.as_dict() if self.exposure else None,
             "limits": self.limits,
             "version": self.version,
@@ -416,20 +416,25 @@ class RiskEngine:
             take_profit=candidate.take_profit,
             conversion=size.conversion_rate,
         )
-        opportunity = evaluate_opportunity(
-            expected_profit=profit, config=self.config.opportunity, tier=tier
+        # Judged on R, never on the dollar figure. `profit` is computed
+        # from a size that is already fixed, so gating on it would be
+        # gating on the account balance - see bot/risk/reward.py.
+        reward = evaluate_reward(
+            risk_reward=candidate.risk_reward,
+            expected_profit=profit,
+            config=self.config.reward,
         )
-        if not opportunity.meets_objective:
+        if not reward.meets_objective:
             return RiskDecision(
                 False,
                 candidate.symbol,
                 candidate.direction,
-                (opportunity.reason,),
+                (reward.reason,),
                 risk_pct=risk_pct,
                 risk_amount=risk_amount,
                 size=size,
                 expected_profit=profit,
-                opportunity=opportunity,
+                reward=reward,
                 exposure=exposure,
                 limits=limits_snapshot,
             )
@@ -439,7 +444,7 @@ class RiskEngine:
             + [
                 f"risking ${size.actual_risk:.2f} ({risk_pct:.2%} of ${account.equity:.2f} equity)",
                 f"{size.lots} lots, expected ${profit:.2f} at target, R:R 1:{candidate.risk_reward:.2f}",
-                opportunity.reason,
+                reward.reason,
             ]
         )
         decision = RiskDecision(
@@ -451,7 +456,7 @@ class RiskEngine:
             risk_amount=risk_amount,
             size=size,
             expected_profit=profit,
-            opportunity=opportunity,
+            reward=reward,
             exposure=exposure,
             limits=limits_snapshot,
         )

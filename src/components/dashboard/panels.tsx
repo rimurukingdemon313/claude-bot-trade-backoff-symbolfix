@@ -516,28 +516,33 @@ export function RiskPanel({ risk }: { risk: Envelope<RiskState> | undefined }) {
               value={`${data.tradesToday}/${data.limits.maxTradesPerDay}`}
             />
             <Row label="Minimum R:R" value={`1:${fmt.number(data.limits.minRiskReward, 1)}`} />
-            <Row
-              label="Profit objective"
-              value={`${fmt.money(data.opportunityMinimum)} floor · ${fmt.money(
-                data.opportunityTarget,
-              )} target`}
-            />
+            {data.rewardObjective && (
+              <>
+                <Row
+                  label="Risk per trade"
+                  value={`${fmt.money(data.rewardObjective.riskPerTrade)} (1R)`}
+                />
+                <Row
+                  label="Reward objective"
+                  value={`1:${fmt.number(data.rewardObjective.minimumR, 1)} min · 1:${fmt.number(
+                    data.rewardObjective.preferredR,
+                    1,
+                  )} strong`}
+                />
+              </>
+            )}
           </div>
-          {data.profitObjective && !data.profitObjective.feasible && (
-            <p className="mt-3 rounded-lg border border-rose-900 bg-rose-950/40 p-2 text-xs text-rose-300">
-              <span className="font-semibold">Profit floor unreachable: </span>
-              {data.profitObjective.reason}
-            </p>
-          )}
-          {data.profitObjective?.feasible && data.profitObjective.demanding && (
-            <p className="mt-3 rounded-lg border border-amber-900 bg-amber-950/40 p-2 text-xs text-amber-300">
-              <span className="font-semibold">Selective: </span>
-              {data.profitObjective.reason}
+          {data.rewardObjective && (
+            <p className="mt-3 text-[11px] leading-snug text-slate-500">
+              A setup is judged on its ratio, never on a dollar figure. At{" "}
+              {fmt.money(data.rewardObjective.riskPerTrade)} per R the minimum target is worth about{" "}
+              {fmt.money(data.rewardObjective.riskPerTrade * data.rewardObjective.minimumR)} — but
+              the structure sets the stop and the target, so the ratio is what is checked. Size is
+              never raised, and the stop is never tightened, to make a trade worth more.
             </p>
           )}
           <p className="mt-3 text-[11px] text-slate-500">
-            Risk is reduced by drawdown and losing streaks, never increased. The profit objective
-            filters opportunities; it never raises position size.
+            Risk is reduced by drawdown and losing streaks, never increased.
           </p>
           <Freshness envelope={risk} />
         </>
@@ -1115,11 +1120,24 @@ export function StrategyPanel({
   status,
   onSelect,
   pending,
+  lock,
 }: {
   status: StrategyStatus | undefined;
   onSelect: (key: string) => void;
   pending: boolean;
+  /**
+   * Whether the command surface will accept a switch at all.
+   *
+   * Switching modes can widen what the bot does, so the proxy requires
+   * DASHBOARD_TOKEN for it (project rule 15). That refusal used to arrive
+   * only as a toast that cleared itself after six seconds, which on a
+   * phone reads as "the button does nothing" — and the operator concludes
+   * the switch is broken rather than locked. The state belongs on the
+   * control itself.
+   */
+  lock?: "ok" | "wrong" | "unset" | "checking";
 }) {
+  const locked = lock !== undefined && lock !== "ok";
   if (!status) {
     return (
       <Card title="Strategy">
@@ -1132,6 +1150,22 @@ export function StrategyPanel({
       title="Strategy"
       subtitle="Which analysis looks for trades. Risk, sizing and the demo guard never change."
     >
+      {locked && (
+        <p className="mb-3 rounded-lg border border-amber-900 bg-amber-950/40 p-2 text-[11px] leading-snug text-amber-300">
+          {lock === "unset" ? (
+            <>
+              Switching is disabled because this deployment has no{" "}
+              <code>DASHBOARD_TOKEN</code> set. Add it to the environment and redeploy, then
+              unlock the dashboard below with the same value.
+            </>
+          ) : (
+            <>
+              Unlock the dashboard below to switch modes. Switching can widen what the bot does,
+              so it needs the deployment token; stopping the bot never does.
+            </>
+          )}
+        </p>
+      )}
       <div className="space-y-2">
         {status.options.map((option) => {
           const active = option.key === status.active;
@@ -1139,7 +1173,7 @@ export function StrategyPanel({
             <button
               key={option.key}
               type="button"
-              disabled={pending || active}
+              disabled={pending || active || locked}
               onClick={() => onSelect(option.key)}
               className={cn(
                 "block w-full rounded-xl border p-3 text-left transition",
@@ -1154,7 +1188,9 @@ export function StrategyPanel({
                 {active ? (
                   <Badge tone="good">ACTIVE</Badge>
                 ) : (
-                  <Badge tone="neutral">{pending ? "…" : "SWITCH"}</Badge>
+                  <Badge tone={locked ? "warn" : "neutral"}>
+                    {locked ? "LOCKED" : pending ? "…" : "SWITCH"}
+                  </Badge>
                 )}
                 <span className="ml-auto shrink-0 text-[11px] tabular-nums text-slate-400">
                   min 1:{option.minRiskReward}
@@ -1191,7 +1227,7 @@ export function StrategyPanel({
  * Stopping the bot deliberately does NOT — an operator must always be
  * able to hit the brakes, from any device, having lost anything.
  */
-export function UnlockPanel() {
+export function UnlockPanel({ onChange }: { onChange?: (state: string) => void } = {}) {
   const [value, setValue] = useState("");
   const [state, setState] = useState<"checking" | "ok" | "wrong" | "unset" | "empty">(
     () => (readToken() ? "checking" : "empty"),
@@ -1205,11 +1241,16 @@ export function UnlockPanel() {
   const check = useCallback(async () => {
     if (!readToken()) {
       setState("empty");
+      onChange?.("empty");
       return;
     }
     setState("checking");
-    setState(await api.verifyToken());
-  }, []);
+    const result = await api.verifyToken();
+    setState(result);
+    // Other controls read the same lock. Telling them here is what makes
+    // unlocking take effect on the Strategy card without a page reload.
+    onChange?.(result);
+  }, [onChange]);
 
   useEffect(() => {
     void check();
@@ -1257,6 +1298,7 @@ export function UnlockPanel() {
             onClick={() => {
               storeToken(null);
               setState("empty");
+              onChange?.("empty");
               setMessage("Token removed from this browser.");
             }}
             className="mt-3 min-h-[38px] w-full rounded-xl border border-slate-700 bg-slate-900 px-3 text-xs font-medium text-slate-200"

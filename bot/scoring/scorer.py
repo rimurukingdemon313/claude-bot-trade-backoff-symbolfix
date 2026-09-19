@@ -195,7 +195,16 @@ def _regime_component(candidate: SetupCandidate) -> tuple[float, str]:
 def _location_component(candidate: SetupCandidate) -> tuple[float, str]:
     dealing = candidate.dealing_range
     if dealing is None:
-        return 0.5, "no dealing range established"
+        # Absence of evidence is not half-evidence.
+        #
+        # This returned 0.5, which inverted the component: a setup MEASURED
+        # to be in a bad location (alignment near 0) scored below one where
+        # the location was simply unknown, so the scorer preferred
+        # ignorance to a bad reading. Measured at 0% of bars on realistic
+        # data, so this is a soundness fix rather than a live one - but a
+        # default that rewards missing information is the kind that starts
+        # mattering the day the data gets worse (project rule 6).
+        return 0.0, "no dealing range established — location scores nothing, not half"
     alignment = dealing.alignment(candidate.direction)
     return alignment, f"price in {dealing.zone} ({dealing.position:.0%} of range)"
 

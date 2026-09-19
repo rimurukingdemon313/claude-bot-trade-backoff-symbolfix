@@ -28,7 +28,12 @@ from ..marketdata.provider import Series
 from ..marketdata.validation import ValidationReport
 from ..risk.engine import AccountRiskState, RiskEngine
 from ..risk.reward import evaluate_reward
-from ..risk.sizing import SizingError, calculate_position_size, expected_profit
+from ..risk.sizing import (
+    RateLookup,
+    SizingError,
+    calculate_position_size,
+    expected_profit,
+)
 from ..scoring.scorer import SetupScorer
 from ..smc.engine import SmcEngine
 from ..smc.sessions import is_forex_weekend
@@ -47,6 +52,15 @@ class SimulatedTrade:
     risk_amount: float
     setup_grade: str
     setup_score: float
+    #: Value of one unit of the QUOTE currency in the ACCOUNT currency.
+    #:
+    #: Carried on the trade because P/L needs it and the sizer already
+    #: had it. Without it `gross` was quote-currency units reported as
+    #: account currency — correct for a USD-quoted pair where the rate is
+    #: 1.0, and wrong by a factor of ~150 for anything quoted in JPY. The
+    #: sizer applied the rate, so RISK was converted and RESULT was not:
+    #: every JPY cross booked its wins and losses about 150x too large.
+    conversion_rate: float = 1.0
     exit_index: int | None = None
     exit_time: datetime | None = None
     exit_price: float | None = None
@@ -66,6 +80,7 @@ class SimulatedTrade:
             "takeProfit": round(self.take_profit, 6),
             "lots": self.lots,
             "riskAmount": round(self.risk_amount, 2),
+            "conversionRate": round(self.conversion_rate, 6),
             "setupGrade": self.setup_grade,
             "setupScore": self.setup_score,
             "exitTime": self.exit_time.isoformat() if self.exit_time else None,
@@ -138,11 +153,21 @@ class Backtester:
         *,
         costs: BacktestCosts | None = None,
         starting_balance: float = 10_000.0,
+        rate_lookup: RateLookup | None = None,
     ) -> None:
         self.config = config
         self.spec = spec
         self.costs = costs or BacktestCosts()
         self.starting_balance = starting_balance
+        #: How a quote currency converts into the account currency.
+        #:
+        #: Required for any CROSS - EURGBP or GBPJPY on a USD account.
+        #: `conversion_rate` raises rather than guess a rate, which is
+        #: right, so without this every cross was rejected at "sizing" and
+        #: a twelve-symbol run measured the four quoted in the account
+        #: currency while reporting twelve. Leaving it None keeps that
+        #: behaviour, and now it is a choice rather than an oversight.
+        self.rate_lookup = rate_lookup
         self.smc = SmcEngine(config)
         self.scorer = SetupScorer(config)
         self.risk = RiskEngine(config)
@@ -194,91 +219,132 @@ class Backtester:
             if len(visible_h1) < 40:
                 continue
 
-            series = {
-                "M15": _series(self.spec.symbol, "M15", visible_m15),
-                "H1": _series(self.spec.symbol, "H1", visible_h1),
-            }
-            analysis = self.smc.analyze(self.spec.symbol, series, now=cutoff)
-            if analysis.candidate is None:
-                reason = (analysis.rejection or "unknown").split(":")[0][:60]
+            proposal, reason = self.propose(
+                visible_m15,
+                visible_h1,
+                index=index,
+                cutoff=cutoff,
+                balance=balance,
+                peak=peak,
+                consecutive_losses=consecutive_losses,
+            )
+            if proposal is None:
                 result.setups_rejected[reason] = result.setups_rejected.get(reason, 0) + 1
                 continue
-
-            candidate = analysis.candidate
-            score = self.scorer.score(candidate)
             result.setups_considered += 1
-            if not score.tradeable:
-                result.setups_rejected["below tier"] = result.setups_rejected.get("below tier", 0) + 1
-                continue
+            open_trade = proposal
+            result.trades.append(open_trade)
 
-            drawdown = (peak - balance) / peak if peak > 0 else 0.0
-            if drawdown >= self.config.risk.max_drawdown_pct:
-                result.setups_rejected["max drawdown"] = result.setups_rejected.get("max drawdown", 0) + 1
-                continue
+        return result
 
-            # Sizing goes through the SAME risk engine the live path uses.
-            # Re-deriving the tier multipliers here would make the backtest
-            # measure a strategy the bot does not actually run.
-            risk_pct, _ = self.risk.risk_percentage(
-                tier=score.tier,
-                account=AccountRiskState(
-                    balance=balance,
-                    equity=balance,
-                    available_margin=balance,
-                    peak_equity=peak,
-                    daily_realized_pnl=0.0,
-                    open_pnl=0.0,
-                    trades_today=0,
-                    trades_this_session=0,
-                    consecutive_losses=consecutive_losses,
-                    open_positions=[],
-                ),
-            )
+    def propose(
+        self,
+        visible_m15: Sequence[Candle],
+        visible_h1: Sequence[Candle],
+        *,
+        index: int,
+        cutoff: datetime,
+        balance: float,
+        peak: float,
+        consecutive_losses: int,
+    ) -> tuple[SimulatedTrade | None, str]:
+        """One symbol's proposal at one moment, sized and costed.
 
-            # Entry pays the spread, exactly as it would live.
-            spread = self.costs.spread_points * self.spec.tick_size
-            entry = (
-                candidate.entry + spread / 2
-                if candidate.direction == "BUY"
-                else candidate.entry - spread / 2
-            )
-            try:
-                size = calculate_position_size(
-                    spec=self.spec,
-                    risk_amount=balance * risk_pct,
-                    entry=entry,
-                    stop_loss=candidate.stop_loss,
-                )
-            except SizingError:
-                result.setups_rejected["sizing"] = result.setups_rejected.get("sizing", 0) + 1
-                continue
+        Extracted from `run` so the PORTFOLIO backtester can call it for
+        every symbol on the same bar and then rank the results, exactly as
+        `Orchestrator._scan` does live. Duplicating this body there would
+        have been a second implementation of the strategy, drifting from
+        this one the first time either changed (project rule 2's spirit,
+        applied to the harness).
 
-            profit = expected_profit(
+        Returns `(trade, "")` or `(None, reason)`; the reason is the
+        bucket the rejection is counted under.
+        """
+
+        series = {
+            "M15": _series(self.spec.symbol, "M15", list(visible_m15)),
+            "H1": _series(self.spec.symbol, "H1", list(visible_h1)),
+        }
+        analysis = self.smc.analyze(self.spec.symbol, series, now=cutoff)
+        if analysis.candidate is None:
+            return None, (analysis.rejection or "unknown").split(":")[0][:60]
+
+        candidate = analysis.candidate
+        score = self.scorer.score(candidate)
+        if not score.tradeable:
+            return None, "below tier"
+
+        drawdown = (peak - balance) / peak if peak > 0 else 0.0
+        if drawdown >= self.config.risk.max_drawdown_pct:
+            return None, "max drawdown"
+
+        # Sizing goes through the SAME risk engine the live path uses.
+        # Re-deriving the tier multipliers here would make the backtest
+        # measure a strategy the bot does not actually run.
+        risk_pct, _ = self.risk.risk_percentage(
+            tier=score.tier,
+            account=AccountRiskState(
+                balance=balance,
+                equity=balance,
+                available_margin=balance,
+                peak_equity=peak,
+                daily_realized_pnl=0.0,
+                open_pnl=0.0,
+                trades_today=0,
+                trades_this_session=0,
+                consecutive_losses=consecutive_losses,
+                open_positions=[],
+            ),
+        )
+
+        # Entry pays the spread, exactly as it would live.
+        spread = self.costs.spread_points * self.spec.tick_size
+        entry = (
+            candidate.entry + spread / 2
+            if candidate.direction == "BUY"
+            else candidate.entry - spread / 2
+        )
+        try:
+            size = calculate_position_size(
                 spec=self.spec,
-                lots=size.lots,
+                risk_amount=balance * risk_pct,
                 entry=entry,
-                take_profit=candidate.take_profit,
-                conversion=size.conversion_rate,
+                stop_loss=candidate.stop_loss,
+                rate_lookup=self.rate_lookup,
             )
-            # The same objective the live risk engine applies, in R.
-            # A backtest that filtered on dollars while production
-            # filtered on ratio would be measuring a different system.
-            reward = evaluate_reward(
-                risk_reward=candidate.risk_reward,
-                expected_profit=profit,
-                config=self.config.reward,
-            )
-            if not reward.meets_objective:
-                result.setups_rejected["reward objective"] = (
-                    result.setups_rejected.get("reward objective", 0) + 1
-                )
-                continue
+        except SizingError:
+            # Without a rate source this is where every CROSS-currency
+            # symbol died - EURGBP, GBPJPY, AUDJPY and the rest all raise
+            # in `conversion_rate`, correctly, rather than size from a
+            # guessed rate. The backtester never supplied one, so a
+            # 12-symbol run silently measured only the four quoted in the
+            # account currency and reported it as twelve.
+            return None, "sizing"
 
-            open_trade = SimulatedTrade(
+        profit = expected_profit(
+            spec=self.spec,
+            lots=size.lots,
+            entry=entry,
+            take_profit=candidate.take_profit,
+            conversion=size.conversion_rate,
+        )
+        # The same objective the live risk engine applies, in R. A
+        # backtest filtering on dollars while production filtered on
+        # ratio would be measuring a different system.
+        reward = evaluate_reward(
+            risk_reward=candidate.risk_reward,
+            expected_profit=profit,
+            config=self.config.reward,
+        )
+        if not reward.meets_objective:
+            return None, "reward objective"
+
+        return (
+            SimulatedTrade(
                 symbol=self.spec.symbol,
                 direction=candidate.direction,
                 entry_index=index,
-                entry_time=bar.close_time,
+                entry_time=cutoff,
                 entry=entry,
                 stop_loss=candidate.stop_loss,
                 take_profit=candidate.take_profit,
@@ -286,10 +352,10 @@ class Backtester:
                 risk_amount=size.actual_risk,
                 setup_grade=score.tier,
                 setup_score=round(score.total, 2),
-            )
-            result.trades.append(open_trade)
-
-        return result
+                conversion_rate=size.conversion_rate,
+            ),
+            "",
+        )
 
     def _resolve_exit(self, trade: SimulatedTrade, bar: Candle, index: int) -> bool:
         """Did this bar close the trade? Pessimistic on ambiguity."""
@@ -328,7 +394,9 @@ class Backtester:
         move = (
             exit_price - trade.entry if trade.direction == "BUY" else trade.entry - exit_price
         )
-        gross = move * self.spec.contract_size * trade.lots
+        # The same conversion the sizer used. `move` is in the quote
+        # currency; the account is not necessarily quoted in it.
+        gross = move * self.spec.contract_size * trade.lots * trade.conversion_rate
         commission = self.costs.commission_per_lot * trade.lots
         trade.exit_index = index
         trade.exit_time = bar.close_time

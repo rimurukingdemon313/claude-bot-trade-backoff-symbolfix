@@ -165,11 +165,20 @@ def best_entry_gap(
     at_index: int,
     max_age: int,
     reference_index: int | None = None,
+    lookback: int = 12,
 ) -> FairValueGap | None:
     """Pick the gap a retracement entry should use.
 
-    Preference order: created after the structural event, unmitigated,
-    displacement-born, then largest relative to ATR, then freshest.
+    Preference order: belongs to the move that produced the trigger,
+    unmitigated, displacement-born, then largest relative to ATR, then
+    freshest.
+
+    `lookback` is how far BEFORE `reference_index` a gap may have formed
+    and still belong to that move. It was 2, which has the causality
+    backwards: the gap is left by the displacement, and the structure
+    break the displacement causes is confirmed after it, so the very
+    imbalance this function exists to find routinely sat outside the
+    window. See `SmcConfig.poi_reference_lookback_candles`.
     """
 
     wanted = "bullish" if direction == "BUY" else "bearish"
@@ -178,7 +187,7 @@ def best_entry_gap(
         for gap in gaps
         if gap.direction == wanted
         and gap.is_live(at_index, max_age)
-        and (reference_index is None or gap.index >= reference_index - 2)
+        and (reference_index is None or gap.index >= reference_index - lookback)
     ]
     if not live:
         return None

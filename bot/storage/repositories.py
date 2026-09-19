@@ -537,6 +537,80 @@ class DecisionJournal:
             for (stage, reason), count in ranked
         ]
 
+    #: The pipeline, in the order `Orchestrator._evaluate_symbol` walks it.
+    #: A symbol that dies at a stage never reaches the ones after it, so
+    #: these are the buckets a survivor count is built from.
+    STAGES = ("CONFIG", "NEWS", "DATA", "SMC", "SCORE", "RISK", "AI", "CANDIDATE")
+
+    def funnel(self, days: int = 7) -> dict[str, Any]:
+        """How many evaluations reached each stage, and where they died.
+
+        `blocker_histogram` ranks reasons and `rejection_histogram` groups
+        by stage. Neither shows the SHAPE, and the shape is what makes a
+        bottleneck obvious: 4,100 evaluations reaching SMC and 38 leaving
+        it says something no list of reasons says as fast.
+
+        Survivors are derived, not stored: everything that did not die at
+        or before a stage reached the next one. So this needs no new
+        write path and works on journals already on disk.
+        """
+
+        from datetime import datetime, timezone
+
+        cutoff = datetime.fromtimestamp(
+            utc_now().timestamp() - days * 86400, tz=timezone.utc
+        ).isoformat()
+        rows = self.db.query(
+            """
+            SELECT stage, COUNT(*) AS count
+              FROM decisions
+             WHERE created_at >= ? AND symbol <> '*'
+             GROUP BY stage
+            """,
+            (cutoff,),
+        )
+        died = {str(row.get("stage") or "?"): int(row.get("count") or 0) for row in rows}
+        # A CANDIDATE row is a survivor of the whole pipeline, not a death.
+        survived_all = died.pop("CANDIDATE", 0)
+        total = sum(died.values()) + survived_all
+
+        stages: list[dict[str, Any]] = []
+        remaining = total
+        for stage in self.STAGES:
+            if stage == "CANDIDATE":
+                continue
+            lost = died.get(stage, 0)
+            stages.append(
+                {
+                    "stage": stage,
+                    "reached": remaining,
+                    "lost": lost,
+                    "share": round(lost / total, 4) if total else 0.0,
+                }
+            )
+            remaining -= lost
+        stages.append({"stage": "CANDIDATE", "reached": remaining, "lost": 0, "share": 0.0})
+
+        # Anything with a stage this build does not know about would
+        # silently vanish from the arithmetic, so it is reported rather
+        # than dropped (project rule 6).
+        unknown = {k: v for k, v in died.items() if k not in self.STAGES}
+
+        worst = max(
+            (row for row in stages if row["stage"] != "CANDIDATE"),
+            key=lambda row: row["lost"],
+            default=None,
+        )
+        return {
+            "days": days,
+            "evaluations": total,
+            "candidates": survived_all,
+            "stages": stages,
+            "narrowest": worst["stage"] if worst and worst["lost"] else None,
+            "unknownStages": unknown,
+            "topReasons": self.blocker_histogram(days=days, limit=5),
+        }
+
     def latest_scan(self) -> list[dict[str, Any]]:
         row = self.db.query_one("SELECT scan_id FROM decisions ORDER BY created_at DESC LIMIT 1")
         if row is None:

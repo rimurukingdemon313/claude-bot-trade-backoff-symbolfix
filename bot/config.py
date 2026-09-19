@@ -260,11 +260,31 @@ class SmcConfig:
     displacement_atr_multiple: float = 1.3
     displacement_body_ratio: float = 0.55
     bos_atr_buffer: float = 0.08
-    sweep_max_age_candles: int = 12
+    #: How long a liquidity sweep or a displaced structure break stays
+    #: usable as a trigger. 12 bars is three hours on M15, which is
+    #: shorter than the sequence the strategy waits for: sweep, then
+    #: displacement away, then the break, then the retrace back into the
+    #: imbalance. Measured across 24 days of M15 decision points,
+    #: widening this to 20 raised approvals and LOWERED the share of
+    #: setups graded below tier, so the extra triggers were not junk.
+    #: It saturates by 24; there is no evidence for going wider.
+    sweep_max_age_candles: int = 20
     sweep_reaction_candles: int = 4
     fvg_min_atr_fraction: float = 0.12
     fvg_max_age_candles: int = 60
     ob_max_age_candles: int = 60
+    #: How far BEFORE the trigger an entry zone may have formed and still
+    #: count as belonging to the move that produced it.
+    #:
+    #: Fair value gaps used a hardcoded 2 and order blocks a hardcoded 12,
+    #: for no stated reason. The 2 has the causality backwards: the gap is
+    #: left by the DISPLACEMENT, and the structure break that displacement
+    #: causes is confirmed after it - so the imbalance the entry is meant
+    #: to use routinely forms BEFORE `reference_index` and was discarded.
+    #: Measured over 24 days of M15 decision points, 342 of the 747 "no
+    #: live fair value gap or order block" refusals had a live, correctly
+    #: directed gap that failed only this test.
+    poi_reference_lookback_candles: int = 12
     atr_period: int = 14
     min_candles: int = 60
 

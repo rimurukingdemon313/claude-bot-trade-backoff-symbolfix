@@ -15,10 +15,10 @@ from bot.config import load_config
 from bot.marketdata.candles import Candle
 from bot.smc.dealing_range import dealing_range
 from bot.smc.displacement import detect_displacement
-from bot.smc.fvg import best_entry_gap, detect_fair_value_gaps
+from bot.smc.fvg import FairValueGap, best_entry_gap, detect_fair_value_gaps
 from bot.smc.indicators import atr, atr_series
 from bot.smc.liquidity import build_liquidity_map, detect_sweeps
-from bot.smc.orderblocks import detect_order_blocks
+from bot.smc.orderblocks import best_entry_block, detect_order_blocks
 from bot.smc.regime import classify_regime
 from bot.smc.sessions import classify_session, is_forex_weekend, session_extremes
 from bot.smc.structure import detect_structure_events, structural_bias
@@ -273,6 +273,110 @@ def test_real_order_block_is_found_and_graded():
     assert best.broke_structure or best.has_imbalance
     assert 0 < best.strength <= 1.0
     assert best.confirmed_index >= best.index
+
+
+def test_arriving_at_an_order_block_does_not_consume_it():
+    """The defect that made `best_entry_block` unreachable code.
+
+    Mitigation read `candle.low <= origin.high` for a bullish block - the
+    instant price came back and TOUCHED THE TOP of the demand zone, the
+    block was marked mitigated and `is_live` refused it from then on. That
+    touch is the entry. So the two conditions the engine needs, "price is
+    at the block" and "the block is still live", could never hold on the
+    same bar, and an order block could never be entered from.
+
+    Built explicitly so the answer is known by construction: the last bar
+    dips to the TOP of the block and closes back above it. That is arrival,
+    not consumption - the zone has not been traded through.
+    """
+
+    path = [(1.1000, 1.1005, 1.0995, 1.1000)] * 25
+    path.append((1.1000, 1.1002, 1.0980, 1.0982))   # the order block candle
+    path.append((1.0982, 1.1060, 1.0981, 1.1055))   # displacement away
+    path.append((1.1055, 1.1065, 1.1040, 1.1050))
+    path.append((1.1050, 1.1052, 1.1002, 1.1030))   # dips to the block TOP
+    candles = series_from_path(path)
+    moves = detect_displacement(candles)
+    events = detect_structure_events(candles, detect_swings(candles, 2), moves)
+    gaps = detect_fair_value_gaps(candles, moves)
+    blocks = detect_order_blocks(candles, moves, events, gaps)
+
+    block = next(b for b in blocks if b.direction == "bullish" and b.index == 25)
+    assert block.lower == pytest.approx(1.0980)
+    assert block.upper == pytest.approx(1.1002)
+
+    last = len(candles) - 1
+    assert candles[last].low <= block.upper, "the bar must reach the zone, or this proves nothing"
+    assert candles[last].low > block.lower, "and must NOT trade through it"
+    assert block.mitigated_index is None
+    assert block.is_live(last, max_age=60)
+    assert (
+        best_entry_block(blocks, direction="BUY", at_index=last, max_age=60) is not None
+    ), "an order block that price has merely arrived at must still be enterable"
+
+
+def test_trading_through_an_order_block_does_consume_it():
+    """The other half: the far edge still ends the block's life.
+
+    Without this the first test would pass just as well against a block
+    that is never mitigated at all, which would be a different bug.
+    """
+
+    path = [(1.1000, 1.1005, 1.0995, 1.1000)] * 25
+    path.append((1.1000, 1.1002, 1.0980, 1.0982))
+    path.append((1.0982, 1.1060, 1.0981, 1.1055))
+    path.append((1.1055, 1.1065, 1.1040, 1.1050))
+    path.append((1.1050, 1.1052, 1.0975, 1.0990))   # trades THROUGH the block
+    candles = series_from_path(path)
+    moves = detect_displacement(candles)
+    events = detect_structure_events(candles, detect_swings(candles, 2), moves)
+    blocks = detect_order_blocks(candles, moves, events, detect_fair_value_gaps(candles, moves))
+
+    block = next(b for b in blocks if b.direction == "bullish" and b.index == 25)
+    last = len(candles) - 1
+    assert candles[last].low < block.lower
+    assert block.mitigated_index is not None
+    assert not block.is_live(last, max_age=60)
+    assert best_entry_block(blocks, direction="BUY", at_index=last, max_age=60) is None
+
+
+def test_the_entry_gap_may_predate_the_structure_break_it_caused():
+    """Causality: the displacement leaves the gap, THEN breaks structure.
+
+    `best_entry_gap` required `gap.index >= reference_index - 2`, and
+    `reference_index` is the trigger bar - the confirmed sweep or the
+    structure break. A break confirmed more than two bars after the
+    displacement that caused it therefore excluded its own imbalance,
+    which is the one zone the retracement entry is supposed to use.
+    """
+
+    gap = FairValueGap(
+        index=40,
+        timestamp=series_from_path([(1.1, 1.1, 1.1, 1.1)])[0].timestamp,
+        direction="bullish",
+        lower=1.1000,
+        upper=1.1030,
+        size=0.0030,
+        size_atr=1.0,
+        displaced=True,
+        displacement_quality=0.8,
+        mitigated_index=None,
+        invalidated_index=None,
+        fill_fraction=0.0,
+    )
+    # The break this displacement caused confirmed six bars later.
+    assert best_entry_gap(
+        [gap], direction="BUY", at_index=60, max_age=60, reference_index=46, lookback=2
+    ) is None, "the old window discarded the gap the move itself left"
+    assert best_entry_gap(
+        [gap], direction="BUY", at_index=60, max_age=60, reference_index=46, lookback=12
+    ) is gap
+
+    # It is still a window, not an open door: a gap from an earlier leg
+    # is out of reach of both.
+    assert best_entry_gap(
+        [gap], direction="BUY", at_index=60, max_age=60, reference_index=59, lookback=12
+    ) is None
 
 
 # -- dealing range --------------------------------------------------------

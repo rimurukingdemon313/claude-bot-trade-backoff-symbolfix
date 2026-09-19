@@ -357,6 +357,7 @@ class SmcEngine:
             at_index=index,
             max_age=self.smc.fvg_max_age_candles,
             reference_index=reference_index,
+            lookback=self.smc.poi_reference_lookback_candles,
         )
         block = best_entry_block(
             m15.order_blocks,
@@ -364,6 +365,7 @@ class SmcEngine:
             at_index=index,
             max_age=self.smc.ob_max_age_candles,
             reference_index=reference_index,
+            lookback=self.smc.poi_reference_lookback_candles,
         )
         poi, poi_kind = self._choose_poi(gap, block)
         if poi is None:

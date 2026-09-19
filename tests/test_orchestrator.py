@@ -306,6 +306,59 @@ def test_the_dashboard_snapshot_shows_only_real_state(config, orchestrator, repo
     assert snapshot["health"]["ok"] is True
 
 
+def test_the_snapshot_answers_why_it_has_not_traded(config, orchestrator, repos):
+    """The question the operator is actually asking, on the page they open.
+
+    A bot that stands aside correctly and a bot with one broken gate look
+    identical from the outside, and the difference used to cost days. The
+    answer has to travel with the snapshot, not sit three screens away in
+    the journal.
+    """
+
+    orchestrator.scan(source="manual", now=SETUP_END)
+    api = DashboardApi(config, orchestrator, repos)
+    diagnosis = api.snapshot()["diagnosis"]
+
+    assert diagnosis["headline"], "a blank diagnosis is worse than none"
+    assert diagnosis["severity"] in ("ok", "info", "warning")
+    assert isinstance(diagnosis["evaluations"], int)
+
+
+def test_the_diagnosis_survives_a_broken_database(config, orchestrator, repos):
+    """It is read on a dashboard that exists to display failures."""
+
+    def explode(*args, **kwargs):
+        raise RuntimeError("database is gone")
+
+    repos.journal.funnel = explode  # type: ignore[assignment]
+    repos.trades.recent = explode  # type: ignore[assignment]
+    api = DashboardApi(config, orchestrator, repos)
+    diagnosis = api.diagnosis()
+    assert diagnosis["headline"]
+    assert diagnosis["evaluations"] == 0
+
+
+def test_a_missing_ai_provider_is_named_before_the_market_is_blamed(config, orchestrator, repos):
+    """The trap that rejects every candidate at the last gate.
+
+    AI enabled, no key, and no permission to proceed without one: the
+    deterministic pipeline can be working perfectly and nothing trades.
+    """
+
+    import dataclasses
+
+    blocked = dataclasses.replace(
+        config,
+        ai=dataclasses.replace(config.ai, enabled=True, gemini_key=None, groq_key=None,
+                               allow_trade_without_ai=False),
+    )
+    orchestrator.config = blocked
+    api = DashboardApi(blocked, orchestrator, repos)
+    diagnosis = api.diagnosis()
+    assert diagnosis["binding"] == "AI"
+    assert diagnosis["severity"] == "warning"
+
+
 def test_the_dashboard_reports_offline_rather_than_inventing_numbers(config, orchestrator, repos):
     """A value that was never read is a gap, not a zero."""
 

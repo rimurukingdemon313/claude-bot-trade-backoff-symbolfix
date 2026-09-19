@@ -13,10 +13,11 @@ that bypasses the demo guard, the risk limits, or the execution guards.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from .analytics.performance import breakdown, compute_performance
-from .clock import utc_now
+from .clock import ensure_utc, utc_now
 from .config import TradingConfig, profit_floor_feasibility
 from .broker.cache import CachedRead
 from .errors import BotError
@@ -261,7 +262,68 @@ class DashboardApi:
             # Ranked causes, not stages. "Why is it not trading?" is the
             # question actually being asked, and only this answers it.
             "blockers": self.repos.journal.blocker_histogram(days=7),
+            "funnel": self.repos.journal.funnel(days=7),
+            "diagnosis": self.diagnosis(),
         }
+
+    def diagnosis(self, days: int = 7) -> dict[str, Any]:
+        """One sentence naming what is actually stopping the trades.
+
+        Composed here rather than in `bot.diagnosis` because gathering the
+        inputs touches the journal, the config and the orchestrator, and
+        the judgement itself is a pure function so it can be tested
+        against a pinned clock with no database at all.
+
+        Never raises: this is read on a dashboard that exists to show
+        failures, so it has to answer while things are broken.
+        """
+
+        from .diagnosis import diagnose
+
+        def safely(probe: Any, default: Any) -> Any:
+            try:
+                return probe()
+            except Exception:  # noqa: BLE001 - a diagnosis must not 500
+                return default
+
+        funnel = safely(lambda: self.repos.journal.funnel(days=days), {})
+        equity = safely(self._cached_equity, None)
+        feasibility = (
+            profit_floor_feasibility(self.config, equity) if equity is not None else None
+        )
+        news = safely(self.orchestrator.news.health, {})
+        ai_gate = safely(self.orchestrator._ai_gate_status, {})
+        kill = safely(lambda: self.orchestrator.kill_switch.read().active, False)
+
+        return diagnose(
+            funnel=funnel,
+            feasibility=feasibility,
+            last_trade_at=safely(self._last_trade_at, None),
+            ai_required_but_unavailable=bool(ai_gate.get("blockingAllTrades")),
+            news_failing_closed=bool(
+                news.get("enabled")
+                and news.get("failClosed")
+                and not news.get("feedAvailable")
+            ),
+            trading_paused=not safely(lambda: self.orchestrator.trading_enabled, True),
+            kill_switch_active=bool(kill),
+        )
+
+    def _cached_equity(self) -> float | None:
+        read = self.orchestrator.live.get("account")
+        return read.value.equity if read.present else None
+
+    def _last_trade_at(self) -> datetime | None:
+        rows = self.repos.trades.recent(limit=1)
+        if not rows:
+            return None
+        raw = rows[0].get("created_at")
+        if not raw:
+            return None
+        try:
+            return ensure_utc(datetime.fromisoformat(str(raw).replace("Z", "+00:00")))
+        except ValueError:
+            return None
 
     # -- system ----------------------------------------------------------
 
@@ -349,6 +411,9 @@ class DashboardApi:
             "scan": self.latest_scan(detail=False),
             "risk": self.risk_state(),
             "health": self.health(),
+            # "Why has it not traded?" answered on the page that asks it,
+            # rather than three screens away in the journal.
+            "diagnosis": self.diagnosis(),
             "generatedAt": utc_now().isoformat(),
         }
 

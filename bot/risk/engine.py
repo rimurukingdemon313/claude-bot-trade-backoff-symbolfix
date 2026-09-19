@@ -54,6 +54,11 @@ class AccountRiskState:
     open_positions: Sequence[Mapping[str, Any]]
     last_loss_at: datetime | None = None
     last_execution_failure_at: datetime | None = None
+    #: Setup identities already traded inside the re-entry window - see
+    #: `bot/smc/identity.py`. A stop-out does not remove the sweep or the
+    #: break of structure from the chart, so without this the next scan
+    #: re-derives the same setup and takes it again.
+    traded_setup_ids: frozenset[str] = frozenset()
 
     @property
     def drawdown_pct(self) -> float:
@@ -234,6 +239,16 @@ class RiskEngine:
         ]
         if len(same_symbol) >= limits.max_open_per_symbol:
             reasons.append(f"already holding a position in {candidate.symbol}")
+
+        # A setup is traded once. Not once per scan, and not again after
+        # its stop: the evidence that produced it is still on the chart,
+        # so "the engine found it again" is not new information.
+        if candidate.setup_id and candidate.setup_id in account.traded_setup_ids:
+            reasons.append(
+                f"this exact setup has already been traded ({candidate.setup_id}); "
+                f"a repeat inside {limits.setup_reentry_block_hours:g}h would be the same "
+                "trade twice, not a second opportunity"
+            )
 
         if account.trades_today >= limits.max_trades_per_day:
             reasons.append(

@@ -348,6 +348,45 @@ function setupTone(setupType: string | undefined): "good" | "warn" | "neutral" {
   }
 }
 
+/**
+ * The strategy chain for one symbol, condition by condition.
+ *
+ * The reason string says what went wrong. This says what went RIGHT
+ * first, which is the half it cannot carry: "no live fair value gap"
+ * leaves an operator guessing whether the sweep was found and the break
+ * confirmed, or whether the whole thing fell over at the first hurdle.
+ *
+ * PENDING is deliberately its own colour rather than a dimmer FAIL. A
+ * setup priced out at `risk_reward` got everything else right; one that
+ * failed at `liquidity_sweep` never started. Same row, opposite meaning.
+ */
+function SetupChain({ checks }: { checks?: ScanSymbol["checks"] }) {
+  if (!checks?.length) return null;
+  const tone = { PASS: "bg-emerald-500", FAIL: "bg-rose-500", PENDING: "bg-slate-700" } as const;
+  const failed = checks.find((check) => check.status === "FAIL");
+  return (
+    <div className="mt-2">
+      <div className="flex flex-wrap items-center gap-1">
+        {checks.map((check) => (
+          <span
+            key={check.name}
+            title={`${check.name}: ${check.status}${check.detail ? ` — ${check.detail}` : ""}`}
+            className="flex items-center gap-1 rounded-md bg-slate-900/70 px-1.5 py-0.5 text-[10px] text-slate-400"
+          >
+            <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", tone[check.status])} />
+            {check.name.replace(/_/g, " ")}
+          </span>
+        ))}
+      </div>
+      {failed?.detail && (
+        <p className="mt-1 text-[10px] text-rose-300">
+          {failed.name.replace(/_/g, " ")}: {failed.detail}
+        </p>
+      )}
+    </div>
+  );
+}
+
 function SymbolCard({ entry }: { entry: ScanSymbol }) {
   const candidate = entry.candidate;
   const score = entry.score;
@@ -366,6 +405,8 @@ function SymbolCard({ entry }: { entry: ScanSymbol }) {
       </div>
 
       {entry.reason && <p className="mt-2 text-xs text-slate-400">{entry.reason}</p>}
+
+      <SetupChain checks={entry.checks} />
 
       {candidate && (
         <>

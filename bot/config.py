@@ -167,6 +167,15 @@ class RiskConfig:
     max_trades_per_day: int = 6
     max_trades_per_session: int = 3
     min_risk_reward: float = 1.2
+    #: How long a setup identity stays blocked after it has been traded.
+    #:
+    #: The evidence is what ages out, not the trade: a sweep stops being a
+    #: usable trigger after `sweep_max_age_candles` (20 bars = 5h on M15),
+    #: so a window comfortably longer than that means a blocked identity
+    #: can never still be live. 24h also covers the overnight case where
+    #: the same level is swept again on the next session - which IS a new
+    #: setup, and gets a new identity because the sweep candle differs.
+    setup_reentry_block_hours: float = 24.0
     loss_cooldown_minutes: int = 45
     execution_failure_cooldown_minutes: int = 20
     drawdown_derisk_pct: float = 0.05

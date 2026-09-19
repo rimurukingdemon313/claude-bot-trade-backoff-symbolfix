@@ -211,9 +211,9 @@ class TradeRepository:
             INSERT INTO trades (
                 execution_id, symbol, direction, status, planned_entry, stop_loss,
                 take_profit, quantity, risk_amount, risk_pct, expected_profit,
-                risk_reward, setup_grade, setup_score, ai_confidence, versions,
-                context, created_at, updated_at
-            ) VALUES (?, ?, ?, 'PENDING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                risk_reward, setup_grade, setup_score, ai_confidence, setup_id,
+                versions, context, created_at, updated_at
+            ) VALUES (?, ?, ?, 'PENDING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 execution_id,
@@ -235,6 +235,7 @@ class TradeRepository:
                 plan.get("setup_grade"),
                 plan.get("setup_score"),
                 plan.get("ai_confidence"),
+                plan.get("setup_id"),
                 _dumps(version_stamp()),
                 _dumps(plan.get("context", {})),
                 now,
@@ -380,6 +381,31 @@ class TradeRepository:
             self.db.query_one(
                 "SELECT * FROM trades WHERE broker_position_id = ?", (broker_position_id,)
             )
+        )
+
+    def traded_setup_ids(self, *, hours: float, now: Any = None) -> frozenset[str]:
+        """Setup identities traded inside the window, from any outcome.
+
+        A stop-out is included on purpose. The evidence that produced the
+        trade - the swept level, the sweep candle, the break of structure -
+        is still on the chart afterwards, so the next scan re-derives the
+        identical setup and would take it again. That is the same trade
+        twice, not a second opportunity.
+
+        Read from storage rather than held in memory, so a redeploy in the
+        middle of a session cannot forget what it has already traded.
+        """
+
+        from datetime import datetime, timedelta, timezone
+
+        moment = now or utc_now()
+        cutoff = (moment - timedelta(hours=hours)).isoformat()
+        rows = self.db.query(
+            "SELECT setup_id FROM trades WHERE setup_id IS NOT NULL AND created_at >= ?",
+            (cutoff,),
+        )
+        return frozenset(
+            str(row["setup_id"]) for row in rows if row.get("setup_id")
         )
 
     def open_trades(self) -> list[dict[str, Any]]:

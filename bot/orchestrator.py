@@ -97,6 +97,13 @@ class SymbolOutcome:
             "score": self.score.as_dict() if self.score else None,
             "risk": self.risk.as_dict() if self.risk else None,
             "ai": self.ai.as_dict() if self.ai else None,
+            # The strategy chain travels with the OUTCOME, not only with a
+            # candidate, because the case it earns its place in is the one
+            # where there is no candidate: a refusal that says what
+            # passed first is the half a reason string cannot carry.
+            "checks": (
+                [check.as_dict() for check in self.smc.checks] if self.smc else []
+            ),
         }
         if detail and self.smc is not None:
             payload["smc"] = self.smc.as_dict()
@@ -567,7 +574,32 @@ class Orchestrator:
             open_positions=open_rows,
             last_loss_at=last_loss,
             last_execution_failure_at=last_failure,
+            traded_setup_ids=self._traded_setup_ids(moment),
         )
+
+    def _traded_setup_ids(self, moment: datetime) -> frozenset[str]:
+        """Setups already taken inside the re-entry window.
+
+        Fails OPEN on a storage error, deliberately, and this is the one
+        place in the system where that is the right direction: an empty
+        set means "block nothing", and every other gate - the kill switch,
+        the per-symbol position limit, the daily trade limit, the loss
+        cooldown - still stands between here and an order. Failing closed
+        would let one unreadable query stop all trading, which is a much
+        larger failure than one duplicate.
+        """
+
+        try:
+            return self.repos.trades.traded_setup_ids(
+                hours=self.config.risk.setup_reentry_block_hours, now=moment
+            )
+        except Exception as exc:  # noqa: BLE001 - see the docstring
+            log_event(
+                "RISK",
+                f"could not read traded setup ids; duplicate protection is degraded: {exc}",
+                severity="warning",
+            )
+            return frozenset()
 
     def _implied_risk(self, position: Any) -> float:
         """Risk for a position the database has no plan for (an orphan).

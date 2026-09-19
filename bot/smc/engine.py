@@ -37,9 +37,11 @@ from typing import Any, Sequence
 from ..config import SmcConfig, TradingConfig
 from ..marketdata.candles import Candle
 from ..marketdata.provider import Series
+from .checks import Check, Checklist, summarise
 from .dealing_range import DealingRange, dealing_range
 from .displacement import Displacement, detect_displacement
 from .fvg import FairValueGap, best_entry_gap, detect_fair_value_gaps
+from .identity import setup_identity
 from .indicators import atr
 from .liquidity import LiquidityMap, LiquiditySweep, build_liquidity_map, detect_sweeps
 from .mtf import (
@@ -132,6 +134,13 @@ class SetupCandidate:
     #: averaging a reversal's results with a continuation's describes
     #: neither.
     setup_type: str = "CONTINUATION"
+    #: What makes this setup THIS setup - see `bot/smc/identity.py`. A
+    #: stop-out does not remove the evidence that produced the trade, so
+    #: without an identity the next scan re-derives it and takes it again.
+    setup_id: str = ""
+    #: The strategy chain, condition by condition. A transcript of
+    #: decisions made above, never an input to one.
+    checks: tuple[Check, ...] = field(default_factory=tuple)
     #: Minimum total score this classification must reach. Set by the MTF
     #: layer and only ever ABOVE the configured B tier - a classification
     #: can demand more evidence, never less.
@@ -155,6 +164,8 @@ class SetupCandidate:
             "m15Bias": self.m15_bias,
             "alignment": self.alignment,
             "setupType": self.setup_type,
+            "setupId": self.setup_id,
+            "checks": [check.as_dict() for check in self.checks],
             "scoreFloor": round(self.score_floor, 2),
             "sweep": self.sweep.as_dict() if self.sweep else None,
             "structureEvent": self.structure_event.as_dict() if self.structure_event else None,
@@ -180,6 +191,10 @@ class SmcResult:
     #: become an order: a state is a label, never a permission.
     state: str = "NO_TRADE"
     mtf: MtfDecision | None = None
+    #: The strategy chain for this evaluation, whether or not it produced
+    #: a candidate. The refusal string says what went wrong; this says
+    #: what went RIGHT first, which is the half an operator cannot infer.
+    checks: tuple[Check, ...] = field(default_factory=tuple)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -189,7 +204,23 @@ class SmcResult:
             "rejection": self.rejection,
             "state": self.state,
             "mtf": self.mtf.as_dict() if self.mtf else None,
+            "checks": [check.as_dict() for check in self.checks],
         }
+
+
+@dataclass(frozen=True, slots=True)
+class Evaluation:
+    """One pass of the engine over one symbol.
+
+    A record rather than a tuple because it grew a fourth member, and a
+    four-tuple is where call sites start unpacking the wrong thing
+    without anything noticing.
+    """
+
+    candidate: SetupCandidate | None
+    rejection: str | None
+    decision: MtfDecision | None
+    checks: tuple[Check, ...] = field(default_factory=tuple)
 
 
 def _signal_state(candidate: SetupCandidate | None, decision: MtfDecision | None) -> str:
@@ -289,14 +320,15 @@ class SmcEngine:
             )
             for timeframe, data in series.items()
         }
-        candidate, rejection, decision = self.evaluate(symbol, analyses, now=now)
+        result = self.evaluate(symbol, analyses, now=now)
         return SmcResult(
             symbol=symbol,
             analyses=analyses,
-            candidate=candidate,
-            rejection=rejection,
-            state=_signal_state(candidate, decision),
-            mtf=decision,
+            candidate=result.candidate,
+            rejection=result.rejection,
+            state=_signal_state(result.candidate, result.decision),
+            mtf=result.decision,
+            checks=result.checks,
         )
 
     def build_candidate(
@@ -305,16 +337,23 @@ class SmcEngine:
         """Backwards-compatible view of `evaluate` for callers that only
         need the candidate and the reason there isn't one."""
 
-        candidate, rejection, _ = self.evaluate(symbol, analyses, now=now)
-        return candidate, rejection
+        result = self.evaluate(symbol, analyses, now=now)
+        return result.candidate, result.rejection
 
     def evaluate(
         self, symbol: str, analyses: dict[str, TimeframeAnalysis], *, now: datetime | None = None
-    ) -> tuple[SetupCandidate | None, str | None, MtfDecision | None]:
+    ) -> Evaluation:
+        chain = Checklist()
+
+        def refuse(reason: str, decision: MtfDecision | None = None) -> Evaluation:
+            """Stop here, and keep what was established up to this point."""
+
+            return Evaluation(None, reason, decision, chain.finish())
+
         m15 = analyses.get("M15")
         h1 = analyses.get("H1")
         if m15 is None or h1 is None:
-            return None, "multi-timeframe analysis incomplete (H1 and M15 are both required)", None
+            return refuse("multi-timeframe analysis incomplete (H1 and M15 are both required)")
 
         index = m15.last_index
         price = m15.price
@@ -322,11 +361,11 @@ class SmcEngine:
         session = classify_session(moment, self.config.sessions)
 
         if session.weekend:
-            return None, "forex market is closed for the weekend", None
+            return refuse("forex market is closed for the weekend")
         if not m15.regime.tradeable:
-            return None, f"M15 regime not tradeable: {m15.regime.note}", None
+            return refuse(f"M15 regime not tradeable: {m15.regime.note}")
         if m15.atr <= 0:
-            return None, "ATR is zero — cannot normalise structure or size a stop", None
+            return refuse("ATR is zero — cannot normalise structure or size a stop")
 
         # --- H1 trend, M15 execution: classified, not unanimous ---
         decision, evidence = decide_mtf(
@@ -338,7 +377,17 @@ class SmcEngine:
             tier_b=self.config.scoring.tier_b,
         )
         if decision.direction is None or evidence is None:
-            return None, decision.rationale, decision
+            # The MTF layer refuses before a direction exists, so the
+            # chain has nothing to report beyond "the trigger was not
+            # there" - which is what PENDING already says.
+            if evidence is not None and evidence.sweep is not None:
+                chain.passed(
+                    "liquidity_sweep",
+                    f"{evidence.sweep.level.label} swept, quality {evidence.sweep.quality:.2f}",
+                )
+            else:
+                chain.failed("liquidity_sweep", decision.rationale)
+            return refuse(decision.rationale, decision)
 
         direction = decision.direction
         alignment = decision.alignment
@@ -349,6 +398,38 @@ class SmcEngine:
         reference_index = max(
             sweep.index if sweep else -1, structure_event.index if structure_event else -1
         )
+
+        # --- the chain, recorded as it is walked ---
+        if sweep is not None:
+            chain.passed(
+                "liquidity_sweep",
+                f"{sweep.level.label} at {sweep.level.price:.5f} swept "
+                f"(quality {sweep.quality:.2f}, rejection {sweep.rejection_ratio:.0%})",
+            )
+        else:
+            # A displaced structure break is an independent trigger, so
+            # this is not a refusal - it is a weaker entry recorded as
+            # such, and `DirectionEvidence.trigger_quality` grades it lower.
+            chain.record(
+                "liquidity_sweep",
+                "PENDING",
+                "no sweep; the trigger is a displaced structure break",
+            )
+        if displacement is not None:
+            chain.passed(
+                "displacement",
+                f"quality {displacement.quality:.2f} at bar {displacement.index}",
+            )
+        else:
+            chain.failed("displacement", "no displacement near the trigger")
+        if structure_event is not None:
+            chain.passed(
+                "structure_break",
+                f"{structure_event.event_type} through {structure_event.level:.5f}, "
+                f"clearing {structure_event.clearance_atr:.2f} ATR on the close",
+            )
+        else:
+            chain.record("structure_break", "PENDING", "the trigger is the sweep alone")
 
         # --- the entry zone: an unmitigated FVG or order block ---
         gap = best_entry_gap(
@@ -369,7 +450,9 @@ class SmcEngine:
         )
         poi, poi_kind = self._choose_poi(gap, block)
         if poi is None:
-            return None, "no live fair value gap or order block to enter from", decision
+            chain.failed("entry_zone", "no live fair value gap or order block")
+            return refuse("no live fair value gap or order block to enter from", decision)
+        chain.passed("entry_zone", f"{poi_kind} [{poi.lower:.5f}, {poi.upper:.5f}]")
 
         # Entry requires price to actually be AT the point of interest.
         # Without this gate the engine would chase an extended move and
@@ -379,14 +462,16 @@ class SmcEngine:
         if not (poi.lower - proximity <= price <= poi.upper + proximity):
             # Structurally valid, entry conditions not yet met: this is a
             # VALID_SETUP to watch, not a refusal of the idea.
-            return (
-                None,
-                (
-                    f"price {price:.5f} has not retraced into the {poi_kind} zone "
-                    f"[{poi.lower:.5f}, {poi.upper:.5f}] — waiting rather than chasing"
-                ),
+            chain.failed(
+                "zone_retest",
+                f"price {price:.5f} has not reached the zone — waiting, not chasing",
+            )
+            return refuse(
+                f"price {price:.5f} has not retraced into the {poi_kind} zone "
+                f"[{poi.lower:.5f}, {poi.upper:.5f}] — waiting rather than chasing",
                 decision,
             )
+        chain.passed("zone_retest", f"price {price:.5f} is at the {poi_kind}")
 
         # --- deterministic levels ---
         levels = self._build_levels(
@@ -399,48 +484,56 @@ class SmcEngine:
             index=index,
         )
         if levels is None:
-            return None, "could not construct a structurally valid stop and target", decision
+            chain.failed("stop_loss", "no structurally valid stop and target")
+            return refuse("could not construct a structurally valid stop and target", decision)
         entry, stop_loss, take_profit, target_level = levels
 
         stop_distance = abs(entry - stop_loss)
         reward_distance = abs(take_profit - entry)
         if stop_distance <= 0:
-            return None, "stop distance resolved to zero", decision
+            chain.failed("stop_loss", "stop distance resolved to zero")
+            return refuse("stop distance resolved to zero", decision)
 
         stop_atr = stop_distance / m15.atr
         if stop_atr < self.config.risk.min_stop_distance_atr:
-            return (
-                None,
-                (
-                    f"stop is only {stop_atr:.2f} ATR away — too tight to survive normal noise "
-                    f"(minimum {self.config.risk.min_stop_distance_atr} ATR)"
-                ),
+            chain.failed("stop_loss", f"only {stop_atr:.2f} ATR away — too tight")
+            return refuse(
+                f"stop is only {stop_atr:.2f} ATR away — too tight to survive normal noise "
+                f"(minimum {self.config.risk.min_stop_distance_atr} ATR)",
                 decision,
             )
         if stop_atr > self.config.risk.max_stop_distance_atr:
-            return (
-                None,
-                (
-                    f"stop is {stop_atr:.2f} ATR away — structurally too wide "
-                    f"(maximum {self.config.risk.max_stop_distance_atr} ATR)"
-                ),
+            chain.failed("stop_loss", f"{stop_atr:.2f} ATR away — structurally too wide")
+            return refuse(
+                f"stop is {stop_atr:.2f} ATR away — structurally too wide "
+                f"(maximum {self.config.risk.max_stop_distance_atr} ATR)",
                 decision,
             )
+        chain.passed("stop_loss", f"{stop_atr:.2f} ATR behind the invalidation level")
+        chain.passed(
+            "take_profit",
+            f"{take_profit:.5f}"
+            + (f" ({target_level.get('label')})" if target_level else " (R projection)"),
+        )
 
         risk_reward = reward_distance / stop_distance
         if risk_reward < self.config.risk.min_risk_reward:
-            return (
-                None,
-                (
-                    f"structural R:R is 1:{risk_reward:.2f}, below the required "
-                    f"1:{self.config.risk.min_risk_reward:g}"
-                ),
+            chain.failed(
+                "risk_reward",
+                f"1:{risk_reward:.2f}, below the required "
+                f"1:{self.config.risk.min_risk_reward:g}",
+            )
+            return refuse(
+                f"structural R:R is 1:{risk_reward:.2f}, below the required "
+                f"1:{self.config.risk.min_risk_reward:g}",
                 decision,
             )
+        chain.passed("risk_reward", f"1:{risk_reward:.2f}")
 
         evidence_notes = self._evidence(
             direction, decision, sweep, structure_event, displacement, poi_kind, m15
         )
+        recorded = chain.finish()
         candidate = SetupCandidate(
             symbol=symbol,
             direction=direction,
@@ -462,11 +555,19 @@ class SmcEngine:
             dealing_range=m15.dealing_range,
             liquidity_target=target_level,
             setup_type=decision.setup_type,
+            setup_id=setup_identity(
+                symbol=symbol,
+                timeframe="M15",
+                direction=direction,
+                sweep=sweep,
+                structure_event=structure_event,
+            ),
+            checks=recorded,
             score_floor=decision.score_floor,
             evidence=evidence_notes,
             timestamp=moment,
         )
-        return candidate, None, decision
+        return Evaluation(candidate, None, decision, recorded)
 
     # -- helpers ---------------------------------------------------------
 

@@ -147,6 +147,15 @@ export type ScanSymbol = {
   } | null;
   risk: Record<string, any> | null;
   ai: Record<string, any> | null;
+  /**
+   * The strategy chain, condition by condition, in evaluation order.
+   *
+   * PENDING is not a quiet FAIL: it means the engine stopped before
+   * reaching that condition. A setup that failed at `risk_reward` got
+   * everything else right and was priced out; one that failed at
+   * `liquidity_sweep` never started. They call for opposite reactions.
+   */
+  checks?: Array<{ name: string; status: "PASS" | "FAIL" | "PENDING"; detail: string }>;
 };
 
 /** NO_TRADE | WATCH | VALID_SETUP | TRADE — see bot/smc/mtf.py. */

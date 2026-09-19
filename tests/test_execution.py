@@ -43,6 +43,7 @@ def make_plan(**overrides) -> TradePlan:
         setup_score=72.0,
         ai_confidence=80.0,
         alignment="aligned",
+        setup_id="test-setup",
         instrument_id=1,
         route_id=10,
         created_at=SETUP_END.isoformat(),

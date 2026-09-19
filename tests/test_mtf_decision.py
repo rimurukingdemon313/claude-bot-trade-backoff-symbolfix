@@ -71,7 +71,10 @@ def evaluate(cfg: TradingConfig, m15_candles, *, h1: int):
         ),
         "M15": engine.analyze_timeframe(m15_candles, timeframe="M15", now=SETUP_END),
     }
-    return engine.evaluate("EURUSD", analyses, now=SETUP_END)
+    # `evaluate` returns an Evaluation record; these scenarios predate the
+    # per-condition chain and read the same three members as before.
+    result = engine.evaluate("EURUSD", analyses, now=SETUP_END)
+    return result.candidate, result.rejection, result.decision
 
 
 # -- 1-2: continuation, everything agreeing ---------------------------------
@@ -115,10 +118,10 @@ def test_3_the_engine_decides_on_h1_and_m15_alone(cfg):
         ),
         "M15": engine.analyze_timeframe(m15_candles, timeframe="M15", now=SETUP_END),
     }
-    candidate, rejection, _ = engine.evaluate("EURUSD", analyses, now=SETUP_END)
-    assert candidate is not None, rejection
+    result = engine.evaluate("EURUSD", analyses, now=SETUP_END)
+    assert result.candidate is not None, result.rejection
 
-    _, missing, _ = engine.evaluate("EURUSD", {"M15": analyses["M15"]}, now=SETUP_END)
+    missing = engine.evaluate("EURUSD", {"M15": analyses["M15"]}, now=SETUP_END).rejection
     assert "H1 and M15" in missing
     assert "H4" not in missing
 
@@ -151,12 +154,12 @@ def test_4_an_h4_series_cannot_change_the_decision(cfg):
 
     plain = engine.evaluate("EURUSD", base, now=SETUP_END)
     contradicted = engine.evaluate("EURUSD", with_h4, now=SETUP_END)
-    assert plain[2].as_dict() == contradicted[2].as_dict()
-    assert plain[0].as_dict() == contradicted[0].as_dict()
+    assert plain.decision.as_dict() == contradicted.decision.as_dict()
+    assert plain.candidate.as_dict() == contradicted.candidate.as_dict()
 
     # And nothing the decision publishes still describes a macro layer.
-    assert "h4Context" not in plain[2].as_dict()
-    assert "htfBias" not in plain[0].as_dict()
+    assert "h4Context" not in plain.decision.as_dict()
+    assert "htfBias" not in plain.candidate.as_dict()
 
 
 # -- 5-6: retracement is NOT a reversal ------------------------------------
@@ -336,12 +339,12 @@ def test_16_a_choppy_market_demands_more_of_the_same_setup(cfg):
         ),
         "M15": engine.analyze_timeframe(m15_candles, timeframe="M15", now=SETUP_END),
     }
-    _, _, calm = engine.evaluate("EURUSD", analyses, now=SETUP_END)
+    calm = engine.evaluate("EURUSD", analyses, now=SETUP_END).decision
 
     chop = Regime("transitional", "normal", analyses["H1"].atr, 0.5, 0.0, True, "chop")
     choppy_analyses = dict(analyses)
     choppy_analyses["H1"] = dataclasses.replace(analyses["H1"], regime=chop)
-    _, _, choppy = engine.evaluate("EURUSD", choppy_analyses, now=SETUP_END)
+    choppy = engine.evaluate("EURUSD", choppy_analyses, now=SETUP_END).decision
 
     assert calm.setup_type == choppy.setup_type == mtf.CONTINUATION
     assert choppy.score_floor == pytest.approx(calm.score_floor + cfg.mtf.choppy_score_premium)
@@ -509,10 +512,10 @@ def test_every_outcome_carries_a_signal_state(cfg):
             name: engine.analyze_timeframe(candles, timeframe=name, now=SETUP_END)
             for name, candles in series.items()
         }
-        candidate, _, decision = engine.evaluate("EURUSD", analyses, now=SETUP_END)
+        result = engine.evaluate("EURUSD", analyses, now=SETUP_END)
         from bot.smc.engine import _signal_state
 
-        state = _signal_state(candidate, decision)
+        state = _signal_state(result.candidate, result.decision)
         assert state in (mtf.NO_TRADE, mtf.WATCH, mtf.VALID_SETUP, mtf.TRADE)
         assert state == expected
 

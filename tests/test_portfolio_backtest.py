@@ -397,3 +397,39 @@ def test_management_can_be_changed_without_a_code_deploy(monkeypatch):
     # And the execution GUARDS are untouched by any of this.
     assert load_config({}).execution.max_spread_atr_fraction == pytest.approx(0.12)
     assert load_config({}).execution.order_verify_attempts == 5
+
+
+def test_a_short_banks_its_partial_at_the_mirror_level():
+    """The sign convention, asserted rather than assumed.
+
+    A short's stop is ABOVE entry and its 1.5R is BELOW, so every term
+    flips. This is where a copy-pasted long branch books a loss as a
+    profit and the backtest reports a win rate that never existed.
+    """
+
+    config = dataclasses.replace(
+        load_test_config(),
+        execution=dataclasses.replace(load_test_config().execution, enable_partial_tp=True),
+    )
+    engine = Backtester(
+        config, DEFAULT_SPEC, costs=BacktestCosts(slippage_points=0.0, commission_per_lot=0.0)
+    )
+    trade = _long(
+        config, direction="SELL", entry=1.1000, stop_loss=1.1020, take_profit=1.0940
+    )
+    assert trade.initial_stop > trade.entry, "a short's stop sits above entry"
+
+    # 1.5R for a short risking 0.0020 is 1.1000 - 0.0030 = 1.0970.
+    assert not engine._resolve_exit(trade, _bar(1.1000, 1.1005, 1.0965, 1.0972), index=1)
+    assert trade.partial_taken
+    assert trade.banked_pnl > 0, "a short that fell 1.5R banked a PROFIT"
+
+    risk = trade.initial_stop - trade.entry
+    expected = risk * config.execution.partial_tp_at_r * DEFAULT_SPEC.contract_size * (
+        trade.lots * config.execution.partial_tp_fraction
+    )
+    assert trade.banked_pnl == pytest.approx(expected, rel=1e-6)
+
+    # And its break-even stop moved DOWN, not up.
+    assert trade.stop_loss < trade.entry
+    assert trade.stop_loss < trade.initial_stop

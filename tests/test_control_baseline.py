@@ -135,3 +135,29 @@ def test_the_control_produces_trades_at_all():
         realised = reward / risk
         assert realised < config.risk.min_risk_reward, "the spread must cost something"
         assert realised > config.risk.min_risk_reward * 0.9
+
+
+def test_the_tradeable_floor_can_be_raised_without_a_code_deploy(monkeypatch):
+    """The experiment the measurements point at, made runnable.
+
+    A grades averaged +0.014R and B grades -0.152R over 180 simulated
+    trades — the entire loss was in the B cohort. But the correlation
+    between the continuous score and the outcome was +0.037, so the
+    boundary matters and the ranking behind it does not.
+
+    One dataset is not grounds for moving a default. It is grounds for
+    making the experiment cheap, which is what this asserts.
+    """
+
+    from bot.config import load_config
+
+    assert load_config({}).scoring.min_tradeable_score == pytest.approx(56.0)
+
+    monkeypatch.setenv("SCORING_MIN_TRADEABLE", "68")
+    raised = load_config({})
+    assert raised.scoring.min_tradeable_score == pytest.approx(68.0)
+    assert raised.scoring.tier_a == pytest.approx(68.0), "still the A boundary"
+
+    # Garbage falls back to the default rather than opening the gate.
+    monkeypatch.setenv("SCORING_MIN_TRADEABLE", "")
+    assert load_config({}).scoring.min_tradeable_score == pytest.approx(56.0)

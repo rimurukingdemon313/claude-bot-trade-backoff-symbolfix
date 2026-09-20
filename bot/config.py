@@ -423,6 +423,21 @@ class SchedulerConfig:
 
 @dataclass(frozen=True, slots=True)
 class ScoringConfig:
+    """Score bands, and the lowest one that may trade.
+
+    `min_tradeable_score` is the knob worth knowing about. Measured over
+    180 simulated trades, the A/B boundary separated sharply — A grades
+    averaged +0.014R and B grades -0.152R, which is to say the entire
+    loss lived in the B cohort — while the correlation between the
+    CONTINUOUS score and outcome was +0.037, near enough to nothing.
+
+    One threshold doing real work while the arithmetic behind it ranks
+    almost at random is a strange pair of facts, and it is one dataset,
+    so the default has not moved. Raising this to `tier_a` is the single
+    most promising experiment available and belongs on paper first: it
+    would cut roughly 70% of the trades.
+    """
+
     tier_a_plus: float = 80.0
     tier_a: float = 68.0
     tier_b: float = 56.0
@@ -681,6 +696,15 @@ def load_config(env: Mapping[str, str] | None = None) -> TradingConfig:
             commission_per_lot=_env_float("PAPER_COMMISSION_PER_LOT", 7.0, low=0.0, high=200.0),
         ),
         broker=broker,
+        scoring=ScoringConfig(
+            tier_a_plus=_env_float("SCORING_TIER_A_PLUS", 80.0, low=1.0, high=100.0),
+            tier_a=_env_float("SCORING_TIER_A", 68.0, low=1.0, high=100.0),
+            tier_b=_env_float("SCORING_TIER_B", 56.0, low=1.0, high=100.0),
+            # Raise this to trade only the higher grades. See ScoringConfig.
+            min_tradeable_score=_env_float(
+                "SCORING_MIN_TRADEABLE", 56.0, low=1.0, high=100.0
+            ),
+        ),
         risk=risk,
         # Position management is the one area the project says must be
         # EARNED by testing rather than switched on because it sounds

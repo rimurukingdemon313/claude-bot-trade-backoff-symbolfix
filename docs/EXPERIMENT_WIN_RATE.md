@@ -62,6 +62,71 @@ Ten configurations were compared. With ten comparisons on one dataset,
 the best-looking one is expected to look good partly by luck; that is
 what step 3 and step 4 are for, and why only one candidate is promoted.
 
-## Results
+## Results: discovery set (seeds 100-111)
 
-To be filled in below, from `sweep2_disc.out` and the held-out runs.
+    config              n    win     avgR    maxDD   posShare  bootstrap 5%-95%
+    shipped           180  33.33%  -0.111   444.84     3.9%   [-852.54,  -32.23]
+    part_0.50         180  51.11%  -0.077   353.52    12.5%   [-660.19, +116.90]
+    part_0.75         180  51.67%  -0.044   285.46    27.9%   [-599.38, +278.51]
+    part_1.00         180  51.11%  -0.058   343.96    18.8%   [-735.25, +218.61]
+    part_1.00_f70     180  51.11%  -0.040   304.94    25.7%   [-674.91, +287.69]
+    tierA              62  41.94%  -0.048   254.80    23.8%   [-530.87, +228.24]
+    tierA_part1.00     62  53.23%  +0.006   224.85    45.6%   [-398.42, +360.56]
+    wide               30  46.67%  +0.031    95.43    60.2%   [-204.92, +322.98]
+    wide_part1.00      30  53.33%  +0.043    95.43    60.2%   [-188.35, +270.58]
+    tierA_wide_part    20  55.00%  +0.060    95.43    57.9%   [-177.45, +244.24]
+
+`posShare` is the fraction of bootstrap resamples that finished in
+profit — the direct answer to "could this have been luck?".
+
+### The bug this sweep found before it found a setting
+
+The first run of this table returned results for `tierA` that were
+identical to `shipped` **to the cent** — same 180 trades, same -444.81,
+same bootstrap interval. Two different configurations cannot agree to
+the cent. `SCORING_MIN_TRADEABLE` turned out to be a dead setting: read
+from the environment, carried on the config, documented in
+.env.example, and consulted by no production code. Fixed in aaae9e9;
+the three `tierA` rows above are from the re-run.
+
+### Applying the rule
+
+Step 1, n >= 100, eliminates five of the nine candidates: `tierA` (62),
+`tierA_part1.00` (62), `wide` (30), `wide_part1.00` (30) and
+`tierA_wide_part` (20).
+
+This is the step that costs something, and it is supposed to. The three
+eliminated rows with a **positive** avgR and 58-60% of resamples in
+profit are the most attractive numbers in the table, and they are
+attractive because they are thin: twenty to thirty trades over 27 days
+across twelve pairs, with bootstrap intervals 400-500 wide. Had the
+rule been written after the table was read, those rows are exactly what
+it would have been written to select.
+
+`tierA_part1.00` is the genuinely painful one — avgR +0.006, 45.6%
+positive, best drawdown of any n>60 row — and 62 trades is still 62
+trades. It is disqualified.
+
+Step 2, highest win rate subject to avgR >= the control's -0.111, over
+the five survivors: all four partial variants clear the expectancy
+condition comfortably, and `part_0.75` has the highest win rate at
+**51.67%**.
+
+**Promoted: `part_0.75`** — `EXEC_ENABLE_PARTIAL_TP=true`,
+`EXEC_PARTIAL_TP_AT_R=0.75`, everything else stock.
+
+### Declared before the held-out runs
+
+Three runs happen on the held-out seeds, and their status is fixed now:
+
+* `shipped` — the control.
+* `part_0.75` — the promoted candidate. Step 4 decides it.
+* `tierA_part1.00` — an **observation only, non-promotable whatever it
+  returns**. It is run because the tier floor deserves its own larger
+  experiment and knowing whether 62 trades pointed anywhere useful
+  helps design that one. It cannot move a default in this experiment,
+  and no result it produces will be described as validated.
+
+## Results: held out (seeds 500-511)
+
+To be filled in.

@@ -24,10 +24,18 @@ nothing here can approve or size a trade.
 
 What it still does NOT model, and should not be read as modelling:
 correlation limits, the daily and session trade caps, news blackouts,
-spread rejection at submission time, or the loss cooldown. Each of those
+spread rejection at submission time, and the loss cooldown. Each of those
 makes the live bot MORE selective than this, so the simulation is
 optimistic by construction and its numbers are a ceiling rather than an
 estimate.
+
+One more, and it cuts the other way: `structure_invalidated` is always
+False here, because recomputing the structural read on every open
+position on every bar would double the cost of a run. So the structural
+exit never fires in simulation. Live it closes losing trades early, which
+means a measured comparison of it against nothing would show no
+difference — and reporting that as "the structural exit does not help"
+would be a claim about the harness, not about the rule.
 """
 
 from __future__ import annotations

@@ -26,6 +26,7 @@ from ..config import TradingConfig
 from ..marketdata.candles import Candle
 from ..marketdata.provider import Series
 from ..marketdata.validation import ValidationReport
+from ..execution.manager import plan_actions
 from ..risk.engine import AccountRiskState, RiskEngine
 from ..risk.reward import evaluate_reward
 from ..risk.sizing import (
@@ -52,6 +53,24 @@ class SimulatedTrade:
     risk_amount: float
     setup_grade: str
     setup_score: float
+    #: How the MTF layer classified this setup, and whether its target
+    #: was a measured level or a projection. Recorded because "which
+    #: classification loses money" is the question a backtest exists to
+    #: answer, and averaging a reversal's results with a continuation's
+    #: describes neither (project rule 14, applied to the harness).
+    setup_type: str = ""
+    projected_target: bool = False
+    #: The stop the trade was OPENED with. `stop_loss` moves with
+    #: management; R must keep being measured against the original risk or
+    #: a break-even stop would report every trade as infinite R.
+    initial_stop: float = 0.0
+    #: Lots still open. Falls below `lots` once a partial is taken.
+    open_lots: float = 0.0
+    #: Account-currency profit already realised by partial closes.
+    banked_pnl: float = 0.0
+    partial_taken: bool = False
+    #: Management steps applied, for the record.
+    managed: tuple[str, ...] = ()
     #: Value of one unit of the QUOTE currency in the ACCOUNT currency.
     #:
     #: Carried on the trade because P/L needs it and the sizer already
@@ -70,6 +89,16 @@ class SimulatedTrade:
     mfe: float = 0.0
     mae: float = 0.0
 
+    def __post_init__(self) -> None:
+        # A trade with lots but nothing open is nonsense, and a zero
+        # `initial_stop` would make every R infinite. Both default to the
+        # obvious thing rather than to zero, so a hand-built trade behaves
+        # like one the engine produced.
+        if self.open_lots <= 0:
+            self.open_lots = self.lots
+        if self.initial_stop <= 0:
+            self.initial_stop = self.stop_loss
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "symbol": self.symbol,
@@ -81,6 +110,10 @@ class SimulatedTrade:
             "lots": self.lots,
             "riskAmount": round(self.risk_amount, 2),
             "conversionRate": round(self.conversion_rate, 6),
+            "partialTaken": self.partial_taken,
+            "managed": list(self.managed),
+            "setupType": self.setup_type,
+            "projectedTarget": self.projected_target,
             "setupGrade": self.setup_grade,
             "setupScore": self.setup_score,
             "exitTime": self.exit_time.isoformat() if self.exit_time else None,
@@ -89,6 +122,27 @@ class SimulatedTrade:
             "rMultiple": round(self.r_multiple, 3) if self.r_multiple is not None else None,
             "exitReason": self.exit_reason,
         }
+
+
+@dataclass
+class _SimPosition:
+    """What `plan_actions` reads off an open position.
+
+    A view, not a copy of the logic. The backtest drives the SAME function
+    the live manager drives, because a simulated break-even that behaved
+    differently from the real one would make the whole exercise a
+    measurement of a system nobody runs — which is exactly the fault this
+    harness was rebuilt to remove.
+    """
+
+    position_id: str
+    symbol: str
+    direction: str
+    quantity: float
+    entry_price: float
+    stop_loss: float | None
+    take_profit: float | None
+    opened_at: datetime
 
 
 @dataclass
@@ -349,18 +403,100 @@ class Backtester:
                 stop_loss=candidate.stop_loss,
                 take_profit=candidate.take_profit,
                 lots=size.lots,
+                open_lots=size.lots,
+                initial_stop=candidate.stop_loss,
                 risk_amount=size.actual_risk,
                 setup_grade=score.tier,
                 setup_score=round(score.total, 2),
+                setup_type=candidate.setup_type,
+                projected_target=bool(
+                    (candidate.liquidity_target or {}).get("projected")
+                ),
                 conversion_rate=size.conversion_rate,
             ),
             "",
         )
 
+    def _manage(self, trade: SimulatedTrade, bar: Candle, index: int) -> None:
+        """Apply position management for this bar, one poll behind.
+
+        Called AFTER the exit check, so a break-even stop can never
+        retroactively rescue a trade the same bar stopped out. That
+        matches the live cadence — management runs on a timer, not
+        intrabar — and it is the pessimistic direction, which is the only
+        safe one for a simulator.
+
+        The price handed to `plan_actions` is the bar's FAVOURABLE
+        extreme, because that is the best reading a poll during this bar
+        could have seen. A management step is an improvement to an
+        existing position, so using the favourable extreme cannot invent a
+        profit: it can only move a stop that the next bar still has to
+        trade through, or bank a partial at a level price genuinely
+        reached.
+        """
+
+        if trade.open_lots <= 0 or trade.exit_index is not None:
+            return
+
+        price = bar.high if trade.direction == "BUY" else bar.low
+        position = _SimPosition(
+            position_id=f"sim-{id(trade)}",
+            symbol=trade.symbol,
+            direction=trade.direction,
+            quantity=trade.open_lots,
+            entry_price=trade.entry,
+            stop_loss=trade.stop_loss,
+            take_profit=trade.take_profit,
+            opened_at=trade.entry_time,
+        )
+        actions = plan_actions(
+            position=position,
+            trade={
+                "actual_entry": trade.entry,
+                "stop_loss": trade.initial_stop,
+                "partial_taken": trade.partial_taken,
+            },
+            price=price,
+            config=self.config,
+            now=bar.close_time,
+        )
+
+        slippage = self.costs.slippage_points * self.spec.tick_size
+        for action in actions:
+            if action.kind == "MOVE_STOP" and action.stop_loss is not None:
+                trade.stop_loss = action.stop_loss
+                trade.managed += (action.reason,)
+            elif action.kind == "PARTIAL_CLOSE" and not trade.partial_taken:
+                closing = min(trade.open_lots, float(action.quantity or 0.0))
+                if closing <= 0:
+                    continue
+                # Filled at the trigger level, paying slippage — not at
+                # the bar extreme, which a poll would rarely catch.
+                level = trade.entry + (
+                    (trade.entry - trade.initial_stop) * self.config.execution.partial_tp_at_r
+                )
+                if trade.direction == "SELL":
+                    level = trade.entry - (
+                        (trade.initial_stop - trade.entry)
+                        * self.config.execution.partial_tp_at_r
+                    )
+                fill = level - slippage if trade.direction == "BUY" else level + slippage
+                move = fill - trade.entry if trade.direction == "BUY" else trade.entry - fill
+                trade.banked_pnl += (
+                    move * self.spec.contract_size * closing * trade.conversion_rate
+                    - self.costs.commission_per_lot * closing
+                )
+                trade.open_lots = round(trade.open_lots - closing, 6)
+                trade.partial_taken = True
+                trade.managed += (action.reason,)
+            elif action.kind == "CLOSE":
+                self._close(trade, bar, index, bar.close, action.reason)
+                return
+
     def _resolve_exit(self, trade: SimulatedTrade, bar: Candle, index: int) -> bool:
         """Did this bar close the trade? Pessimistic on ambiguity."""
 
-        if index <= trade.entry_index:
+        if index <= trade.entry_index or trade.exit_index is not None:
             return False
 
         excursion_up = bar.high - trade.entry
@@ -377,35 +513,55 @@ class Backtester:
             hit_target = bar.low <= trade.take_profit
 
         if not hit_stop and not hit_target:
-            return False
+            self._manage(trade, bar, index)
+            return trade.exit_index is not None
 
         slippage = self.costs.slippage_points * self.spec.tick_size
         if hit_stop:
             # Both touched in one bar -> assume the stop. Intrabar sequence
             # is unknowable, and optimism here is what makes a backtest lie.
             exit_price = (
-                trade.stop_loss - slippage if trade.direction == "BUY" else trade.stop_loss + slippage
+                trade.stop_loss - slippage
+                if trade.direction == "BUY"
+                else trade.stop_loss + slippage
             )
             reason = "STOP_AND_TARGET_SAME_BAR" if hit_target else "STOP"
         else:
             exit_price = trade.take_profit
             reason = "TARGET"
 
+        self._close(trade, bar, index, exit_price, reason)
+        return True
+
+    def _close(
+        self,
+        trade: SimulatedTrade,
+        bar: Candle,
+        index: int,
+        exit_price: float,
+        reason: str,
+    ) -> None:
+        """Book the remaining lots and finish the trade."""
+
         move = (
             exit_price - trade.entry if trade.direction == "BUY" else trade.entry - exit_price
         )
         # The same conversion the sizer used. `move` is in the quote
         # currency; the account is not necessarily quoted in it.
-        gross = move * self.spec.contract_size * trade.lots * trade.conversion_rate
-        commission = self.costs.commission_per_lot * trade.lots
+        gross = move * self.spec.contract_size * trade.open_lots * trade.conversion_rate
+        commission = self.costs.commission_per_lot * trade.open_lots
         trade.exit_index = index
         trade.exit_time = bar.close_time
         trade.exit_price = exit_price
-        trade.pnl = gross - commission
-        risk = abs(trade.entry - trade.stop_loss)
-        trade.r_multiple = (move / risk) if risk > 0 else 0.0
+        trade.pnl = trade.banked_pnl + gross - commission
+        # R against the money actually risked, not against a price ratio.
+        # With partials the two stop agreeing, and the money is the one
+        # that means anything once part of the position is already closed.
+        trade.r_multiple = (
+            (trade.pnl / trade.risk_amount) if trade.risk_amount > 0 else 0.0
+        )
         trade.exit_reason = reason
-        return True
+        trade.open_lots = 0.0
 
 
 def _series(symbol: str, timeframe: str, candles: Sequence[Candle]) -> Series:

@@ -161,3 +161,44 @@ def test_the_tradeable_floor_can_be_raised_without_a_code_deploy(monkeypatch):
     # Garbage falls back to the default rather than opening the gate.
     monkeypatch.setenv("SCORING_MIN_TRADEABLE", "")
     assert load_config({}).scoring.min_tradeable_score == pytest.approx(56.0)
+
+
+def test_stop_width_is_a_cost_control_and_the_algebra_holds():
+    """cost/risk = spread / stop_distance. The contract size cancels.
+
+    This is the one finding in the session that is arithmetic rather than
+    a search, so it is worth having as an executable statement: halving
+    the stop doubles what the trade pays the broker as a share of its own
+    risk, whatever the instrument or the lot size.
+    """
+
+    from bot.risk.sizing import calculate_position_size
+
+    spread = 8 * DEFAULT_SPEC.tick_size
+    fractions = {}
+    for stop_distance in (0.0005, 0.0010, 0.0020, 0.0040):
+        risk = 25.0
+        size = calculate_position_size(
+            spec=DEFAULT_SPEC, risk_amount=risk,
+            entry=1.1000, stop_loss=1.1000 - stop_distance,
+        )
+        cost = spread * DEFAULT_SPEC.contract_size * size.lots
+        fractions[stop_distance] = cost / size.actual_risk
+
+    # Each doubling of the stop roughly halves the friction.
+    widths = sorted(fractions)
+    for tighter, wider in zip(widths, widths[1:]):
+        assert fractions[wider] < fractions[tighter]
+        assert fractions[wider] == pytest.approx(fractions[tighter] / 2, rel=0.05)
+
+    # And it matches spread/stop_distance directly.
+    for stop_distance, fraction in fractions.items():
+        assert fraction == pytest.approx(spread / stop_distance, rel=0.05)
+
+
+def test_the_stop_floor_can_be_raised_without_a_code_deploy(monkeypatch):
+    from bot.config import load_config
+
+    assert load_config({}).risk.min_stop_distance_atr == pytest.approx(0.35)
+    monkeypatch.setenv("RISK_MIN_STOP_ATR", "0.9")
+    assert load_config({}).risk.min_stop_distance_atr == pytest.approx(0.9)

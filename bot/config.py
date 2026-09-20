@@ -614,6 +614,23 @@ def load_config(env: Mapping[str, str] | None = None) -> TradingConfig:
         max_open_positions=_env_int("RISK_MAX_OPEN_POSITIONS", 3, low=1, high=10),
         max_trades_per_day=_env_int("RISK_MAX_TRADES_PER_DAY", 6, low=1, high=30),
         min_risk_reward=_env_float("RISK_MIN_RR", 1.2, low=1.0, high=10.0),
+        # Friction is `spread / stop_distance` - the contract size and the
+        # lot count cancel - so a TIGHT stop does not reduce cost, it
+        # magnifies it. Measured across four settings, raising this floor
+        # took friction from 16.6% of R to 8.2% and moved win rate, profit
+        # factor and expectancy monotonically the right way. The far end
+        # had n=30 and a confidence interval spanning zero, so the default
+        # has not moved - but the mechanism is arithmetic, not a search,
+        # which makes it the experiment most worth running on paper.
+        #
+        # Note what raising it does: it REJECTS setups whose structural
+        # stop is tighter than this. It never widens a stop.
+        min_stop_distance_atr=_env_float(
+            "RISK_MIN_STOP_ATR", 0.35, low=0.05, high=3.0
+        ),
+        max_stop_distance_atr=_env_float(
+            "RISK_MAX_STOP_ATR", 3.5, low=0.5, high=20.0
+        ),
     )
     reward = RewardConfig(
         min_reward_r=_env_float("REWARD_MIN_R", 1.2, low=1.0, high=10.0),

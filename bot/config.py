@@ -241,11 +241,27 @@ class ExecutionConfig:
     order_verify_attempts: int = 5
     order_verify_delay_seconds: float = 1.5
     breakeven_at_r: float = 1.0
-    partial_tp_at_r: float = 1.5
+    #: 0.75R, not the 1.5R this defaulted to. Chosen by a pre-registered
+    #: experiment and confirmed on held-out data — see
+    #: docs/EXPERIMENT_WIN_RATE.md. Every partial level tested beat no
+    #: partial at all; 0.75 was the best of them on the discovery set
+    #: under a rule fixed before the results were read.
+    partial_tp_at_r: float = 0.75
     partial_tp_fraction: float = 0.5
     trail_after_r: float = 2.0
     enable_breakeven: bool = True
-    enable_partial_tp: bool = False
+    #: ON since the experiment in docs/EXPERIMENT_WIN_RATE.md. Project
+    #: rule 12 says partials stay off "until evidence justifies them",
+    #: which is a standard of evidence, not a permanent ban — so here is
+    #: the evidence it asks for: a rule fixed before the data was read,
+    #: one candidate promoted out of ten, and a held-out set that chose
+    #: nothing. On that held-out data the win rate went 25.4% -> 44.5%
+    #: and expectancy -0.248R -> -0.128R.
+    #:
+    #: It does NOT make the system profitable. Both sets are still
+    #: negative and both are synthetic. What it does is lose less, and
+    #: stay inside its own drawdown limit while doing it.
+    enable_partial_tp: bool = True
     enable_trailing: bool = False
     enable_structure_exit: bool = True
     max_position_hours: float = 48.0
@@ -732,11 +748,11 @@ def load_config(env: Mapping[str, str] | None = None) -> TradingConfig:
         # The defaults are unchanged.
         execution=ExecutionConfig(
             enable_breakeven=_env_bool("EXEC_ENABLE_BREAKEVEN", True),
-            enable_partial_tp=_env_bool("EXEC_ENABLE_PARTIAL_TP", False),
+            enable_partial_tp=_env_bool("EXEC_ENABLE_PARTIAL_TP", True),
             enable_trailing=_env_bool("EXEC_ENABLE_TRAILING", False),
             enable_structure_exit=_env_bool("EXEC_ENABLE_STRUCTURE_EXIT", True),
             breakeven_at_r=_env_float("EXEC_BREAKEVEN_AT_R", 1.0, low=0.2, high=5.0),
-            partial_tp_at_r=_env_float("EXEC_PARTIAL_TP_AT_R", 1.5, low=0.3, high=10.0),
+            partial_tp_at_r=_env_float("EXEC_PARTIAL_TP_AT_R", 0.75, low=0.3, high=10.0),
             partial_tp_fraction=_env_float(
                 "EXEC_PARTIAL_TP_FRACTION", 0.5, low=0.1, high=0.9
             ),

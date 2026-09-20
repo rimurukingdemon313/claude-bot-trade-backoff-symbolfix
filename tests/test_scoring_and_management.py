@@ -235,8 +235,50 @@ def test_trailing_is_off_by_default_and_works_when_enabled(config):
     assert any("trailing" in action.reason for action in on)
 
 
-def test_partial_take_profit_is_off_by_default(config):
+def test_partial_take_profit_is_on_by_default_and_fires_at_the_tested_level(config):
+    """This default MOVED, on evidence, and the move is the assertion.
+
+    It was off, as project rule 12 requires until "evidence justifies
+    them". docs/EXPERIMENT_WIN_RATE.md is that evidence: a selection
+    rule committed before the results were read, one candidate promoted
+    out of ten, and a held-out seed set that chose nothing, on which the
+    win rate went 25.4% -> 44.5% and expectancy -0.248R -> -0.128R.
+
+    The trigger is 0.75R, which is what was tested — not the 1.5R this
+    used to default to and which measured no better than no partial at
+    all.
+    """
+
+    assert config.execution.enable_partial_tp is True
+    assert config.execution.partial_tp_at_r == pytest.approx(0.75)
+
     actions = plan_actions(position=position(), trade=TRADE, price=1.1090, config=config, now=SETUP_END)
+    partial = next(action for action in actions if action.kind == "PARTIAL_CLOSE")
+    assert partial.quantity == pytest.approx(0.05), "half of the position"
+
+
+def test_a_partial_never_fires_before_its_configured_r(config):
+    """The control on the test above: it is the LEVEL that triggers it.
+
+    Without this, "partials are on" would pass even if the trigger were
+    ignored and every position were half-closed on arrival.
+    """
+
+    early = plan_actions(
+        position=position(), trade=TRADE, price=1.1010, config=config, now=SETUP_END
+    )
+    assert not [action for action in early if action.kind == "PARTIAL_CLOSE"]
+
+
+def test_partial_take_profit_can_still_be_turned_off(config):
+    """A default that moved on synthetic evidence must stay reversible."""
+
+    off = dataclasses.replace(
+        config, execution=dataclasses.replace(config.execution, enable_partial_tp=False)
+    )
+    actions = plan_actions(
+        position=position(), trade=TRADE, price=1.1090, config=off, now=SETUP_END
+    )
     assert not [action for action in actions if action.kind == "PARTIAL_CLOSE"]
 
 

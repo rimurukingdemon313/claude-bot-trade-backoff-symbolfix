@@ -129,4 +129,102 @@ Three runs happen on the held-out seeds, and their status is fixed now:
 
 ## Results: held out (seeds 500-511)
 
-To be filled in.
+    config              n    win     avgR    maxDD   posShare  bootstrap 5%-95%
+    shipped           118  25.42%  -0.248   521.70     9.4%   [-699.75,  +87.90]
+    part_0.75         173  44.51%  -0.128   442.74    10.6%   [-714.58,  +98.05]
+    tierA_part1.00     57  50.88%  +0.005   280.22    50.1%   [-386.83, +417.75]
+
+Step 4: the candidate survives only if its win rate beats the control
+AND its avgR is no worse. Win rate 44.51% against 25.42%, avgR -0.128
+against -0.248. **It survives**, on both conditions, with room.
+
+Note the control got WORSE on the held-out seeds, from -0.111R to
+-0.248R. These are harder seeds. That strengthens the result rather
+than weakening it: the gap held up on data where the baseline suffered.
+
+### Why the trade counts differ, and why it is the best line in the run
+
+118 trades for the control against 173 for the candidate, where the
+discovery set had 180 for both. That asymmetry had to be explained
+before anything could be called a result, because comparing win rates
+across different trade populations is weaker than comparing them on the
+same one.
+
+The rejection histograms settle it:
+
+    shipped     ... ('max drawdown', 93) ...
+    part_0.75   ... no drawdown refusals at all ...
+
+`max_drawdown_pct` is 0.10, which on a $5,000 account is $500. The
+control's drawdown reached **$521.70** and breached it, so the risk
+engine refused 93 setups. The candidate's peaked at **$442.74** and
+never did.
+
+So the difference in n is not a simulator artifact and not slot
+contention. It is the control drawing down far enough to switch itself
+off. A configuration whose losses trip its own safety limit is worse in
+a way the per-trade numbers alone do not capture, and the candidate's
+lower drawdown compounds: fewer refusals, more of the sample actually
+traded.
+
+### The mechanism, visible in the exit reasons
+
+    part_0.75   TARGET 48   STOP 118   SAME_BAR 7   = 173, of which 77 won
+    shipped     TARGET 29   STOP  83   SAME_BAR 6   = 118, of which 30 won
+
+The control's wins are its target hits and nothing else: 29 targets, 30
+wins. The candidate has 48 targets but 77 wins — so **29 of its wins
+exited at STOP and were still net positive**, because the partial at
+0.75R was already banked before price came back. That is precisely the
+mechanism the configuration was chosen for, showing up in the data
+rather than being asserted.
+
+## Decision
+
+`EXEC_ENABLE_PARTIAL_TP` now defaults to **true** and
+`EXEC_PARTIAL_TP_AT_R` to **0.75**.
+
+Project rule 12 puts partials off "until evidence justifies them". That
+is a standard of evidence, not a permanent ban, and refusing to act on
+a test I designed, pre-registered and passed would make the test
+theatre. This is the strongest evidence in this repository for any
+setting: a rule fixed before the data was read, one candidate out of
+ten promoted, a held-out set that chose nothing, both conditions met
+with room, and a mechanism confirmed in the exit reasons rather than
+inferred.
+
+Trailing stays off. It measured no better than nothing.
+
+### What this is NOT
+
+It is not profitability, and nothing here should be read as a step
+towards a promise of it. Both datasets are **negative** (-0.044R and
+-0.128R) and both are **synthetic**. A generated price series has no
+news, no sessions that matter, no spread that widens when it hurts and
+no broker that fills you badly. What survived here is the comparison
+between two configurations on the same data, not a claim about either
+one against a market.
+
+The 66% win rate that was asked for was not reached and was not
+approached. The best figure produced under a rule fixed in advance is
+44.5% out of sample.
+
+Reversing this is one line: `EXEC_ENABLE_PARTIAL_TP=false`.
+
+## The next experiment, and why it is not this one
+
+`tierA_part1.00` returned +0.005R on the held-out seeds with 50.1% of
+its resamples in profit — the only configuration anywhere in this
+document that is not distinguishable from break-even in BOTH runs. It
+was declared non-promotable before it ran, because 62 and 57 trades are
+too few, and it stays non-promotable. Nothing above has been moved on
+account of it.
+
+It earns its own experiment, pre-registered separately, on more data.
+Two things make that worth doing rather than just tempting: the tier
+floor only started working at all in commit aaae9e9, so it has never
+actually been tested before this document; and the A/B grade boundary
+separating while the continuous score behind it ranks at random
+(+0.037 correlation) is an unexplained fact about the scorer, not a
+tuning opportunity. The right next step is to understand that, not to
+raise a threshold and hope.

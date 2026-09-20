@@ -366,11 +366,14 @@ def test_management_uses_the_live_planner_rather_than_its_own_rules():
 def test_management_can_be_changed_without_a_code_deploy(monkeypatch):
     """"Earned by testing" needs testing to be possible.
 
-    Partials and trailing are off because the project says they must be
-    earned rather than switched on for sounding sophisticated. That rule
-    only means something if an operator can actually run the experiment —
-    on paper, for a fortnight, and switch back — without shipping code.
-    The defaults do not move.
+    Trailing is off because the project says it must be earned rather
+    than switched on for sounding sophisticated. That rule only means
+    something if an operator can actually run the experiment — on paper,
+    for a fortnight, and switch back — without shipping code.
+
+    Partials went through exactly that procedure and are now ON at
+    0.75R; see docs/EXPERIMENT_WIN_RATE.md. The rule said "until
+    evidence justifies them", which is a standard, not a ban.
     """
 
     from bot.config import load_config
@@ -378,8 +381,9 @@ def test_management_can_be_changed_without_a_code_deploy(monkeypatch):
     default = load_config({}).execution
     assert default.enable_breakeven is True
     assert default.enable_structure_exit is True
-    assert default.enable_partial_tp is False
-    assert default.enable_trailing is False
+    assert default.enable_partial_tp is True
+    assert default.partial_tp_at_r == pytest.approx(0.75)
+    assert default.enable_trailing is False, "trailing measured no better than nothing"
 
     monkeypatch.setenv("EXEC_ENABLE_PARTIAL_TP", "true")
     monkeypatch.setenv("EXEC_PARTIAL_TP_AT_R", "1.25")
@@ -392,7 +396,12 @@ def test_management_can_be_changed_without_a_code_deploy(monkeypatch):
     # A garbage value falls back to the default rather than disabling a
     # guard — the same asymmetry the rest of the config uses.
     monkeypatch.setenv("EXEC_PARTIAL_TP_AT_R", "not-a-number")
-    assert load_config({}).execution.partial_tp_at_r == pytest.approx(1.5)
+    assert load_config({}).execution.partial_tp_at_r == pytest.approx(0.75)
+
+    # And it can be turned back off from the environment, which a default
+    # moved on synthetic evidence had better allow.
+    monkeypatch.setenv("EXEC_ENABLE_PARTIAL_TP", "false")
+    assert load_config({}).execution.enable_partial_tp is False
 
     # And the execution GUARDS are untouched by any of this.
     assert load_config({}).execution.max_spread_atr_fraction == pytest.approx(0.12)

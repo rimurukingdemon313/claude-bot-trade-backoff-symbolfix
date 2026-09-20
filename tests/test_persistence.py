@@ -441,3 +441,53 @@ def test_statistics_with_nothing_but_unpriced_trades_do_not_claim_emptiness():
     assert stats["trades"] == 0
     assert stats["unpriced"] == 1
     assert stats["winRate"] is None, "no data is None, never a zero win rate"
+
+
+def test_an_env_tuned_build_records_a_different_fingerprint_than_the_default():
+    """Rule 9, for the settings that no longer live in the source.
+
+    Stop width, the score floor, the R:R minimum and the position
+    management switches are all settable from the environment — on
+    purpose, so an experiment can run on paper without a deploy. That
+    quietly broke the rule the environment variables were added under:
+    every trade, experiment and control alike, recorded the same
+    `risk-x.y.z`, so afterwards nothing could tell which setting had
+    produced which result. That is precisely the "silent behaviour
+    change under an unchanged version" rule 9 exists to prevent, and I
+    introduced it by adding the knobs.
+
+    The stamp now carries a fingerprint of the tuning actually in force.
+    """
+
+    from bot.config import load_config
+    from bot.version import set_tuning_fingerprint, version_stamp
+
+    stock = load_config()
+    set_tuning_fingerprint(stock)
+    assert version_stamp()["tuning"] == "default"
+
+    tuned = load_config({"RISK_MIN_STOP_ATR": "1.30"})
+    set_tuning_fingerprint(tuned)
+    tuned_stamp = version_stamp()["tuning"]
+    assert tuned_stamp != "default"
+    assert tuned_stamp.startswith("tuned-")
+
+    # And it is a function of the settings, not of the run: the same
+    # override on a later process has to group with the earlier trades.
+    set_tuning_fingerprint(load_config({"RISK_MIN_STOP_ATR": "1.30"}))
+    assert version_stamp()["tuning"] == tuned_stamp
+
+    # A different override is a different experiment.
+    set_tuning_fingerprint(load_config({"RISK_MIN_STOP_ATR": "0.90"}))
+    assert version_stamp()["tuning"] != tuned_stamp
+
+    set_tuning_fingerprint(stock)  # leave the process as we found it
+
+
+def test_the_fingerprint_never_touches_a_credential():
+    """It is written into every trade row, so it must hash nothing secret."""
+
+    from bot.version import _TUNED_SECTIONS
+
+    for forbidden in ("broker", "storage", "dashboard_token"):
+        assert forbidden not in _TUNED_SECTIONS

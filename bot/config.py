@@ -755,4 +755,25 @@ def load_config(env: Mapping[str, str] | None = None) -> TradingConfig:
         trading_enabled_default=_env_bool("TRADING_ENABLED_DEFAULT", True),
     )
     config.validate()
+
+    # Rule 9: a behaviour change must be visible in the version stamp.
+    # Several tunables are settable from the environment, so an operator
+    # can run an experiment on paper without a deploy — which means the
+    # version constants alone no longer identify the behaviour that
+    # produced a trade. The fingerprint does, and the diff is logged once
+    # here so the digest can be read back later.
+    from .observability import log_event
+    from .version import set_tuning_fingerprint
+
+    fingerprint, changed = set_tuning_fingerprint(config)
+    if changed:
+        log_event(
+            "STARTUP",
+            f"running tuning {fingerprint}: {len(changed)} setting(s) overridden from the "
+            "build defaults — every trade records this fingerprint so the experiment and "
+            "the control can be told apart afterwards",
+            severity="warning",
+            tuning=fingerprint,
+            overrides={key: str(value) for key, value in sorted(changed.items())},
+        )
     return config

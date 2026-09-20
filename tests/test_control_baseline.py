@@ -202,3 +202,50 @@ def test_the_stop_floor_can_be_raised_without_a_code_deploy(monkeypatch):
     assert load_config({}).risk.min_stop_distance_atr == pytest.approx(0.35)
     monkeypatch.setenv("RISK_MIN_STOP_ATR", "0.9")
     assert load_config({}).risk.min_stop_distance_atr == pytest.approx(0.9)
+
+
+@pytest.mark.parametrize(
+    "win_rate,payoff",
+    [(0.90, 0.10), (0.75, 0.30), (0.66, 0.50), (0.636, 0.48)],
+)
+def test_a_high_win_rate_is_not_evidence_of_anything_on_its_own(win_rate, payoff):
+    """Every row here is a LOSING system with a flattering win rate.
+
+    Measured, not argued: moving the target and nothing else took the win
+    rate from 33.3% to 63.6% and the balance from $4,555 to $5,060 and
+    back down to $4,731. The peak was in the middle. The average win
+    collapsed from $20.54 to $9.74 while the average loss never moved
+    from about -$20, so every extra win was bought with a smaller one.
+
+    This pins the arithmetic that makes that inevitable, because a win
+    rate is the number most likely to be quoted at someone and the least
+    able to carry the claim on its own.
+    """
+
+    expectancy = win_rate * payoff - (1 - win_rate) * 1.0
+    assert expectancy < 0, "these are the cases that look good and lose"
+
+    # What that win rate would ACTUALLY need to break even.
+    required_payoff = (1 - win_rate) / win_rate
+    assert payoff < required_payoff
+
+
+def test_the_build_refuses_a_reward_floor_below_parity():
+    """The guard that stops a win-rate chase from shipping.
+
+    Below 1:1 a winner is worth less than a loser costs. The default is
+    1.2; the refusal is at parity, and it is a refusal rather than a
+    clamp so that setting it is an error rather than a silent adjustment.
+    """
+
+    import dataclasses
+
+    from bot.config import load_config
+    from bot.errors import ConfigError
+
+    config = load_config({})
+    doomed = dataclasses.replace(
+        config, risk=dataclasses.replace(config.risk, min_risk_reward=0.515)
+    )
+    with pytest.raises(ConfigError, match="below 1:1"):
+        doomed.validate()

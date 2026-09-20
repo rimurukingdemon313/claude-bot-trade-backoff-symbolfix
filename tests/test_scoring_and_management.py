@@ -608,3 +608,53 @@ def _any_regime():
     from bot.smc.regime import Regime
 
     return Regime("trending", "normal", 0.001, 0.5, 0.6, True, "test regime")
+
+
+def test_the_minimum_tradeable_score_actually_refuses_setups_below_it(config, candidate):
+    """A control that silently does nothing is worse than no control.
+
+    `SCORING_MIN_TRADEABLE` was parsed from the environment, carried on
+    `ScoringConfig`, and documented in .env.example as "the knob worth
+    knowing about" — and read by no production code at all. The scorer's
+    floor was `max(tier_b, candidate.score_floor)` and never consulted
+    it.
+
+    An operator raising it to 68 to trade only A grades would have seen
+    the trade count not move, run their fortnight of paper anyway, and
+    concluded that filtering by grade changes nothing — having never
+    once filtered by grade. The experiment the documentation recommends
+    could not be performed.
+
+    Found because a backtest sweep returned byte-identical results for
+    the tuned and the untuned configuration.
+    """
+
+    passing = SetupScorer(config).score(candidate)
+    assert passing.tradeable, "the fixture must be tradeable at the stock floor"
+
+    strict = dataclasses.replace(
+        config,
+        scoring=dataclasses.replace(
+            config.scoring, min_tradeable_score=passing.total + 5.0
+        ),
+    )
+    verdict = SetupScorer(strict).score(candidate)
+
+    assert verdict.tier == "NO_TRADE"
+    assert verdict.tradeable is False
+    assert any("requires a score of" in note for note in verdict.notes), verdict.notes
+
+
+def test_the_minimum_tradeable_score_can_only_ever_demand_more(config, candidate):
+    """It is a floor, never a discount.
+
+    Setting it below the B tier must not let a sub-B setup through: the
+    scorer takes the max of every floor, so no one setting can lower a
+    limit another established.
+    """
+
+    reference = SetupScorer(config).score(candidate)
+    lowered = dataclasses.replace(
+        config, scoring=dataclasses.replace(config.scoring, min_tradeable_score=1.0)
+    )
+    assert SetupScorer(lowered).score(candidate).tier == reference.tier

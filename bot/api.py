@@ -299,7 +299,12 @@ class DashboardApi:
         funnel = safely(lambda: self.repos.journal.funnel(days=days), {})
         news = safely(self.orchestrator.news.health, {})
         ai_gate = safely(self.orchestrator._ai_gate_status, {})
-        kill = safely(lambda: self.orchestrator.kill_switch.read().active, False)
+        # Defaults to ACTIVE, not inactive. `KillSwitch.read()` already
+        # fails closed on a storage error, so the trading gate treats an
+        # unreadable switch as stopped — and a diagnosis that disagreed
+        # with the gate would send an operator hunting for a cause
+        # somewhere else entirely while the bot sat stopped (rule 7).
+        kill = safely(lambda: self.orchestrator.kill_switch.read().active, True)
 
         return diagnose(
             funnel=funnel,

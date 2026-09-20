@@ -259,3 +259,27 @@ def test_the_diagnosis_reads_the_clock_it_is_given():
     )
     assert early["quietDays"] == pytest.approx(1.0)
     assert later["quietDays"] == pytest.approx(5.0)
+
+
+def test_an_unreadable_kill_switch_diagnoses_as_stopped_not_as_running(
+    config, orchestrator, repos
+):
+    """The diagnosis must not contradict the gate it is explaining.
+
+    `KillSwitch.read()` fails closed: an unreadable switch is treated as
+    ACTIVE and no order goes out. The dashboard's diagnosis defaulted the
+    same probe to False, so the one screen whose job is to say why
+    nothing is trading would have named some other cause entirely, while
+    the bot sat stopped for this one (rule 7).
+    """
+
+    from bot.api import DashboardApi
+
+    def explode():
+        raise RuntimeError("state store is gone")
+
+    orchestrator.kill_switch.read = explode  # type: ignore[assignment]
+
+    verdict = DashboardApi(config, orchestrator, repos).diagnosis()
+
+    assert "KILL_SWITCH" in str(verdict), verdict

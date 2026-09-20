@@ -145,7 +145,14 @@ class DashboardApi:
         peak = self.repos.equity.peak_equity(self.config.broker.account_id) or state.equity
         drawdown = max(0.0, (peak - state.equity) / peak) if peak else 0.0
         closed = self.repos.trades.closed_trades(limit=500)
-        total_pnl = sum(float(trade.get("realized_pnl") or 0.0) for trade in closed)
+        # A trade the broker closed without a readable result carries a
+        # NULL pnl, not a zero. `or 0.0` folded those into the total as
+        # scratches, so a page could show a total that quietly omitted
+        # real money and looked complete doing it. Sum what was measured
+        # and say how many were not (project rule 6).
+        priced = [t for t in closed if t.get("realized_pnl") is not None]
+        total_pnl = sum(float(trade["realized_pnl"]) for trade in priced)
+        unpriced = len(closed) - len(priced)
         demo = self.orchestrator.last_demo
 
         return {
@@ -156,6 +163,9 @@ class DashboardApi:
                 "dailyRealizedPnl": round(float(daily.get("realized_pnl") or 0.0), 2),
                 "dailyPnl": round(float(daily.get("realized_pnl") or 0.0) + state.open_pnl, 2),
                 "totalPnl": round(total_pnl, 2),
+                #: Closed trades whose result the broker never reported.
+                #: Non-zero means `totalPnl` is a partial figure.
+                "totalPnlUnpricedTrades": unpriced,
                 "peakEquity": round(peak, 2),
                 "drawdownPct": round(drawdown * 100, 2),
                 "tradesToday": int(daily.get("trades_opened") or 0),

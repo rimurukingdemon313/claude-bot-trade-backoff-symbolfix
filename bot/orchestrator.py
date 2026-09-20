@@ -1209,7 +1209,18 @@ class Orchestrator:
     def reconcile(self) -> ReconcileReport:
         report = self.reconciler.reconcile()
         self.last_reconcile = report
+        unmeasured = set(report.unmeasured_closes)
         for position_id in report.closed_stale:
+            if position_id in unmeasured:
+                # A close whose result could not be read counts as a loss
+                # HERE and only here. `last_loss_at` drives a cooldown, so
+                # treating the unknown as a loss can only slow the bot
+                # down — which is the safe direction when a position has
+                # vanished and nobody can say for how much (rule 7). It
+                # is deliberately NOT written to the daily counters, where
+                # the same assumption would be a fabricated number.
+                self._record_event_time("loss")
+                continue
             trade = self.repos.trades.by_position_id(position_id)
             if trade and float(trade.get("realized_pnl") or 0.0) < 0:
                 self._record_event_time("loss")

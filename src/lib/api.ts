@@ -40,6 +40,8 @@ export type Account = {
   dailyRealizedPnl: number;
   dailyPnl: number;
   totalPnl: number;
+  /** Closed trades the broker never priced. >0 means totalPnl is partial. */
+  totalPnlUnpricedTrades?: number;
   peakEquity: number;
   drawdownPct: number;
   tradesToday: number;

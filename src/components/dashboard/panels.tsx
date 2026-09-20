@@ -150,7 +150,12 @@ export function AccountPanel({ account }: { account: Envelope<Account> | undefin
             <Stat
               label="Total P/L"
               value={fmt.money(data.totalPnl, data.currency)}
-              tone={pnlTone(data.totalPnl)}
+              tone={data.totalPnlUnpricedTrades ? 'warn' : pnlTone(data.totalPnl)}
+              hint={
+                data.totalPnlUnpricedTrades
+                  ? `partial — ${data.totalPnlUnpricedTrades} closed trade(s) the broker never priced`
+                  : undefined
+              }
             />
           </div>
           <div className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-4">

@@ -286,6 +286,162 @@ def test_reconciler_closes_a_trade_the_broker_no_longer_has(config, broker, repo
     assert repos.daily.today()["realized_pnl"] == pytest.approx(-82.5)
 
 
+def test_a_close_whose_result_cannot_be_read_never_becomes_a_zero(config, broker, repos):
+    """The reconciler used to book an unreadable close as 0.00 P/L.
+
+    Its own docstring said a fabricated PnL "would corrupt the daily loss
+    counter" — and then it handed the 0.0 straight to `record_close`,
+    which is that counter. Three harms landed at once and every one of
+    them in the unsafe direction: the real loss vanished from the daily
+    total that drives the max-daily-loss kill switch, the losing streak
+    RESET (0.0 is not a loss) so risk stopped being reduced by adverse
+    state, and the close diluted the win rate as neither a win nor a
+    loss.
+
+    A close nobody could price is an unknown, not a scratch.
+    """
+
+    from bot.errors import BrokerRateLimited
+
+    executor = Executor(config, broker, repos, sleeper=lambda _s: None)
+    result = executor.execute(make_plan(), DEFAULT_SPEC, atr=0.0012)
+
+    # A real loss has already been booked today, so the streak is live.
+    repos.daily.record_close(-50.0)
+    before = repos.daily.today()
+    assert before["consecutive_losses"] == 1
+
+    broker.remove_position(result.broker_position_id, realized_pnl=-82.5, exit_price=1.0950)
+
+    def refuse_history(limit: int = 200):
+        raise BrokerRateLimited("error 1015: you are being rate-limited")
+
+    broker.order_history = refuse_history  # type: ignore[assignment]
+
+    report = Reconciler(config, broker, repos).reconcile()
+
+    # The counters first: this is the harm, and it lands whether or not
+    # anything is reported anywhere.
+    after = repos.daily.today()
+    assert after["realized_pnl"] == pytest.approx(-50.0), "an unmeasured close is not a 0.00"
+    assert after["consecutive_losses"] == 1, "a close nobody priced must not clear a losing run"
+    assert after["trades_closed"] == before["trades_closed"]
+
+    assert result.broker_position_id in report.unmeasured_closes
+    assert result.broker_position_id in report.closed_stale
+
+    trade = repos.trades.by_execution_id(result.plan.execution_id)
+    assert trade["status"] == "CLOSED"
+    assert trade["exit_reason"] == "BROKER_CLOSED_PNL_UNKNOWN"
+    assert trade["realized_pnl"] is None, "None is a visible gap; 0.0 looks like information"
+
+    kinds = [row["kind"] for row in repos.reconciliations.recent()]
+    assert "CLOSE_WITHOUT_RESULT" in kinds
+
+
+def test_a_history_that_carries_no_result_for_the_position_is_also_unknown(
+    config, broker, repos
+):
+    """The other path into the same fabrication.
+
+    `order_history` can answer perfectly well and simply not mention this
+    position — it is capped at 200 orders, and a position closed long
+    enough ago falls off the end. The old code walked the rows, matched
+    nothing, and returned the 0.0 it had initialised `pnl` to, which is
+    indistinguishable from a genuine scratch.
+    """
+
+    executor = Executor(config, broker, repos, sleeper=lambda _s: None)
+    result = executor.execute(make_plan(), DEFAULT_SPEC, atr=0.0012)
+    repos.daily.record_close(-50.0)
+
+    broker.remove_position(result.broker_position_id, realized_pnl=-82.5, exit_price=1.0950)
+    broker._history.clear()  # the close has aged out of the window
+
+    report = Reconciler(config, broker, repos).reconcile()
+
+    assert repos.daily.today()["realized_pnl"] == pytest.approx(-50.0)
+    assert repos.daily.today()["consecutive_losses"] == 1
+    assert result.broker_position_id in report.unmeasured_closes
+    trade = repos.trades.by_execution_id(result.plan.execution_id)
+    assert trade["exit_reason"] == "BROKER_CLOSED_PNL_UNKNOWN"
+
+
+def test_an_unmeasured_close_still_starts_the_loss_cooldown(orchestrator, broker, repos):
+    """Unknown is not "fine".
+
+    The daily counters must not be told a number nobody measured — but
+    the post-loss cooldown is a risk REDUCER, and there the conservative
+    reading is free. A position that vanished for an unknown amount
+    starts the cooldown as if it were a loss, because the only cost of
+    being wrong about that is trading less.
+    """
+
+    from bot.errors import BrokerRateLimited
+
+    executor = Executor(orchestrator.config, broker, repos, sleeper=lambda _s: None)
+    result = executor.execute(make_plan(), DEFAULT_SPEC, atr=0.0012)
+    broker.remove_position(result.broker_position_id, realized_pnl=-82.5, exit_price=1.0950)
+
+    def refuse_history(limit: int = 200):
+        raise BrokerRateLimited("error 1015: you are being rate-limited")
+
+    broker.order_history = refuse_history  # type: ignore[assignment]
+    assert repos.state.get("last_loss_at") is None
+
+    orchestrator.reconcile()
+
+    assert repos.state.get("last_loss_at") is not None
+
+
+def test_the_dashboard_total_says_when_it_is_missing_a_result(orchestrator, broker, repos):
+    """The same fabrication, one layer up.
+
+    `totalPnl` summed `realized_pnl or 0.0`. A trade stored as NULL
+    precisely so it would not be mistaken for a scratch went straight
+    back to counting as zero the moment it reached the page — and the
+    page gave no sign it was short a trade. The sum of what was measured
+    is honest; the gap has to travel with it (rule 6).
+    """
+
+    from bot.api import DashboardApi
+    from bot.errors import BrokerRateLimited
+
+    executor = Executor(orchestrator.config, broker, repos, sleeper=lambda _s: None)
+    result = executor.execute(make_plan(), DEFAULT_SPEC, atr=0.0012)
+    broker.remove_position(result.broker_position_id, realized_pnl=-82.5, exit_price=1.0950)
+
+    def refuse_history(limit: int = 200):
+        raise BrokerRateLimited("error 1015: you are being rate-limited")
+
+    broker.order_history = refuse_history  # type: ignore[assignment]
+    orchestrator.reconcile()
+
+    data = DashboardApi(orchestrator.config, orchestrator, repos).account()["data"]
+    assert data["totalPnlUnpricedTrades"] == 1, "the page must admit the total is partial"
+    assert data["totalPnl"] == pytest.approx(0.0), "and must not have invented the missing one"
+
+
+def test_a_measured_close_still_reaches_the_daily_counters(config, broker, repos):
+    """The guard above must not cost the normal path.
+
+    Refusing to fabricate is only worth anything if a result the broker
+    DOES report still lands in the counters that reduce risk.
+    """
+
+    executor = Executor(config, broker, repos, sleeper=lambda _s: None)
+    result = executor.execute(make_plan(), DEFAULT_SPEC, atr=0.0012)
+    broker.remove_position(result.broker_position_id, realized_pnl=-82.5, exit_price=1.0950)
+
+    report = Reconciler(config, broker, repos).reconcile()
+
+    assert report.unmeasured_closes == []
+    assert repos.daily.today()["realized_pnl"] == pytest.approx(-82.5)
+    assert repos.daily.today()["consecutive_losses"] == 1
+    trade = repos.trades.by_execution_id(result.plan.execution_id)
+    assert trade["exit_reason"] == "BROKER_CLOSED"
+
+
 def test_reconciler_restores_a_missing_stop_from_the_recorded_plan(config, broker, repos):
     executor = Executor(config, broker, repos, sleeper=lambda _s: None)
     result = executor.execute(make_plan(), DEFAULT_SPEC, atr=0.0012)

@@ -316,7 +316,10 @@ class TradeRepository:
         *,
         broker_position_id: str,
         exit_price: float | None,
-        realized_pnl: float,
+        #: None means "this closed and nobody could price it". It is
+        #: stored as NULL rather than 0.0 so a gap stays a visible gap
+        #: instead of looking like a scratch trade (project rule 6).
+        realized_pnl: float | None,
         exit_reason: str,
         closed_at: str | None = None,
         r_multiple: float | None = None,

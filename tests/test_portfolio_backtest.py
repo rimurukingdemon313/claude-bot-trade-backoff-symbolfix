@@ -361,3 +361,39 @@ def test_management_uses_the_live_planner_rather_than_its_own_rules():
     assert "plan_actions(" in source
     assert "enable_breakeven" not in source, "the backtest must not re-decide management"
     assert "breakeven_at_r" not in source
+
+
+def test_management_can_be_changed_without_a_code_deploy(monkeypatch):
+    """"Earned by testing" needs testing to be possible.
+
+    Partials and trailing are off because the project says they must be
+    earned rather than switched on for sounding sophisticated. That rule
+    only means something if an operator can actually run the experiment —
+    on paper, for a fortnight, and switch back — without shipping code.
+    The defaults do not move.
+    """
+
+    from bot.config import load_config
+
+    default = load_config({}).execution
+    assert default.enable_breakeven is True
+    assert default.enable_structure_exit is True
+    assert default.enable_partial_tp is False
+    assert default.enable_trailing is False
+
+    monkeypatch.setenv("EXEC_ENABLE_PARTIAL_TP", "true")
+    monkeypatch.setenv("EXEC_PARTIAL_TP_AT_R", "1.25")
+    monkeypatch.setenv("EXEC_ENABLE_TRAILING", "true")
+    tuned = load_config({}).execution
+    assert tuned.enable_partial_tp is True
+    assert tuned.partial_tp_at_r == pytest.approx(1.25)
+    assert tuned.enable_trailing is True
+
+    # A garbage value falls back to the default rather than disabling a
+    # guard — the same asymmetry the rest of the config uses.
+    monkeypatch.setenv("EXEC_PARTIAL_TP_AT_R", "not-a-number")
+    assert load_config({}).execution.partial_tp_at_r == pytest.approx(1.5)
+
+    # And the execution GUARDS are untouched by any of this.
+    assert load_config({}).execution.max_spread_atr_fraction == pytest.approx(0.12)
+    assert load_config({}).execution.order_verify_attempts == 5

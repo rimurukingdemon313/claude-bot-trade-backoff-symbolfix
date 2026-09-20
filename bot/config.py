@@ -682,6 +682,28 @@ def load_config(env: Mapping[str, str] | None = None) -> TradingConfig:
         ),
         broker=broker,
         risk=risk,
+        # Position management is the one area the project says must be
+        # EARNED by testing rather than switched on because it sounds
+        # sophisticated. So these are env-controllable: an operator can
+        # run partials or trailing on paper for a fortnight and turn them
+        # off again without a code deploy, which is what "earned by
+        # testing" needs in order to be a real option rather than advice.
+        # The defaults are unchanged.
+        execution=ExecutionConfig(
+            enable_breakeven=_env_bool("EXEC_ENABLE_BREAKEVEN", True),
+            enable_partial_tp=_env_bool("EXEC_ENABLE_PARTIAL_TP", False),
+            enable_trailing=_env_bool("EXEC_ENABLE_TRAILING", False),
+            enable_structure_exit=_env_bool("EXEC_ENABLE_STRUCTURE_EXIT", True),
+            breakeven_at_r=_env_float("EXEC_BREAKEVEN_AT_R", 1.0, low=0.2, high=5.0),
+            partial_tp_at_r=_env_float("EXEC_PARTIAL_TP_AT_R", 1.5, low=0.3, high=10.0),
+            partial_tp_fraction=_env_float(
+                "EXEC_PARTIAL_TP_FRACTION", 0.5, low=0.1, high=0.9
+            ),
+            trail_after_r=_env_float("EXEC_TRAIL_AFTER_R", 2.0, low=0.5, high=10.0),
+            max_position_hours=_env_float(
+                "EXEC_MAX_POSITION_HOURS", 48.0, low=1.0, high=720.0
+            ),
+        ),
         mtf=mtf,
         reward=reward,
         ai=ai,

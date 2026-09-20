@@ -508,3 +508,103 @@ def test_the_projection_penalty_is_not_a_structural_veto_in_disguise(config, can
     assert measured_score.tradeable
     assert projected_score.tradeable
     assert not any("gate:" in note for note in projected_score.notes)
+
+
+# -- absence must never outscore a measurement ----------------------------
+
+
+def test_no_component_rewards_missing_information(config, candidate):
+    """The inversion `_location_component` had, swept across all eight.
+
+    It returned 0.5 for a missing dealing range, so a setup MEASURED to
+    be in a bad location scored below one where the location was unknown
+    — the scorer preferred ignorance to a bad reading. That is worth
+    checking everywhere rather than once, because it is invisible until
+    the data gets worse and then it is systematic.
+    """
+
+    from bot.scoring.scorer import (
+        _context_component,
+        _displacement_component,
+        _entry_zone_component,
+        _location_component,
+        _risk_reward_component,
+        _trigger_component,
+    )
+
+    stripped = dataclasses.replace(
+        candidate,
+        sweep=None,
+        structure_event=None,
+        displacement=None,
+        point_of_interest=None,
+        dealing_range=None,
+        setup_type="SOMETHING_THIS_BUILD_DOES_NOT_KNOW",
+    )
+
+    # Every component that can be handed nothing scores at or below the
+    # weakest real reading it could ever produce.
+    assert _trigger_component(stripped)[0] == 0.0
+    assert _context_component(stripped)[0] == 0.0
+    assert _entry_zone_component(stripped)[0] == 0.0
+    assert _location_component(stripped)[0] == 0.0
+    assert _risk_reward_component(
+        dataclasses.replace(stripped, risk_reward=0.1), config.risk.min_risk_reward
+    )[0] == 0.0
+
+
+def test_the_no_displacement_score_sits_below_every_real_displacement(config):
+    """`_displacement_component` returns 0.2 for absence, and that is only
+    safe because the detector cannot emit anything weaker.
+
+    At the exact thresholds it requires — `displacement_atr_multiple` of
+    ATR and `displacement_body_ratio` of body — the quality formula floors
+    at 0.275. The margin is 0.075 and it is undocumented, so retuning
+    either threshold or any weight in that formula could silently invert
+    this component the way location was inverted.
+    """
+
+    smc = config.smc
+    floor = (
+        0.45 * min(smc.displacement_atr_multiple / (smc.displacement_atr_multiple * 2.0), 1.0)
+        + 0.35 * 0.0
+        + 0.05
+    )
+    assert floor == pytest.approx(0.275, abs=1e-9)
+
+    from bot.scoring.scorer import _displacement_component
+
+    absent = _displacement_component(
+        dataclasses.replace(_stub_candidate(config), displacement=None)
+    )[0]
+    assert absent < floor, (
+        f"absence scores {absent} while the weakest real displacement scores "
+        f"{floor} — absence must not outscore a measurement"
+    )
+
+
+def _stub_candidate(config):
+    """A candidate with only the fields the component under test reads."""
+
+    import bot.smc.engine as engine_module
+
+    return engine_module.SetupCandidate(
+        symbol="EURUSD", direction="BUY", entry=1.1, stop_loss=1.09, take_profit=1.12,
+        risk_reward=2.0, stop_distance=0.01, atr=0.001,
+        session=_any_session(), regime=_any_regime(),
+        h1_bias="bullish", m15_bias="bullish", alignment="aligned",
+        sweep=None, structure_event=None, displacement=None,
+        point_of_interest=None, dealing_range=None, liquidity_target=None,
+    )
+
+
+def _any_session():
+    from bot.smc.sessions import SessionState
+
+    return SessionState("LONDON", True, 0.9, False, "test")
+
+
+def _any_regime():
+    from bot.smc.regime import Regime
+
+    return Regime("trending", "normal", 0.001, 0.5, 0.6, True, "test regime")

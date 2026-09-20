@@ -433,3 +433,81 @@ def test_a_short_banks_its_partial_at_the_mirror_level():
     # And its break-even stop moved DOWN, not up.
     assert trade.stop_loss < trade.entry
     assert trade.stop_loss < trade.initial_stop
+
+
+# -- the property every number in this session rests on --------------------
+
+
+def test_the_portfolio_run_is_identical_when_the_future_is_deleted():
+    """Rule 4, applied to the harness rather than to the detectors.
+
+    `test_analysis_on_bar_i_cannot_see_bar_i_plus_one` proves the
+    DETECTORS are honest. It says nothing about the runner I wrote today,
+    which now carries every measured number in this session — the control
+    against a coin flip, the stop-width table, the win-rate table. If this
+    runner peeked, all of them would be fiction.
+
+    So: run the whole thing on a series, then run it again on a series
+    truncated before the end, and every trade opened inside the shorter
+    window must be identical. A single lookahead anywhere — the bisect,
+    the H1 filter, the exit loop, the ranking — changes one of them.
+    """
+
+    config = load_test_config()
+
+    def run(bars: int):
+        engine = PortfolioBacktester(config, starting_balance=5_000.0)
+        for index in range(3):
+            m15 = _walk(900, seed=700 + index)[:bars]
+            spec = dataclasses.replace(
+                DEFAULT_SPEC, symbol=f"LOOK{index}", broker_name=f"LOOK{index}",
+                tradable_instrument_id=index + 1,
+            )
+            engine.add(spec, m15, _h1(m15))
+        return engine.run(warmup=250, step=4)
+
+    full = run(900)
+    truncated = run(700)
+
+    # Trades opened before the truncation point must match exactly.
+    shortened = {(t.symbol, t.entry_time.isoformat()): t for t in truncated.trades}
+    compared = 0
+    for trade in full.trades:
+        key = (trade.symbol, trade.entry_time.isoformat())
+        if key not in shortened:
+            continue
+        other = shortened[key]
+        compared += 1
+        assert trade.direction == other.direction
+        assert trade.entry == pytest.approx(other.entry)
+        assert trade.initial_stop == pytest.approx(other.initial_stop)
+        assert trade.take_profit == pytest.approx(other.take_profit)
+        assert trade.lots == pytest.approx(other.lots)
+        assert trade.setup_score == pytest.approx(other.setup_score)
+
+    assert compared > 0, "the two runs shared no trades — the test proved nothing"
+
+
+def test_a_symbol_never_proposes_from_a_candle_that_had_not_closed():
+    """The bisect is the single point where the future could leak in.
+
+    Every symbol shares one clock here, and each is walked by its own
+    index into it. An off-by-one in `_index_at` would hand the engine one
+    unclosed candle on every symbol at once, which is the kind of bug that
+    improves every backtest and explains nothing.
+    """
+
+    from datetime import timedelta
+
+    m15 = _walk(500, seed=42)
+    for probe in (250, 300, 499):
+        cutoff = m15[probe].close_time
+        assert _index_at(m15, cutoff) == probe
+
+        # One second before this candle closed resolves to the previous.
+        assert _index_at(m15, cutoff - timedelta(seconds=1)) == probe - 1
+        # And one second after still resolves to this one, never the next.
+        assert _index_at(m15, cutoff + timedelta(seconds=1)) == probe
+
+    # Before the first close there is nothing to see.
+    assert _index_at(m15, m15[0].close_time - timedelta(minutes=1)) is None

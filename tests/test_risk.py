@@ -543,3 +543,95 @@ def test_risk_never_rises_as_the_account_worsens_across_every_combination(config
                         f"risk escaped the hard cap: {risk} > {config.risk.max_risk_pct}"
                     )
     assert checked == 192, "the sweep stopped covering what it claims to cover"
+
+
+def test_a_position_whose_risk_is_unknown_blocks_a_new_order(config, candidate):
+    """Zero was the most dangerous number available here.
+
+    `Orchestrator._implied_risk` returned 0.0 for an orphan position with
+    no stop loss at the broker. But a position with no stop is not a
+    zero-risk position — it is the one position in the book whose loss
+    has no floor. Both the portfolio cap and the correlation cap are
+    sums of these numbers, so calling it zero made room for MORE new
+    risk exactly when the account was least measurable. That is risk
+    increased by adverse account state, which rule 2 forbids.
+
+    It is now None, and None stands the engine aside (rule 7).
+    """
+
+    account = make_account(
+        open_positions=[{"symbol": "GBPUSD", "direction": "BUY", "risk_amount": None}]
+    )
+    decision = RiskEngine(config).evaluate(
+        candidate=candidate, tier="A", account=account, spec=DEFAULT_SPEC, now=SETUP_END
+    )
+
+    assert decision.approved is False
+    joined = " ".join(decision.reasons)
+    assert "could not be established" in joined
+    assert "GBPUSD" in joined, "the refusal has to name the position an operator must go look at"
+
+
+def test_a_priced_position_of_the_same_size_does_not_block(config, candidate):
+    """The control: it is the UNKNOWN that stands the engine aside.
+
+    Without this, the test above would also pass if the engine simply
+    refused whenever anything was open.
+    """
+
+    account = make_account(
+        open_positions=[{"symbol": "GBPUSD", "direction": "BUY", "risk_amount": 25.0}]
+    )
+    decision = RiskEngine(config).evaluate(
+        candidate=candidate, tier="A", account=account, spec=DEFAULT_SPEC, now=SETUP_END
+    )
+
+    assert decision.approved is True, decision.reasons
+
+
+def test_an_orphan_with_no_stop_is_reported_as_unknown_risk_not_zero(orchestrator, broker):
+    """The source of the None, pinned at the orchestrator.
+
+    A position the database has no plan for AND that carries no stop at
+    the broker cannot be priced from anything. The row must say so.
+    """
+
+    broker.add_position(
+        symbol="EURUSD",
+        direction="BUY",
+        quantity=0.5,
+        entry=1.1000,
+        stop_loss=None,
+        take_profit=None,
+    )
+    positions = broker.positions()
+    account = broker.account_state()
+
+    state = orchestrator._compose_account_state(account, positions, now=SETUP_END)
+
+    rows = [row for row in state.open_positions if row["symbol"] == "EURUSD"]
+    assert rows, "the orphan must appear in the book at all"
+    assert rows[0]["risk_amount"] is None, "a stopless position is unknown risk, never zero"
+
+
+def test_the_exposure_report_counts_what_it_could_not_price():
+    """Every figure in the report is a sum, so an omission is a lie.
+
+    The engine stands aside before exposure is computed, so this is
+    defence in depth rather than a live path — but a total that quietly
+    drops a position must still say it dropped one.
+    """
+
+    report = analyse_exposure(
+        [
+            {"symbol": "EURUSD", "direction": "BUY", "risk_amount": 50.0},
+            {"symbol": "USDJPY", "direction": "BUY", "risk_amount": None},
+        ],
+        {"symbol": "GBPUSD", "direction": "BUY", "risk_amount": 25.0},
+    )
+
+    assert report.unpriced_positions == 1
+    assert report.total_open_risk == pytest.approx(75.0), (
+        "the unknown is left out of the sum rather than entered as a zero"
+    )
+    assert report.as_dict()["unpricedPositions"] == 1

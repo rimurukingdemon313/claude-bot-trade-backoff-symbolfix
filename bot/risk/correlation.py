@@ -71,6 +71,12 @@ class ExposureReport:
     correlated_risk: float
     worst_pair: tuple[str, float] | None
     total_open_risk: float
+    #: Open positions whose risk could not be established. Every figure
+    #: above is a SUM, so a non-zero count here means all of them are
+    #: understatements. The risk engine refuses new orders before it ever
+    #: gets here, but a total that silently omits a position must still
+    #: say so rather than read as complete (project rule 6).
+    unpriced_positions: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -78,6 +84,7 @@ class ExposureReport:
             "correlatedRisk": round(self.correlated_risk, 2),
             "worstPair": [self.worst_pair[0], round(self.worst_pair[1], 3)] if self.worst_pair else None,
             "totalOpenRisk": round(self.total_open_risk, 2),
+            "unpricedPositions": self.unpriced_positions,
         }
 
 
@@ -94,14 +101,26 @@ def analyse_exposure(
     actually about.
     """
 
-    entries = [
-        {
-            "symbol": str(position.get("symbol", "")),
-            "direction": str(position.get("direction", "BUY")).upper(),
-            "risk": float(position.get("risk_amount") or position.get("riskAmount") or 0.0),
-        }
-        for position in open_positions
-    ]
+    def _risk_of(position: Mapping[str, Any]) -> float | None:
+        for key in ("risk_amount", "riskAmount"):
+            if key in position and position[key] is not None:
+                return float(position[key])
+        return None
+
+    entries = []
+    unpriced = 0
+    for position in open_positions:
+        risk = _risk_of(position)
+        if risk is None:
+            unpriced += 1
+            continue
+        entries.append(
+            {
+                "symbol": str(position.get("symbol", "")),
+                "direction": str(position.get("direction", "BUY")).upper(),
+                "risk": risk,
+            }
+        )
 
     per_currency: dict[str, float] = {}
     for entry in entries:
@@ -124,7 +143,7 @@ def analyse_exposure(
             ]
             if pairs:
                 worst = max(pairs, key=lambda item: item[1])
-        return ExposureReport(per_currency, correlated, worst, total_open_risk)
+        return ExposureReport(per_currency, correlated, worst, total_open_risk, unpriced)
 
     candidate_symbol = str(candidate.get("symbol", ""))
     candidate_direction = str(candidate.get("direction", "BUY")).upper()
@@ -148,5 +167,6 @@ def analyse_exposure(
         per_currency=per_currency,
         correlated_risk=correlated,
         worst_pair=worst,
+        unpriced_positions=unpriced,
         total_open_risk=total_open_risk + candidate_risk,
     )

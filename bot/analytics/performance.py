@@ -51,6 +51,12 @@ class Performance:
     weekly_pnl: float
     monthly_pnl: float
     sample: str
+    #: Closed trades left OUT of every figure above because the broker
+    #: never reported a result for them. Dropping them is right — a
+    #: fabricated zero would move the win rate and the drawdown — but
+    #: dropping them SILENTLY makes `trades` disagree with the trade
+    #: list on the same page, which reads as a bug rather than a gap.
+    unpriced: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         def rounded(value: float | None, places: int = 2) -> float | None:
@@ -76,6 +82,7 @@ class Performance:
             "weeklyPnl": rounded(self.weekly_pnl),
             "monthlyPnl": rounded(self.monthly_pnl),
             "sample": self.sample,
+            "unpriced": self.unpriced,
         }
 
 
@@ -160,6 +167,7 @@ def compute_performance(
         weekly_pnl=window_sum(7),
         monthly_pnl=window_sum(30),
         sample=sample,
+        unpriced=len(closed_trades) - count,
     )
 
 

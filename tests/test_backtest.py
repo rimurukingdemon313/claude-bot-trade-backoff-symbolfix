@@ -216,11 +216,52 @@ def test_monte_carlo_describes_dispersion_and_disclaims_prediction():
     result = monte_carlo(pnls, runs=400, starting_balance=10_000.0)
     assert result is not None
     payload = result.as_dict()
-    assert payload["p5Return"] <= payload["medianReturn"] <= payload["p95Return"]
     assert payload["worstMaxDrawdown"] >= payload["medianMaxDrawdown"]
     assert payload["longestLosingStreak"] >= 1
     assert 0.0 <= payload["riskOfRuin"] <= 1.0
-    assert "not a prediction" in payload["disclaimer"]
+    assert "a prediction of future performance" in payload["disclaimer"]
+
+
+def test_reordering_cannot_produce_a_range_for_the_total():
+    """The old p5/median/p95 return trio was one constant under three names.
+
+    Shuffling a fixed multiset of trades cannot change their sum, so
+    every "percentile" of the reordered return was the same figure. The
+    report printed it three times and a reader could only conclude there
+    was a 5th-percentile outcome being measured. There was not. The total
+    is now reported once, as the invariant it is.
+
+    This test asserts the arithmetic that made the old fields impossible
+    rather than the absence of the fields, so it stays meaningful if the
+    shape changes again.
+    """
+
+    pnls = [120.0] * 25 + [-60.0] * 35
+    result = monte_carlo(pnls, runs=400, starting_balance=10_000.0)
+    assert result is not None
+    payload = result.as_dict()
+
+    assert payload["totalReturn"] == pytest.approx(sum(pnls))
+    assert "p5Return" not in payload and "medianReturn" not in payload
+
+
+def test_the_bootstrap_is_the_part_that_can_speak_about_the_total():
+    """And the honest answer to the question the fake percentiles posed.
+
+    Drawing the same number of trades WITH replacement does vary the
+    total, so its spread is real. On a sample this small the interval is
+    wide, which is the finding, not a defect.
+    """
+
+    pnls = [120.0] * 25 + [-60.0] * 35
+    result = monte_carlo(pnls, runs=2000, starting_balance=10_000.0)
+    assert result is not None
+    payload = result.as_dict()
+
+    assert payload["bootstrapP5Return"] < payload["bootstrapMedianReturn"]
+    assert payload["bootstrapMedianReturn"] < payload["bootstrapP95Return"]
+    # The sample's own total sits inside the interval its resamples span.
+    assert payload["bootstrapP5Return"] <= payload["totalReturn"] <= payload["bootstrapP95Return"]
 
 
 def test_monte_carlo_is_reproducible_for_a_given_seed():

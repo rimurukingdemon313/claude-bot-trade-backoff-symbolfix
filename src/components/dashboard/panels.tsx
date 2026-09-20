@@ -613,12 +613,22 @@ export function PerformancePanel({ performance }: { performance: Envelope<Perfor
         <>
           {data.trades === 0 ? (
             <Empty>
-              No closed trades yet. Statistics stay empty rather than being computed from nothing.
+              {data.unpriced
+                ? `No closed trade has a result yet — ${data.unpriced} closed at the broker without one. Statistics stay empty rather than being computed from zeros.`
+                : "No closed trades yet. Statistics stay empty rather than being computed from nothing."}
             </Empty>
           ) : (
             <>
               <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-                <Stat label="Trades" value={data.trades} hint={`${data.wins}W / ${data.losses}L`} />
+                <Stat
+                  label="Trades"
+                  value={data.trades}
+                  hint={
+                    data.unpriced
+                      ? `${data.wins}W / ${data.losses}L · ${data.unpriced} unpriced, excluded`
+                      : `${data.wins}W / ${data.losses}L`
+                  }
+                />
                 <Stat label="Win rate" value={fmt.percent(data.winRate)} />
                 <Stat
                   label="Profit factor"

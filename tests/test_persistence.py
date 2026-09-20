@@ -399,3 +399,45 @@ def test_column_existence_is_reported_correctly(tmp_path):
         assert database._column_exists(cursor, "equity_snapshots", "account_id") is True
         assert database._column_exists(cursor, "equity_snapshots", "not_a_column") is False
     database.close()
+
+
+def test_statistics_say_how_many_trades_they_had_to_leave_out():
+    """Dropping an unpriced trade is right; dropping it silently is not.
+
+    `compute_performance` correctly refuses to count a trade the broker
+    never priced — a fabricated zero would move the win rate, the
+    expectancy and the drawdown. But it dropped them without a word, so
+    `trades` disagreed with the trade list on the same page and the gap
+    read as a bug rather than as the missing information it is.
+    """
+
+    from bot.analytics.performance import compute_performance
+
+    closed = [
+        {"realized_pnl": 100.0, "closed_at": "2026-01-01T10:00:00+00:00"},
+        {"realized_pnl": -50.0, "closed_at": "2026-01-01T11:00:00+00:00"},
+        {"realized_pnl": None, "closed_at": "2026-01-01T12:00:00+00:00"},
+    ]
+
+    stats = compute_performance(closed).as_dict()
+
+    assert stats["trades"] == 2, "the unpriced trade is not counted as a result"
+    assert stats["unpriced"] == 1, "but the page is told one is missing"
+    assert stats["winRate"] == pytest.approx(0.5), (
+        "and the win rate is not diluted by a trade nobody measured"
+    )
+    assert stats["totalPnl"] == pytest.approx(50.0)
+
+
+def test_statistics_with_nothing_but_unpriced_trades_do_not_claim_emptiness():
+    """`trades: 0` with closed trades on the books is a misleading pair."""
+
+    from bot.analytics.performance import compute_performance
+
+    stats = compute_performance(
+        [{"realized_pnl": None, "closed_at": "2026-01-01T12:00:00+00:00"}]
+    ).as_dict()
+
+    assert stats["trades"] == 0
+    assert stats["unpriced"] == 1
+    assert stats["winRate"] is None, "no data is None, never a zero win rate"

@@ -218,3 +218,146 @@ def test_a_symbol_is_never_judged_on_a_candle_that_had_not_closed():
 def test_an_empty_portfolio_refuses_rather_than_reporting_nothing():
     with pytest.raises(ValueError, match="no symbols"):
         PortfolioBacktester(load_test_config()).run()
+
+
+# -- position management, simulated by the live rules ---------------------
+
+
+def _bar(open_, high, low, close):
+    return series_from_path([(open_, high, low, close)], timeframe="M15", end=SETUP_END)[0]
+
+
+def _long(config, **overrides):
+    defaults = dict(
+        symbol="EURUSD", direction="BUY", entry_index=0, entry_time=SETUP_END,
+        entry=1.1000, stop_loss=1.0980, take_profit=1.1060, lots=1.0,
+        risk_amount=100.0, setup_grade="A", setup_score=70.0,
+    )
+    defaults.update(overrides)
+    return SimulatedTrade(**defaults)
+
+
+def test_break_even_cannot_rescue_a_trade_the_same_bar_stopped_out():
+    """Management runs on a timer live, not intrabar.
+
+    A simulator that moved the stop first would let a bar which touched
+    1R and then ran to the original stop come out flat — turning a loss
+    into a scratch out of nothing, on the one bar where the sequence is
+    unknowable.
+    """
+
+    config = load_test_config()
+    engine = Backtester(config, DEFAULT_SPEC, costs=BacktestCosts(slippage_points=0.0, commission_per_lot=0.0))
+    trade = _long(config)
+    assert config.execution.enable_breakeven
+
+    # Reaches 1R (1.1020) AND the original stop (1.0980) in one bar.
+    assert engine._resolve_exit(trade, _bar(1.1000, 1.1030, 1.0975, 1.0985), index=1)
+    assert trade.exit_reason == "STOP"
+    assert (trade.pnl or 0) < 0, "the stop must be honoured, not the break-even"
+
+
+def test_break_even_protects_the_trade_from_the_next_bar():
+    config = load_test_config()
+    engine = Backtester(config, DEFAULT_SPEC, costs=BacktestCosts(slippage_points=0.0, commission_per_lot=0.0))
+    trade = _long(config)
+    original = trade.stop_loss
+
+    # Bar 1 reaches 1R without touching either level.
+    assert not engine._resolve_exit(trade, _bar(1.1000, 1.1030, 1.0995, 1.1025), index=1)
+    assert trade.stop_loss > original, "1R should have moved the stop up"
+    assert trade.stop_loss >= trade.entry
+    assert any("break-even" in note for note in trade.managed)
+
+    # Bar 2 falls back through entry: closed at break-even, not at -1R.
+    assert engine._resolve_exit(trade, _bar(1.1025, 1.1028, 1.0900, 1.0950), index=2)
+    assert (trade.pnl or 0) > 0, "a break-even stop books a touch above entry"
+
+
+def test_r_is_measured_against_the_risk_the_trade_was_opened_with():
+    """Once the stop has moved, `stop_loss` is no longer the risk.
+
+    Measuring R against the CURRENT stop would report a break-even trade
+    as infinite R, and a trailing one as nonsense.
+    """
+
+    config = load_test_config()
+    engine = Backtester(config, DEFAULT_SPEC, costs=BacktestCosts(slippage_points=0.0, commission_per_lot=0.0))
+    trade = _long(config)
+    engine._resolve_exit(trade, _bar(1.1000, 1.1030, 1.0995, 1.1025), index=1)
+    engine._resolve_exit(trade, _bar(1.1025, 1.1065, 1.1020, 1.1060), index=2)
+
+    assert trade.initial_stop == pytest.approx(1.0980)
+    assert trade.exit_reason == "TARGET"
+    assert trade.r_multiple == pytest.approx((trade.pnl or 0) / trade.risk_amount)
+    assert 1.0 < (trade.r_multiple or 0) < 10.0, "R must stay a sane multiple"
+
+
+def test_a_partial_banks_profit_and_leaves_the_rest_running():
+    """The lever that converts a would-be scratch into a win.
+
+    A trade that reaches 1.5R and then reverses to break-even books
+    nothing today. With half off at 1.5R it books 0.75R — and that is a
+    genuine win-rate improvement rather than a cosmetic one, because the
+    money was actually taken at a level price actually reached.
+    """
+
+    config = dataclasses.replace(
+        load_test_config(),
+        execution=dataclasses.replace(load_test_config().execution, enable_partial_tp=True),
+    )
+    engine = Backtester(config, DEFAULT_SPEC, costs=BacktestCosts(slippage_points=0.0, commission_per_lot=0.0))
+    trade = _long(config)
+
+    # 1.5R for this trade is 1.1030. Reach it without hitting the target.
+    assert not engine._resolve_exit(trade, _bar(1.1000, 1.1035, 1.0995, 1.1032), index=1)
+    assert trade.partial_taken
+    assert trade.open_lots == pytest.approx(trade.lots * config.execution.partial_tp_fraction)
+    assert trade.banked_pnl > 0
+
+    # Now it reverses to the break-even stop, which 1R also set.
+    assert engine._resolve_exit(trade, _bar(1.1032, 1.1033, 1.0900, 1.0950), index=2)
+    assert (trade.pnl or 0) > 0, "banked profit must survive the reversal"
+    # The total is the banked half plus whatever the runner did, and
+    # nothing else — no double counting of the closed lots.
+    runner_move = (trade.exit_price or 0) - trade.entry
+    runner = runner_move * DEFAULT_SPEC.contract_size * (trade.lots * 0.5)
+    assert trade.pnl == pytest.approx(trade.banked_pnl + runner, rel=1e-6)
+
+
+def test_a_partial_is_filled_at_its_trigger_not_at_the_bar_extreme():
+    """A poll sees the level, not the wick's best tick."""
+
+    config = dataclasses.replace(
+        load_test_config(),
+        execution=dataclasses.replace(load_test_config().execution, enable_partial_tp=True),
+    )
+    engine = Backtester(config, DEFAULT_SPEC, costs=BacktestCosts(slippage_points=0.0, commission_per_lot=0.0))
+    trade = _long(config)
+
+    # A wick well beyond 1.5R (1.1030) but short of the target (1.1060),
+    # so the trade is still open and the partial is the only thing that
+    # fires on this bar.
+    engine._resolve_exit(trade, _bar(1.1000, 1.1050, 1.0995, 1.1032), index=1)
+    assert trade.partial_taken
+
+    risk = trade.entry - trade.initial_stop
+    at_trigger = risk * config.execution.partial_tp_at_r * DEFAULT_SPEC.contract_size * (
+        trade.lots * config.execution.partial_tp_fraction
+    )
+    assert trade.banked_pnl == pytest.approx(at_trigger, rel=1e-6), (
+        "a partial filled at the wick would invent profit the poll never saw"
+    )
+
+
+def test_management_uses_the_live_planner_rather_than_its_own_rules():
+    """A reimplementation would drift from live the first time either moved."""
+
+    import inspect
+
+    from bot.backtest import engine as module
+
+    source = inspect.getsource(module.Backtester._manage)
+    assert "plan_actions(" in source
+    assert "enable_breakeven" not in source, "the backtest must not re-decide management"
+    assert "breakeven_at_r" not in source

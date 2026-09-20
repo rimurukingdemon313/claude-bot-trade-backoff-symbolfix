@@ -264,6 +264,32 @@ def test_the_bootstrap_is_the_part_that_can_speak_about_the_total():
     assert payload["bootstrapP5Return"] <= payload["totalReturn"] <= payload["bootstrapP95Return"]
 
 
+def test_the_bootstrap_says_how_often_the_result_could_have_been_luck():
+    """The number a reader actually wants out of a bootstrap.
+
+    A clearly profitable sample of 60 trades still finishes negative in
+    a meaningful share of its own resamples. Reporting that share is the
+    difference between "this made $900" and "this made $900, and a
+    sample this small leaves better than a 1-in-10 chance that came from
+    luck" — which is the claim the evidence supports (rule 13).
+    """
+
+    winning = monte_carlo([120.0] * 25 + [-60.0] * 35, runs=2000)
+    losing = monte_carlo([120.0] * 15 + [-60.0] * 45, runs=2000)
+    assert winning is not None and losing is not None
+
+    assert winning.as_dict()["totalReturn"] > 0
+    assert losing.as_dict()["totalReturn"] < 0
+
+    winning_share = winning.as_dict()["bootstrapPositiveShare"]
+    losing_share = losing.as_dict()["bootstrapPositiveShare"]
+
+    assert 0.0 <= losing_share < winning_share <= 1.0
+    # And a profitable sample this small is NOT significant: short of the
+    # 0.95 the convention asks for, which is the point of reporting it.
+    assert winning_share < 0.95
+
+
 def test_monte_carlo_is_reproducible_for_a_given_seed():
     pnls = [50.0] * 20 + [-30.0] * 20
     first = monte_carlo(pnls, runs=200, seed=42)

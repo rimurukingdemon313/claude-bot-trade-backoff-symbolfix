@@ -53,6 +53,11 @@ class MonteCarloResult:
     bootstrap_p5_return: float
     bootstrap_median_return: float
     bootstrap_p95_return: float
+    #: Share of resamples that finished positive. This is the number a
+    #: reader actually wants from a bootstrap: a total of -$400 whose
+    #: interval straddles zero is a sample too small to tell a small
+    #: negative edge from no edge, and saying so is the finding.
+    bootstrap_positive_share: float
     median_max_drawdown: float
     worst_max_drawdown: float
     percentile_95_drawdown: float
@@ -68,6 +73,7 @@ class MonteCarloResult:
             "bootstrapP5Return": round(self.bootstrap_p5_return, 2),
             "bootstrapMedianReturn": round(self.bootstrap_median_return, 2),
             "bootstrapP95Return": round(self.bootstrap_p95_return, 2),
+            "bootstrapPositiveShare": round(self.bootstrap_positive_share, 4),
             "medianMaxDrawdown": round(self.median_max_drawdown, 2),
             "p95MaxDrawdown": round(self.percentile_95_drawdown, 2),
             "worstMaxDrawdown": round(self.worst_max_drawdown, 2),
@@ -150,6 +156,9 @@ def monte_carlo(
         bootstrap_p5_return=_percentile(bootstrap_totals, 0.05),
         bootstrap_median_return=_percentile(bootstrap_totals, 0.5),
         bootstrap_p95_return=_percentile(bootstrap_totals, 0.95),
+        bootstrap_positive_share=(
+            len([total for total in bootstrap_totals if total > 0]) / len(bootstrap_totals)
+        ),
         median_max_drawdown=_percentile(drawdowns, 0.5),
         worst_max_drawdown=max(drawdowns),
         percentile_95_drawdown=_percentile(drawdowns, 0.95),

@@ -168,8 +168,17 @@ separate question** and this repository does not claim to have answered it.
   same trades answers "how bad could the drawdown have been?" and says
   nothing about the total, because every shuffle ends on the same figure.
   BOOTSTRAPPING (drawing the same count with replacement) answers "how wide
-  is the total, given a sample this small?". Both carry the disclaimer that
-  neither is a forecast.
+  is the total, given a sample this small?", and reports the share of
+  resamples that finished positive — the direct answer to "could this have
+  been luck?". Both carry the disclaimer that neither is a forecast.
+
+  What this changed the day it was fixed: the portfolio run's total of
+  -$415.81 over 275 trades had been reported as three identical
+  percentiles, which reads as certainty. The bootstrap puts the 5%-95%
+  interval at [-$941.82, +$132.39] with 10.4% of resamples finishing
+  positive. The loss is real on this sample AND the sample is too small to
+  rule out luck at the 5% level. Both halves of that sentence are the
+  finding; the old output could state neither.
 
 Running these against real broker history is the necessary next step before
 any claim about edge. The synthetic fixtures prove the machinery is correct;

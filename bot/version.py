@@ -13,7 +13,7 @@ import hashlib
 import json
 from typing import Any
 
-SYSTEM_VERSION = "6.11.0"
+SYSTEM_VERSION = "6.12.0"
 SMC_ENGINE_VERSION = "smc-4.2.0"
 SCORING_VERSION = "score-3.3.0"
 RISK_ENGINE_VERSION = "risk-3.2.0"

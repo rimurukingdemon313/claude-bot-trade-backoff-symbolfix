@@ -189,7 +189,11 @@ export type Scan = {
   unavailable?: { symbol: string; reason: string; suggestions: string[] }[];
   account: Record<string, unknown>;
   symbols: ScanSymbol[];
-  executed: Record<string, any> | null;
+  /** The execution ATTEMPT on the best candidate: whether an order went
+   *  out and, when it did not, the guard that stopped it. Shipped by the
+   *  API since it existed and rendered nowhere, so a candidate that was
+   *  refused at the last metre looked identical to one nobody tried. */
+  executed: { ok?: boolean; status?: string; reason?: string | null } | null;
   demo: Record<string, any> | null;
 };
 

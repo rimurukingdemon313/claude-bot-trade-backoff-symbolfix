@@ -279,6 +279,23 @@ export function SetupPanel({ scan }: { scan: Envelope<Scan> | undefined }) {
     >
       {guard(scan, (data) => (
         <>
+          {data.executed && !data.executed.ok && (
+            <div className="mb-3 rounded-lg border border-rose-900 bg-rose-950/40 p-2 text-xs text-rose-300">
+              <p className="font-semibold">
+                An order was attempted and did not go out
+                {data.executed.status ? ` — ${data.executed.status}` : ""}
+              </p>
+              {data.executed.reason && <p className="mt-1 opacity-90">{data.executed.reason}</p>}
+              <p className="mt-1 opacity-70">
+                The setup passed every gate; an execution guard stopped it at submission.
+              </p>
+            </div>
+          )}
+          {data.executed && data.executed.ok && (
+            <div className="mb-3 rounded-lg border border-emerald-900 bg-emerald-950/40 p-2 text-xs text-emerald-300">
+              An order went out on this scan. See History for the fill.
+            </div>
+          )}
           {data.skippedReason && (
             <p className="mb-3 rounded-lg border border-amber-900 bg-amber-950/40 p-2 text-xs text-amber-300">
               {data.skippedReason}

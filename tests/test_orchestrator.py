@@ -463,3 +463,45 @@ def test_the_dashboard_cannot_open_a_trade(config, orchestrator, repos):
     api = DashboardApi(config, orchestrator, repos)
     surface = {name for name in dir(api) if not name.startswith("_")}
     assert not {"place_order", "open_trade", "submit", "execute"} & surface
+
+
+def test_a_refusal_names_the_gate_that_fired_not_the_tier_threshold(
+    config, orchestrator, broker, repos
+):
+    """A live card read: score 69.1, "minimum B is 56", NO_TRADE.
+
+    Every number on it said the setup should have been taken, and the
+    sentence under it named a threshold the score had cleared by
+    thirteen points. The real refusal was the session gate — the scan
+    ran at OFF_HOURS — and the scorer had recorded exactly that in its
+    notes. The orchestrator threw the note away and wrote its own
+    sentence, which blamed the B tier whatever had actually fired.
+
+    An operator reading that concludes the dashboard is broken. It is
+    the fabricated-value class wearing a reason string: information
+    shaped like a diagnosis, pointing at the wrong thing.
+    """
+
+    import dataclasses
+
+    from bot.scoring.scorer import SetupScorer
+    from bot.smc.engine import SmcEngine
+    from bot.marketdata.provider import MarketDataProvider
+
+    series = MarketDataProvider(broker, config).multi_timeframe(DEFAULT_SPEC, now=SETUP_END)
+    result = SmcEngine(config).analyze("EURUSD", series, now=SETUP_END)
+    assert result.candidate is not None, result.rejection
+
+    # Same setup, scanned outside a liquid session.
+    off_hours = dataclasses.replace(
+        result.candidate,
+        session=dataclasses.replace(result.candidate.session, name="OFF_HOURS", tradeable=False),
+    )
+    score = SetupScorer(config).score(off_hours)
+
+    assert score.tradeable is False
+    assert score.total > config.scoring.tier_b, (
+        "the setup must CLEAR the tier for this test to be about anything"
+    )
+    assert score.gate is not None
+    assert "session" in score.gate.lower(), score.notes

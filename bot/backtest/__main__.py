@@ -88,13 +88,21 @@ def main(argv: list[str] | None = None) -> int:
     payload: dict = {"symbol": args.symbol, "statistics": result.statistics()}
 
     if args.monte_carlo:
-        simulation = monte_carlo(
-            [trade.pnl or 0.0 for trade in result.closed], starting_balance=args.balance
-        )
+        # `SimulatedTrade.pnl` is Optional, and `or 0.0` turned an
+        # unpriced trade into a scratch inside the dispersion analysis —
+        # which flatters both the drawdown and the streak. Drop them and
+        # say how many were dropped (project rule 6).
+        priced = [trade.pnl for trade in result.closed if trade.pnl is not None]
+        dropped = len(result.closed) - len(priced)
+        simulation = monte_carlo(priced, starting_balance=args.balance)
         payload["monteCarlo"] = (
-            simulation.as_dict()
+            {**simulation.as_dict(), "tradesWithoutAResult": dropped}
             if simulation
-            else {"note": "fewer than 10 closed trades — no dispersion analysis is meaningful"}
+            else {
+                "note": "fewer than 10 priced closed trades — no dispersion analysis "
+                "is meaningful",
+                "tradesWithoutAResult": dropped,
+            }
         )
 
     payload["trades"] = [trade.as_dict() for trade in result.closed[-50:]]

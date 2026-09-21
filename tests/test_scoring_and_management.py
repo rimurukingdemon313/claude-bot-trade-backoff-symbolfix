@@ -235,8 +235,50 @@ def test_trailing_is_off_by_default_and_works_when_enabled(config):
     assert any("trailing" in action.reason for action in on)
 
 
-def test_partial_take_profit_is_off_by_default(config):
+def test_partial_take_profit_is_on_by_default_and_fires_at_the_tested_level(config):
+    """This default MOVED, on evidence, and the move is the assertion.
+
+    It was off, as project rule 12 requires until "evidence justifies
+    them". docs/EXPERIMENT_WIN_RATE.md is that evidence: a selection
+    rule committed before the results were read, one candidate promoted
+    out of ten, and a held-out seed set that chose nothing, on which the
+    win rate went 25.4% -> 44.5% and expectancy -0.248R -> -0.128R.
+
+    The trigger is 0.75R, which is what was tested — not the 1.5R this
+    used to default to and which measured no better than no partial at
+    all.
+    """
+
+    assert config.execution.enable_partial_tp is True
+    assert config.execution.partial_tp_at_r == pytest.approx(0.75)
+
     actions = plan_actions(position=position(), trade=TRADE, price=1.1090, config=config, now=SETUP_END)
+    partial = next(action for action in actions if action.kind == "PARTIAL_CLOSE")
+    assert partial.quantity == pytest.approx(0.05), "half of the position"
+
+
+def test_a_partial_never_fires_before_its_configured_r(config):
+    """The control on the test above: it is the LEVEL that triggers it.
+
+    Without this, "partials are on" would pass even if the trigger were
+    ignored and every position were half-closed on arrival.
+    """
+
+    early = plan_actions(
+        position=position(), trade=TRADE, price=1.1010, config=config, now=SETUP_END
+    )
+    assert not [action for action in early if action.kind == "PARTIAL_CLOSE"]
+
+
+def test_partial_take_profit_can_still_be_turned_off(config):
+    """A default that moved on synthetic evidence must stay reversible."""
+
+    off = dataclasses.replace(
+        config, execution=dataclasses.replace(config.execution, enable_partial_tp=False)
+    )
+    actions = plan_actions(
+        position=position(), trade=TRADE, price=1.1090, config=off, now=SETUP_END
+    )
     assert not [action for action in actions if action.kind == "PARTIAL_CLOSE"]
 
 
@@ -508,3 +550,153 @@ def test_the_projection_penalty_is_not_a_structural_veto_in_disguise(config, can
     assert measured_score.tradeable
     assert projected_score.tradeable
     assert not any("gate:" in note for note in projected_score.notes)
+
+
+# -- absence must never outscore a measurement ----------------------------
+
+
+def test_no_component_rewards_missing_information(config, candidate):
+    """The inversion `_location_component` had, swept across all eight.
+
+    It returned 0.5 for a missing dealing range, so a setup MEASURED to
+    be in a bad location scored below one where the location was unknown
+    — the scorer preferred ignorance to a bad reading. That is worth
+    checking everywhere rather than once, because it is invisible until
+    the data gets worse and then it is systematic.
+    """
+
+    from bot.scoring.scorer import (
+        _context_component,
+        _displacement_component,
+        _entry_zone_component,
+        _location_component,
+        _risk_reward_component,
+        _trigger_component,
+    )
+
+    stripped = dataclasses.replace(
+        candidate,
+        sweep=None,
+        structure_event=None,
+        displacement=None,
+        point_of_interest=None,
+        dealing_range=None,
+        setup_type="SOMETHING_THIS_BUILD_DOES_NOT_KNOW",
+    )
+
+    # Every component that can be handed nothing scores at or below the
+    # weakest real reading it could ever produce.
+    assert _trigger_component(stripped)[0] == 0.0
+    assert _context_component(stripped)[0] == 0.0
+    assert _entry_zone_component(stripped)[0] == 0.0
+    assert _location_component(stripped)[0] == 0.0
+    assert _risk_reward_component(
+        dataclasses.replace(stripped, risk_reward=0.1), config.risk.min_risk_reward
+    )[0] == 0.0
+
+
+def test_the_no_displacement_score_sits_below_every_real_displacement(config):
+    """`_displacement_component` returns 0.2 for absence, and that is only
+    safe because the detector cannot emit anything weaker.
+
+    At the exact thresholds it requires — `displacement_atr_multiple` of
+    ATR and `displacement_body_ratio` of body — the quality formula floors
+    at 0.275. The margin is 0.075 and it is undocumented, so retuning
+    either threshold or any weight in that formula could silently invert
+    this component the way location was inverted.
+    """
+
+    smc = config.smc
+    floor = (
+        0.45 * min(smc.displacement_atr_multiple / (smc.displacement_atr_multiple * 2.0), 1.0)
+        + 0.35 * 0.0
+        + 0.05
+    )
+    assert floor == pytest.approx(0.275, abs=1e-9)
+
+    from bot.scoring.scorer import _displacement_component
+
+    absent = _displacement_component(
+        dataclasses.replace(_stub_candidate(config), displacement=None)
+    )[0]
+    assert absent < floor, (
+        f"absence scores {absent} while the weakest real displacement scores "
+        f"{floor} — absence must not outscore a measurement"
+    )
+
+
+def _stub_candidate(config):
+    """A candidate with only the fields the component under test reads."""
+
+    import bot.smc.engine as engine_module
+
+    return engine_module.SetupCandidate(
+        symbol="EURUSD", direction="BUY", entry=1.1, stop_loss=1.09, take_profit=1.12,
+        risk_reward=2.0, stop_distance=0.01, atr=0.001,
+        session=_any_session(), regime=_any_regime(),
+        h1_bias="bullish", m15_bias="bullish", alignment="aligned",
+        sweep=None, structure_event=None, displacement=None,
+        point_of_interest=None, dealing_range=None, liquidity_target=None,
+    )
+
+
+def _any_session():
+    from bot.smc.sessions import SessionState
+
+    return SessionState("LONDON", True, 0.9, False, "test")
+
+
+def _any_regime():
+    from bot.smc.regime import Regime
+
+    return Regime("trending", "normal", 0.001, 0.5, 0.6, True, "test regime")
+
+
+def test_the_minimum_tradeable_score_actually_refuses_setups_below_it(config, candidate):
+    """A control that silently does nothing is worse than no control.
+
+    `SCORING_MIN_TRADEABLE` was parsed from the environment, carried on
+    `ScoringConfig`, and documented in .env.example as "the knob worth
+    knowing about" — and read by no production code at all. The scorer's
+    floor was `max(tier_b, candidate.score_floor)` and never consulted
+    it.
+
+    An operator raising it to 68 to trade only A grades would have seen
+    the trade count not move, run their fortnight of paper anyway, and
+    concluded that filtering by grade changes nothing — having never
+    once filtered by grade. The experiment the documentation recommends
+    could not be performed.
+
+    Found because a backtest sweep returned byte-identical results for
+    the tuned and the untuned configuration.
+    """
+
+    passing = SetupScorer(config).score(candidate)
+    assert passing.tradeable, "the fixture must be tradeable at the stock floor"
+
+    strict = dataclasses.replace(
+        config,
+        scoring=dataclasses.replace(
+            config.scoring, min_tradeable_score=passing.total + 5.0
+        ),
+    )
+    verdict = SetupScorer(strict).score(candidate)
+
+    assert verdict.tier == "NO_TRADE"
+    assert verdict.tradeable is False
+    assert any("requires a score of" in note for note in verdict.notes), verdict.notes
+
+
+def test_the_minimum_tradeable_score_can_only_ever_demand_more(config, candidate):
+    """It is a floor, never a discount.
+
+    Setting it below the B tier must not let a sub-B setup through: the
+    scorer takes the max of every floor, so no one setting can lower a
+    limit another established.
+    """
+
+    reference = SetupScorer(config).score(candidate)
+    lowered = dataclasses.replace(
+        config, scoring=dataclasses.replace(config.scoring, min_tradeable_score=1.0)
+    )
+    assert SetupScorer(lowered).score(candidate).tier == reference.tier

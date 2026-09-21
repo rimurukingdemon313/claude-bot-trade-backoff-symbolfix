@@ -19,6 +19,7 @@ from typing import Any, Iterable, Sequence
 from ..config import TradingConfig
 from ..marketdata.candles import Candle
 from .engine import Backtester, BacktestCosts
+from .portfolio import PortfolioBacktester
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,10 +58,22 @@ def build_folds(total: int, *, folds: int = 3, train_fraction: float = 0.5, vali
     return result
 
 
+#: The grid searched on TRAIN only.
+#:
+#: Three points, deliberately. A large grid over a small dataset finds
+#: noise, and the defence against overfitting is fewer knobs rather than a
+#: better search (MASTER_MISSION §64). These two are also the only
+#: parameters an operator realistically reaches for, so a grid over
+#: anything else would be measuring a decision nobody makes.
+#:
+#: The values used to be 2.0 / 2.5 R, left behind when the build floor
+#: moved to 1.2: every point in the grid sat above the default, so the
+#: search could only ever make the system MORE selective than the shipped
+#: configuration and never tested it at its own setting.
 DEFAULT_GRID: tuple[dict[str, Any], ...] = (
-    {"min_risk_reward": 2.0, "tier_b": 56.0},
-    {"min_risk_reward": 2.5, "tier_b": 56.0},
-    {"min_risk_reward": 2.0, "tier_b": 64.0},
+    {"min_risk_reward": 1.2, "tier_b": 56.0},
+    {"min_risk_reward": 1.5, "tier_b": 56.0},
+    {"min_risk_reward": 1.2, "tier_b": 64.0},
 )
 
 
@@ -116,13 +129,40 @@ def walk_forward(
     m15: Sequence[Candle],
     h1: Sequence[Candle],
     *,
+    portfolio: Sequence[Any] | None = None,
     folds: int = 3,
     grid: Iterable[dict[str, Any]] = DEFAULT_GRID,
     costs: BacktestCosts | None = None,
     step: int = 1,
 ) -> WalkForwardResult:
+    """Train, validate, test — over one symbol, or over a portfolio.
+
+    `portfolio` is a sequence of `SymbolData`. When it is given, every
+    window runs the multi-symbol simulation instead of the single-symbol
+    one, and `m15` is used only for its length, to cut the folds.
+
+    That option exists because this function kept answering "no parameter
+    set produced enough trades" and the reason was not short windows: it
+    was 22 missing symbols. A train window holding four trades cannot
+    select a parameter, so the search returned nothing and the folds were
+    reported empty — an honest answer to a question asked at the wrong
+    scale.
+    """
+
     result = WalkForwardResult()
     grid = list(grid)
+
+    def measure(tuned: TradingConfig, window: tuple[int, int]) -> Any:
+        low, high = window
+        if portfolio is None:
+            return Backtester(tuned, spec, costs=costs).run(m15[low:high], h1, step=step)
+        run = PortfolioBacktester(tuned, costs=costs)
+        for data in portfolio:
+            sliced = data.m15[low:high]
+            if len(sliced) < 60:
+                continue
+            run.add(data.spec, sliced, data.h1)
+        return run.run(warmup=min(250, max(0, (high - low) // 4)), step=step)
 
     for fold in build_folds(len(m15), folds=folds):
         best_params: dict[str, Any] | None = None
@@ -131,9 +171,7 @@ def walk_forward(
 
         for params in grid:
             tuned = _apply(config, params)
-            train = Backtester(tuned, spec, costs=costs).run(
-                m15[fold.train[0] : fold.train[1]], h1, step=step
-            )
+            train = measure(tuned, fold.train)
             stats = train.statistics()
             train_reports.append({"params": params, **stats})
             # Select on expectancy, not on total profit: total profit
@@ -152,12 +190,8 @@ def walk_forward(
             continue
 
         tuned = _apply(config, best_params)
-        validate = Backtester(tuned, spec, costs=costs).run(
-            m15[fold.validate[0] : fold.validate[1]], h1, step=step
-        )
-        test = Backtester(tuned, spec, costs=costs).run(
-            m15[fold.test[0] : fold.test[1]], h1, step=step
-        )
+        validate = measure(tuned, fold.validate)
+        test = measure(tuned, fold.test)
         result.folds.append(
             {
                 "fold": fold.index,

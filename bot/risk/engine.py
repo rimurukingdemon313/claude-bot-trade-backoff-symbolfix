@@ -232,6 +232,26 @@ class RiskEngine:
                 f"{limits.max_open_positions})"
             )
 
+        # A position whose risk could not be established is not a
+        # zero-risk position. The portfolio cap and the correlation cap
+        # are both sums of these numbers, so an unknown counted as zero
+        # would make room for MORE risk precisely when the book cannot be
+        # measured. Stand aside until it can (rule 7).
+        unpriced = [
+            str(position.get("symbol") or position.get("position_id") or "?")
+            for position in account.open_positions
+            if position.get("risk_amount") is None
+        ]
+        if unpriced:
+            reasons.append(
+                "the money at risk on "
+                + ", ".join(sorted(set(unpriced)))
+                + " could not be established (no stop loss recorded at the broker, or "
+                "its instrument could not be read), so the portfolio and correlation "
+                "caps cannot be evaluated — no new order while an unmeasurable "
+                "position is open"
+            )
+
         same_symbol = [
             position
             for position in account.open_positions

@@ -32,9 +32,11 @@ manufacture confidence in an execution path that has not been tested.
 
 from __future__ import annotations
 
+import math
 import threading
+import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Mapping, Sequence
 
 from ..clock import utc_now
@@ -67,6 +69,9 @@ class PaperBroker:
         self._initialised = False
         #: Every simulated write, for assertions and for the audit trail.
         self.simulated_writes: list[dict[str, Any]] = []
+        #: Settlement candles, cached until the bar that could change them
+        #: actually closes. See `_settlement_candles`.
+        self._range_cache: dict[str, tuple[float, int, list[dict[str, Any]]]] = {}
 
     # -- identity --------------------------------------------------------
 
@@ -309,15 +314,75 @@ class PaperBroker:
         self._close(row, exit_price=exit_price, reason=reason, spec=spec)
         return True
 
+    #: Widest settlement lookback, in M15 candles. 200 covers 50 hours,
+    #: comfortably past `max_position_hours`, so no position can outlive
+    #: the window that decides whether its stop was hit.
+    MAX_RANGE_CANDLES = 200
+
+    def _settlement_candles(
+        self, spec: InstrumentSpec, needed: int
+    ) -> list[dict[str, Any]] | None:
+        """M15 candles for settlement, cached until the next bar closes.
+
+        This used to call `self.live.candles(count=32)` directly on every
+        poll, for every open position. With three positions and a 30-second
+        loop that is over a thousand broker requests an hour, bypassing the
+        market-data cache entirely — and it is the same request each time,
+        because closed M15 candles do not change until the next one closes.
+
+        Everything this session did about the rate limit (the AIMD
+        throttle, the bar-close cache, the idle position poll) was defeated
+        the moment a paper position was open. This is the same rule the
+        provider uses, applied where the bypass was.
+        """
+
+        key = spec.symbol
+        now = time.monotonic()
+        cached = self._range_cache.get(key)
+        if cached is not None:
+            expires_at, cached_count, candles = cached
+            if now < expires_at and cached_count >= needed:
+                return candles
+
+        count = min(self.MAX_RANGE_CANDLES, max(needed, 32))
+        try:
+            candles = self.live.candles(spec, "M15", count=count)
+        except BrokerError:
+            return None
+
+        # Hold until the bar after the newest closed one would close. A
+        # forming candle is what makes this shorter than a full bar, and
+        # that is correct: its high and low are still moving.
+        expiry = now + 60.0
+        newest = _parse(candles[-1].get("timestamp")) if candles else None
+        if newest is not None:
+            next_close = newest + timedelta(minutes=30)
+            remaining = (next_close - utc_now()).total_seconds()
+            expiry = now + max(20.0, min(remaining, 900.0))
+        self._range_cache[key] = (expiry, count, candles)
+        return candles
+
     def _range_since(self, spec: InstrumentSpec, row: Mapping[str, Any]) -> tuple[float, float]:
-        """High/low of closed M15 candles since the position opened."""
+        """High/low of closed M15 candles since the position opened.
+
+        The sentinel `(-inf, +inf)` disables the candle evidence and leaves
+        the live quote as the only test — never the other way round, which
+        would invent a trigger.
+        """
 
         opened = _parse(row.get("opened_at"))
         if opened is None:
             return (float("-inf"), float("inf"))
-        try:
-            candles = self.live.candles(spec, "M15", count=32)
-        except BrokerError:
+
+        # Enough candles to cover the position's whole life. The old fixed
+        # 32 is eight hours, so a stop hit nine hours ago on a position the
+        # bot has held for two days was simply invisible — and a stop the
+        # simulator misses is a loss the paper report never shows.
+        age_minutes = max(0.0, (utc_now() - opened).total_seconds() / 60.0)
+        needed = int(math.ceil(age_minutes / 15.0)) + 2
+
+        candles = self._settlement_candles(spec, needed)
+        if not candles:
             return (float("-inf"), float("inf"))
 
         highs: list[float] = []

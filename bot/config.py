@@ -241,11 +241,27 @@ class ExecutionConfig:
     order_verify_attempts: int = 5
     order_verify_delay_seconds: float = 1.5
     breakeven_at_r: float = 1.0
-    partial_tp_at_r: float = 1.5
+    #: 0.75R, not the 1.5R this defaulted to. Chosen by a pre-registered
+    #: experiment and confirmed on held-out data — see
+    #: docs/EXPERIMENT_WIN_RATE.md. Every partial level tested beat no
+    #: partial at all; 0.75 was the best of them on the discovery set
+    #: under a rule fixed before the results were read.
+    partial_tp_at_r: float = 0.75
     partial_tp_fraction: float = 0.5
     trail_after_r: float = 2.0
     enable_breakeven: bool = True
-    enable_partial_tp: bool = False
+    #: ON since the experiment in docs/EXPERIMENT_WIN_RATE.md. Project
+    #: rule 12 says partials stay off "until evidence justifies them",
+    #: which is a standard of evidence, not a permanent ban — so here is
+    #: the evidence it asks for: a rule fixed before the data was read,
+    #: one candidate promoted out of ten, and a held-out set that chose
+    #: nothing. On that held-out data the win rate went 25.4% -> 44.5%
+    #: and expectancy -0.248R -> -0.128R.
+    #:
+    #: It does NOT make the system profitable. Both sets are still
+    #: negative and both are synthetic. What it does is lose less, and
+    #: stay inside its own drawdown limit while doing it.
+    enable_partial_tp: bool = True
     enable_trailing: bool = False
     enable_structure_exit: bool = True
     max_position_hours: float = 48.0
@@ -423,6 +439,21 @@ class SchedulerConfig:
 
 @dataclass(frozen=True, slots=True)
 class ScoringConfig:
+    """Score bands, and the lowest one that may trade.
+
+    `min_tradeable_score` is the knob worth knowing about. Measured over
+    180 simulated trades, the A/B boundary separated sharply — A grades
+    averaged +0.014R and B grades -0.152R, which is to say the entire
+    loss lived in the B cohort — while the correlation between the
+    CONTINUOUS score and outcome was +0.037, near enough to nothing.
+
+    One threshold doing real work while the arithmetic behind it ranks
+    almost at random is a strange pair of facts, and it is one dataset,
+    so the default has not moved. Raising this to `tier_a` is the single
+    most promising experiment available and belongs on paper first: it
+    would cut roughly 70% of the trades.
+    """
+
     tier_a_plus: float = 80.0
     tier_a: float = 68.0
     tier_b: float = 56.0
@@ -599,6 +630,23 @@ def load_config(env: Mapping[str, str] | None = None) -> TradingConfig:
         max_open_positions=_env_int("RISK_MAX_OPEN_POSITIONS", 3, low=1, high=10),
         max_trades_per_day=_env_int("RISK_MAX_TRADES_PER_DAY", 6, low=1, high=30),
         min_risk_reward=_env_float("RISK_MIN_RR", 1.2, low=1.0, high=10.0),
+        # Friction is `spread / stop_distance` - the contract size and the
+        # lot count cancel - so a TIGHT stop does not reduce cost, it
+        # magnifies it. Measured across four settings, raising this floor
+        # took friction from 16.6% of R to 8.2% and moved win rate, profit
+        # factor and expectancy monotonically the right way. The far end
+        # had n=30 and a confidence interval spanning zero, so the default
+        # has not moved - but the mechanism is arithmetic, not a search,
+        # which makes it the experiment most worth running on paper.
+        #
+        # Note what raising it does: it REJECTS setups whose structural
+        # stop is tighter than this. It never widens a stop.
+        min_stop_distance_atr=_env_float(
+            "RISK_MIN_STOP_ATR", 0.35, low=0.05, high=3.0
+        ),
+        max_stop_distance_atr=_env_float(
+            "RISK_MAX_STOP_ATR", 3.5, low=0.5, high=20.0
+        ),
     )
     reward = RewardConfig(
         min_reward_r=_env_float("REWARD_MIN_R", 1.2, low=1.0, high=10.0),
@@ -681,7 +729,38 @@ def load_config(env: Mapping[str, str] | None = None) -> TradingConfig:
             commission_per_lot=_env_float("PAPER_COMMISSION_PER_LOT", 7.0, low=0.0, high=200.0),
         ),
         broker=broker,
+        scoring=ScoringConfig(
+            tier_a_plus=_env_float("SCORING_TIER_A_PLUS", 80.0, low=1.0, high=100.0),
+            tier_a=_env_float("SCORING_TIER_A", 68.0, low=1.0, high=100.0),
+            tier_b=_env_float("SCORING_TIER_B", 56.0, low=1.0, high=100.0),
+            # Raise this to trade only the higher grades. See ScoringConfig.
+            min_tradeable_score=_env_float(
+                "SCORING_MIN_TRADEABLE", 56.0, low=1.0, high=100.0
+            ),
+        ),
         risk=risk,
+        # Position management is the one area the project says must be
+        # EARNED by testing rather than switched on because it sounds
+        # sophisticated. So these are env-controllable: an operator can
+        # run partials or trailing on paper for a fortnight and turn them
+        # off again without a code deploy, which is what "earned by
+        # testing" needs in order to be a real option rather than advice.
+        # The defaults are unchanged.
+        execution=ExecutionConfig(
+            enable_breakeven=_env_bool("EXEC_ENABLE_BREAKEVEN", True),
+            enable_partial_tp=_env_bool("EXEC_ENABLE_PARTIAL_TP", True),
+            enable_trailing=_env_bool("EXEC_ENABLE_TRAILING", False),
+            enable_structure_exit=_env_bool("EXEC_ENABLE_STRUCTURE_EXIT", True),
+            breakeven_at_r=_env_float("EXEC_BREAKEVEN_AT_R", 1.0, low=0.2, high=5.0),
+            partial_tp_at_r=_env_float("EXEC_PARTIAL_TP_AT_R", 0.75, low=0.3, high=10.0),
+            partial_tp_fraction=_env_float(
+                "EXEC_PARTIAL_TP_FRACTION", 0.5, low=0.1, high=0.9
+            ),
+            trail_after_r=_env_float("EXEC_TRAIL_AFTER_R", 2.0, low=0.5, high=10.0),
+            max_position_hours=_env_float(
+                "EXEC_MAX_POSITION_HOURS", 48.0, low=1.0, high=720.0
+            ),
+        ),
         mtf=mtf,
         reward=reward,
         ai=ai,
@@ -692,4 +771,25 @@ def load_config(env: Mapping[str, str] | None = None) -> TradingConfig:
         trading_enabled_default=_env_bool("TRADING_ENABLED_DEFAULT", True),
     )
     config.validate()
+
+    # Rule 9: a behaviour change must be visible in the version stamp.
+    # Several tunables are settable from the environment, so an operator
+    # can run an experiment on paper without a deploy — which means the
+    # version constants alone no longer identify the behaviour that
+    # produced a trade. The fingerprint does, and the diff is logged once
+    # here so the digest can be read back later.
+    from .observability import log_event
+    from .version import set_tuning_fingerprint
+
+    fingerprint, changed = set_tuning_fingerprint(config)
+    if changed:
+        log_event(
+            "STARTUP",
+            f"running tuning {fingerprint}: {len(changed)} setting(s) overridden from the "
+            "build defaults — every trade records this fingerprint so the experiment and "
+            "the control can be told apart afterwards",
+            severity="warning",
+            tuning=fingerprint,
+            overrides={key: str(value) for key, value in sorted(changed.items())},
+        )
     return config

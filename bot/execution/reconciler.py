@@ -35,6 +35,10 @@ from ..storage.repositories import Repositories
 class ReconcileReport:
     checked_positions: int = 0
     adopted_orphans: list[str] = field(default_factory=list)
+    #: Positions the broker has closed whose result could not be read.
+    #: Kept apart from `closed_stale` because they are the ones whose P/L
+    #: never reached the daily counters.
+    unmeasured_closes: list[str] = field(default_factory=list)
     closed_stale: list[str] = field(default_factory=list)
     resolved_intents: list[str] = field(default_factory=list)
     unresolved_intents: list[str] = field(default_factory=list)
@@ -50,6 +54,7 @@ class ReconcileReport:
         return {
             "checkedPositions": self.checked_positions,
             "adoptedOrphans": self.adopted_orphans,
+            "unmeasuredCloses": self.unmeasured_closes,
             "closedStale": self.closed_stale,
             "resolvedIntents": self.resolved_intents,
             "unresolvedIntents": self.unresolved_intents,
@@ -210,34 +215,75 @@ class Reconciler:
             if str(position_id) in by_id:
                 continue
             realized, exit_price = self._realized_from_history(str(position_id))
+            measured = realized is not None
             closed = self.repos.trades.mark_closed(
                 broker_position_id=str(position_id),
                 exit_price=exit_price,
                 realized_pnl=realized,
-                exit_reason="BROKER_CLOSED",
+                exit_reason="BROKER_CLOSED" if measured else "BROKER_CLOSED_PNL_UNKNOWN",
             )
-            if closed is not None:
-                self.repos.daily.record_close(realized)
+            if closed is not None and measured:
+                self.repos.daily.record_close(float(realized))
             report.closed_stale.append(str(position_id))
+
+            if measured:
+                log_event(
+                    "RECONCILE",
+                    f"position {position_id} is closed at the broker; local state updated "
+                    f"(realized {float(realized):.2f})",
+                    symbol=str(trade.get("symbol")),
+                )
+                continue
+
+            # The daily counters are safety controls, so an unmeasured
+            # close is left OUT of them rather than entered as a zero.
+            # That keeps the streak intact - a close nobody could price
+            # must not reset a losing run - and leaves a visible gap.
+            report.unmeasured_closes.append(str(position_id))
+            self.repos.reconciliations.record(
+                "CLOSE_WITHOUT_RESULT",
+                {"positionId": str(position_id), "symbol": str(trade.get("symbol"))},
+                symbol=str(trade.get("symbol")),
+            )
             log_event(
                 "RECONCILE",
-                f"position {position_id} is closed at the broker; local state updated "
-                f"(realized {realized:.2f})",
+                f"position {position_id} is closed at the broker but its result could not "
+                "be read; daily P/L and the loss streak are UNCHANGED rather than "
+                "credited with a zero — the trade is recorded with an unknown result",
+                severity="critical",
                 symbol=str(trade.get("symbol")),
             )
 
-    def _realized_from_history(self, position_id: str) -> tuple[float, float | None]:
+    def _realized_from_history(self, position_id: str) -> tuple[float | None, float | None]:
         """Derive the realized result from the broker's own order history.
 
-        Returns (pnl, exit_price). Falls back to (0.0, None) rather than
-        inventing a number — a fabricated PnL would corrupt the daily loss
-        counter, which is a safety control.
+        Returns (pnl, exit_price), and `pnl` is None when the history
+        cannot be read or carries no result for this position.
+
+        It used to return 0.0 there, under a docstring saying that a
+        fabricated PnL would corrupt the daily loss counter — which is
+        exactly what a 0.0 did, because the caller fed it straight into
+        that counter. Three things went wrong at once, and all of them
+        the wrong way:
+
+        * the real loss vanished from `realized_pnl`, so the daily loss
+          limit under-counted and its kill switch tripped late;
+        * `consecutive_losses` RESET, because 0.0 is not a loss — so a
+          losing streak that should have been reducing risk was cleared
+          by a number nobody measured, which is rule 2's "risk may never
+          be increased by adverse account state" arriving through the
+          back door;
+        * the close counted as neither a win nor a loss while still
+          incrementing `trades_closed`, quietly diluting the win rate.
+
+        None says "this closed and I do not know for how much", which is
+        a gap an operator can see (project rule 6).
         """
 
         try:
             history = self.broker.order_history(limit=200)
         except BotError:
-            return 0.0, None
+            return None, None
         pnl = 0.0
         exit_price = None
         found = False
@@ -255,7 +301,7 @@ class Reconciler:
                     pnl = candidate
                     exit_price = order.price
                     found = True
-        return pnl, exit_price
+        return (pnl if found else None), exit_price
 
     # -- 4. unprotected positions ----------------------------------------
 

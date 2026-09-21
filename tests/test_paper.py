@@ -442,3 +442,109 @@ def test_reset_is_refused_outside_paper_mode(config, orchestrator, repos):
     api = DashboardApi(live, orchestrator, repos)
     result = api.reset_paper()
     assert result["ok"] is False and "not in paper mode" in result["error"]
+
+
+# -- settlement cost and settlement reach ---------------------------------
+
+
+def _counting(live: FakeBroker) -> list[int]:
+    """Wrap `candles` so the test can count what settlement actually costs."""
+
+    calls: list[int] = []
+    original = live.candles
+
+    def counted(spec, timeframe, *, count=300):
+        calls.append(count)
+        return original(spec, timeframe, count=count)
+
+    live.candles = counted  # type: ignore[assignment]
+    return calls
+
+
+def test_settlement_does_not_refetch_candles_on_every_poll(paper, broker):
+    """The bypass that defeated every rate-limit fix in the build.
+
+    `_range_since` called the broker directly on every poll, for every
+    open position. Three positions on a 30-second loop is over a thousand
+    requests an hour — and it is the same request each time, because
+    closed M15 candles do not change until the next one closes.
+
+    The AIMD throttle, the bar-close market-data cache and the idle
+    position poll were all defeated the moment a paper position existed.
+    """
+
+    set_quote(broker, 1.1000, 1.1002)
+    paper.place_market_order(
+        DEFAULT_SPEC, direction="BUY", quantity=0.1, stop_loss=1.0900, take_profit=1.1100
+    )
+
+    calls = _counting(broker)
+    for _ in range(20):
+        paper.positions()
+
+    assert len(calls) <= 2, (
+        f"settlement made {len(calls)} candle requests across 20 polls; "
+        "closed candles do not change that often"
+    )
+
+
+def test_settlement_looks_back_far_enough_to_cover_the_position(paper, broker):
+    """A stop hit nine hours ago on a two-day-old position was invisible.
+
+    The lookback was a fixed 32 M15 candles — eight hours — while
+    `max_position_hours` is 48. So the first forty hours of a long
+    position's life could not settle, and a stop the simulator misses is
+    a loss the paper report never shows.
+    """
+
+    set_quote(broker, 1.1000, 1.1002)
+    paper.place_market_order(
+        DEFAULT_SPEC, direction="BUY", quantity=0.1, stop_loss=1.0900, take_profit=1.1100
+    )
+
+    row = paper.paper.open_positions()[0]
+    # Backdate the position to two days old, inside max_position_hours.
+    old = (SETUP_END - timedelta(hours=46)).isoformat()
+    paper.repos.db.execute(
+        "UPDATE paper_positions SET opened_at = ? WHERE position_id = ?",
+        (old, str(row["position_id"])),
+    )
+
+    calls = _counting(broker)
+    paper.positions()
+
+    assert calls, "settlement must still consult candles"
+    # 46 hours of M15 is ~184 candles; the old fixed 32 could not see it.
+    assert max(calls) > 100, (
+        f"asked for only {max(calls)} candles to settle a 46-hour position"
+    )
+    assert max(calls) <= PaperBroker.MAX_RANGE_CANDLES
+
+
+def test_the_settlement_sentinel_never_invents_a_trigger(paper, broker):
+    """When candles are unavailable the quote must be the ONLY evidence.
+
+    The sentinel is (-inf, +inf) read as (high, low). Swapped, it would
+    close every position on the first poll after a broker hiccup — which
+    is the failure mode that matters, because it is silent and it is
+    always in the same direction.
+    """
+
+    from bot.errors import BrokerError
+
+    set_quote(broker, 1.1000, 1.1002)
+    paper.place_market_order(
+        DEFAULT_SPEC, direction="BUY", quantity=0.1, stop_loss=1.0900, take_profit=1.1100
+    )
+
+    def explode(*args, **kwargs):
+        raise BrokerError("history unavailable")
+
+    broker.candles = explode  # type: ignore[assignment]
+    paper._range_cache.clear()
+
+    open_rows = paper.positions()
+    assert len(open_rows) == 1, "an unreadable history must not settle the position"
+
+    high, low = paper._range_since(DEFAULT_SPEC, paper.paper.open_positions()[0])
+    assert high == float("-inf") and low == float("inf")

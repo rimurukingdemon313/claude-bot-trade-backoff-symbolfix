@@ -195,7 +195,16 @@ def _regime_component(candidate: SetupCandidate) -> tuple[float, str]:
 def _location_component(candidate: SetupCandidate) -> tuple[float, str]:
     dealing = candidate.dealing_range
     if dealing is None:
-        return 0.5, "no dealing range established"
+        # Absence of evidence is not half-evidence.
+        #
+        # This returned 0.5, which inverted the component: a setup MEASURED
+        # to be in a bad location (alignment near 0) scored below one where
+        # the location was simply unknown, so the scorer preferred
+        # ignorance to a bad reading. Measured at 0% of bars on realistic
+        # data, so this is a soundness fix rather than a live one - but a
+        # default that rewards missing information is the kind that starts
+        # mattering the day the data gets worse (project rule 6).
+        return 0.0, "no dealing range established — location scores nothing, not half"
     alignment = dealing.alignment(candidate.direction)
     return alignment, f"price in {dealing.zone} ({dealing.position:.0%} of range)"
 
@@ -276,9 +285,22 @@ class SetupScorer:
                 total, "NO_TRADE", components, notes + ("gate: session liquidity too thin",)
             )
 
-        # The MTF layer's floor for this classification. It is never below
-        # the configured B tier, so this can only ever demand more.
-        floor = max(self.scoring.tier_b, candidate.score_floor)
+        # The MTF layer's floor for this classification, and the
+        # configured minimum tradeable score. Taking the max means every
+        # one of them can only ever demand MORE, never less.
+        #
+        # `min_tradeable_score` was missing from this line, which made it
+        # a dead setting: parsed from SCORING_MIN_TRADEABLE, documented
+        # in .env.example as "the knob worth knowing about", and read by
+        # nothing. An operator raising it to 68 to trade A grades only
+        # would have seen the trade count not move, run their fortnight
+        # of paper, and concluded that filtering by grade does nothing —
+        # having never once filtered by grade. A control that silently
+        # does nothing is worse than an absent one, because the operator
+        # draws a conclusion from it.
+        #
+        # It defaults to tier_b, so this is a no-op on a stock build.
+        floor = max(self.scoring.tier_b, self.scoring.min_tradeable_score, candidate.score_floor)
         if total < floor:
             return SetupScore(
                 total,

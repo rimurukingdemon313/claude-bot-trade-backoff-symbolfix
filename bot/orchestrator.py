@@ -546,12 +546,20 @@ class Orchestrator:
         open_rows = []
         for position in positions:
             trade = self.repos.trades.by_position_id(position.position_id)
+            recorded = (trade or {}).get("risk_amount")
+            risk_amount = (
+                float(recorded) if recorded is not None else self._implied_risk(position)
+            )
             open_rows.append(
                 {
                     "symbol": position.symbol,
                     "direction": position.direction,
-                    "risk_amount": (trade or {}).get("risk_amount")
-                    or self._implied_risk(position),
+                    #: None means the money at risk on this position could
+                    #: not be established. It is NOT zero — see
+                    #: `_implied_risk` — and the risk engine refuses new
+                    #: orders while one is open.
+                    "risk_amount": risk_amount,
+                    "position_id": position.position_id,
                 }
             )
 
@@ -601,19 +609,32 @@ class Orchestrator:
             )
             return frozenset()
 
-    def _implied_risk(self, position: Any) -> float:
+    def _implied_risk(self, position: Any) -> float | None:
         """Risk for a position the database has no plan for (an orphan).
 
-        Estimated from its actual stop distance — conservative, and far
-        better than counting it as zero risk in the portfolio limits.
+        Estimated from its actual stop distance. Returns None when even
+        that cannot be done, and the distinction is the whole point: this
+        used to return 0.0 there, which is the most dangerous number it
+        could have picked.
+
+        A position with NO stop loss is not a zero-risk position — it is
+        the one position in the book whose loss has no floor. Calling it
+        zero made room under `max_portfolio_risk_pct` and under the
+        correlation cap, so the account was most permissive exactly when
+        it was most exposed: risk increased by adverse account state,
+        which project rule 2 forbids. The same went for an instrument
+        read that failed.
+
+        None says "unknown", and the risk engine refuses new orders while
+        one is open (rule 7).
         """
 
         if not position.stop_loss or not position.entry_price:
-            return 0.0
+            return None
         try:
             spec = self.broker.instrument(position.symbol)
         except BotError:
-            return 0.0
+            return None
         distance = abs(position.entry_price - position.stop_loss)
         return distance * spec.contract_size * position.quantity
 
@@ -1209,7 +1230,18 @@ class Orchestrator:
     def reconcile(self) -> ReconcileReport:
         report = self.reconciler.reconcile()
         self.last_reconcile = report
+        unmeasured = set(report.unmeasured_closes)
         for position_id in report.closed_stale:
+            if position_id in unmeasured:
+                # A close whose result could not be read counts as a loss
+                # HERE and only here. `last_loss_at` drives a cooldown, so
+                # treating the unknown as a loss can only slow the bot
+                # down — which is the safe direction when a position has
+                # vanished and nobody can say for how much (rule 7). It
+                # is deliberately NOT written to the daily counters, where
+                # the same assumption would be a fabricated number.
+                self._record_event_time("loss")
+                continue
             trade = self.repos.trades.by_position_id(position_id)
             if trade and float(trade.get("realized_pnl") or 0.0) < 0:
                 self._record_event_time("loss")

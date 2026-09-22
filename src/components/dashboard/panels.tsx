@@ -842,6 +842,20 @@ export function HealthPanel({ health }: { health: Health | undefined }) {
               {!ok && detail && (
                 <p className="mt-1.5 text-[11px] leading-snug text-rose-300/90">{detail}</p>
               )}
+              {/* Which endpoint shapes this deployment actually answers
+                  on. It lived only in the process log, and the day it
+                  mattered — a 404 on quotes killing every order at
+                  submission — that is exactly where nobody could see
+                  it. An operator should not need a hosting provider's
+                  log viewer to learn whether the bot can price a pair. */}
+              {key === "broker" && (component.quotes || component.history) && (
+                <p className="mt-1.5 text-[11px] leading-snug text-slate-500">
+                  {component.quotes?.discovered
+                    ? `quotes: ${component.quotes.path}`
+                    : "quotes: endpoint not established yet"}
+                  {component.history?.strategy ? ` · candles: ${component.history.strategy}` : ""}
+                </p>
+              )}
             </div>
           );
         })}

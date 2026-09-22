@@ -81,6 +81,24 @@ class SetupScore:
     def tradeable(self) -> bool:
         return self.tier in ("A+", "A", "B")
 
+    @property
+    def gate(self) -> str | None:
+        """The condition that actually refused this setup.
+
+        Every refusal above appends a note beginning "gate: " saying
+        precisely what failed — an absent trigger, a critical component
+        under its floor, an unclassified setup, a session too thin, or a
+        score under the classification's floor. The caller had no way to
+        ask for it, so it wrote its own sentence instead and blamed the
+        tier threshold every time. That sentence was false whenever the
+        tier was not the binding constraint, which is most of the time.
+        """
+
+        for note in self.notes:
+            if note.startswith("gate: "):
+                return note[len("gate: "):]
+        return None
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "total": round(self.total, 2),

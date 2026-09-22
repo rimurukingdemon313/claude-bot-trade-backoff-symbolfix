@@ -520,3 +520,66 @@ def test_a_symbol_never_proposes_from_a_candle_that_had_not_closed():
 
     # Before the first close there is nothing to see.
     assert _index_at(m15, m15[0].close_time - timedelta(minutes=1)) is None
+
+
+def _spread_run(spread_points: float):
+    """The same four symbols and seeds, differing only in spread."""
+
+    from bot.backtest.engine import BacktestCosts
+
+    config = load_test_config()
+    run = PortfolioBacktester(
+        config,
+        starting_balance=5_000.0,
+        costs=BacktestCosts(spread_points=spread_points),
+    )
+    for index in range(4):
+        m15 = _walk(900, seed=300 + index)
+        spec = dataclasses.replace(
+            DEFAULT_SPEC, symbol=f"PAIR{index}", broker_name=f"PAIR{index}",
+            tradable_instrument_id=index + 1,
+        )
+        run.add(spec, m15, _h1(m15))
+    return run.run(warmup=250, step=4)
+
+
+def test_the_backtest_refuses_the_spreads_the_live_executor_refuses():
+    """The harness paid the spread and never asked the executor's question.
+
+    `Executor._spread_check` runs `validate_spread` last, before the
+    order goes out, and aborts when the spread is too large relative to
+    THIS setup's stop and target. The backtest charged the spread as a
+    cost and skipped that gate entirely, so it counted trades the live
+    bot refuses at submission.
+
+    That is not a rounding difference. It is the difference between "the
+    strategy is too selective" and "the strategy proposes setups it
+    cannot execute" — opposite diagnoses with opposite fixes, and acting
+    on the wrong one makes the real problem worse. It is also exactly
+    the gap an operator was living: a backtest reporting 180 trades
+    beside a live bot reporting none.
+
+    A wide spread must now cost TRADES, not merely money.
+    """
+
+    tight = _spread_run(2)
+    wide = _spread_run(90)
+
+    assert wide.setups_rejected.get("spread guard", 0) > 0, (
+        "a 90-tick spread has to be refused by the guard, not silently paid"
+    )
+    assert len(wide.trades) < len(tight.trades), (
+        "and the refusal must cost trades — the whole point of the gate"
+    )
+
+
+def test_a_workable_spread_still_lets_the_setups_through():
+    """The control: the guard must not simply refuse everything.
+
+    Without this, the test above would also pass on a harness broken
+    into taking no trades at all.
+    """
+
+    result = _spread_run(2)
+    assert result.setups_rejected.get("spread guard", 0) == 0
+    assert result.trades, "a workable spread must still produce trades"

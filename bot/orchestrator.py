@@ -899,8 +899,20 @@ class Orchestrator:
                 symbol,
                 "SCORE",
                 "BELOW_TIER",
-                f"score {score.total:.1f} graded {score.tier} (minimum B is "
-                f"{self.config.scoring.tier_b:.0f})",
+                # The scorer knows WHICH gate refused this; ask it. This
+                # used to hardcode "(minimum B is 56)" whatever had
+                # actually fired, so a setup refused for a thin session
+                # was reported as a scoring shortfall — and a card
+                # showing a score of 69.1 against a stated minimum of 56
+                # read as a broken dashboard rather than as the session
+                # gate doing its job. It also hid the classification
+                # floor, which is often higher than the B tier.
+                (
+                    f"score {score.total:.1f} refused: {score.gate}"
+                    if score.gate
+                    else f"score {score.total:.1f} graded {score.tier} (minimum B is "
+                    f"{self.config.scoring.tier_b:.0f})"
+                ),
                 candidate=candidate,
                 score=score,
                 smc=smc_result,

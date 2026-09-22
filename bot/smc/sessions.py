@@ -174,3 +174,37 @@ def in_rollover_blackout(moment: datetime, config: Any) -> tuple[bool, str | Non
             f"({int(hour):02d}:00 UTC) — spreads widen far beyond a normal stop there"
         )
     return False, None
+
+
+def in_weekend_entry_blackout(moment: datetime, config: Any) -> tuple[bool, str | None]:
+    """Too close to the Friday close to open a NEW position.
+
+    `is_forex_weekend` stops trading at Friday 21:00 UTC. But a trade
+    opened at 18:00 is held across the entire weekend, and the Sunday
+    reopen can gap straight past its stop. A gap does not respect a stop
+    loss — it fills at the first available price, which can be far
+    beyond it — so the position can lose considerably more than it was
+    sized to lose.
+
+    Blocks the ENTRY rather than force-closing later: a position with
+    time to resolve is left to resolve.
+
+    Returns (blocked, reason).
+    """
+
+    hours = getattr(config, "weekend_entry_blackout_hours", 0) or 0
+    if hours <= 0:
+        return False, None
+
+    moment = ensure_utc(moment)
+    if moment.weekday() != 4:  # Friday only
+        return False, None
+
+    close = moment.replace(hour=21, minute=0, second=0, microsecond=0)
+    remaining = (close - moment).total_seconds() / 3600.0
+    if 0 < remaining <= hours:
+        return True, (
+            f"{remaining:.1f}h from the Friday close — a position opened now is held "
+            "across the weekend, and a Sunday gap can fill far beyond its stop"
+        )
+    return False, None

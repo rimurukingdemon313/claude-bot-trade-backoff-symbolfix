@@ -392,6 +392,21 @@ class SessionConfig:
     rollover_blackout_before_minutes: int = 45
     rollover_blackout_after_minutes: int = 30
 
+    #: Hours before the Friday close during which no NEW position may be
+    #: opened.
+    #:
+    #: `is_forex_weekend` already stops scanning at Friday 21:00 UTC, but
+    #: a trade opened at 18:00 is still held across the whole weekend —
+    #: and the Sunday reopen can gap straight past its stop. A gap does
+    #: not respect a stop loss: it fills at the first available price,
+    #: which can be far beyond it. That is a loss LARGER than the one the
+    #: trade was sized for, which project rule 2 does not permit the
+    #: system to accept on purpose.
+    #:
+    #: This blocks the entry rather than force-closing anything later: a
+    #: position that has time to resolve is left alone.
+    weekend_entry_blackout_hours: int = 4
+
 
 @dataclass(frozen=True, slots=True)
 class NewsConfig:
@@ -795,6 +810,9 @@ def load_config(env: Mapping[str, str] | None = None) -> TradingConfig:
             ),
             rollover_blackout_after_minutes=_env_int(
                 "SESSION_ROLLOVER_BLACKOUT_AFTER", 30, low=0, high=240
+            ),
+            weekend_entry_blackout_hours=_env_int(
+                "SESSION_WEEKEND_BLACKOUT_HOURS", 4, low=0, high=24
             ),
         ),
         news=NewsConfig(enabled=_env_bool("NEWS_FILTER_ENABLED", True)),

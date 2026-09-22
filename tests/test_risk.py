@@ -746,3 +746,56 @@ def test_the_rollover_hour_is_configurable_because_brokers_differ():
         datetime(2026, 9, 22, 21, 0, tzinfo=timezone.utc), off
     )
     assert blocked is False, "an operator must be able to switch it off entirely"
+
+
+def test_no_new_trade_in_the_hours_before_the_friday_close(config, candidate):
+    """A gap does not respect a stop loss.
+
+    `is_forex_weekend` stops trading at Friday 21:00 UTC, but a position
+    opened at 18:00 is held across the whole weekend. The Sunday reopen
+    fills at the first available price, which can be far beyond the
+    stop — so the trade can lose considerably more than it was sized to
+    lose. Rule 2 does not let the system accept that on purpose.
+
+    The entry is blocked rather than the position force-closed later: a
+    trade with time to resolve is left to resolve.
+    """
+
+    from datetime import datetime, timezone
+
+    friday_evening = datetime(2026, 9, 18, 18, 0, tzinfo=timezone.utc)
+    assert friday_evening.weekday() == 4
+
+    decision = RiskEngine(config).evaluate(
+        candidate=candidate, tier="A", account=make_account(),
+        spec=DEFAULT_SPEC, now=friday_evening,
+    )
+
+    assert decision.approved is False
+    assert any("Friday close" in reason for reason in decision.reasons), decision.reasons
+
+
+def test_friday_morning_still_trades(config, candidate):
+    """The control: it is the hours BEFORE the close, not the whole day."""
+
+    from datetime import datetime, timezone
+
+    friday_morning = datetime(2026, 9, 18, 13, 0, tzinfo=timezone.utc)
+    decision = RiskEngine(config).evaluate(
+        candidate=candidate, tier="A", account=make_account(),
+        spec=DEFAULT_SPEC, now=friday_morning,
+    )
+    assert not any("Friday close" in reason for reason in decision.reasons), decision.reasons
+
+
+def test_the_weekend_blackout_can_be_switched_off():
+    from datetime import datetime, timezone
+
+    from bot.config import load_config
+    from bot.smc.sessions import in_weekend_entry_blackout
+
+    off = load_config({"SESSION_WEEKEND_BLACKOUT_HOURS": "0"}).sessions
+    blocked, _ = in_weekend_entry_blackout(
+        datetime(2026, 9, 18, 18, 0, tzinfo=timezone.utc), off
+    )
+    assert blocked is False

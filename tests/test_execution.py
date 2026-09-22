@@ -722,3 +722,63 @@ def test_a_successful_execution_never_starts_the_cooldown(orchestrator, repos):
     filled = ExecutionResult(True, make_plan(), "FILLED", None)
     assert orchestrator._record_execution_outcome(filled) is False
     assert repos.state.get("last_execution_failure_at") is None
+
+
+def test_the_partial_take_profit_fires_exactly_once(config, broker, repos):
+    """The live account showed one trade closing in a stack of slices.
+
+        0.17 -> 0.09 -> 0.04 -> 0.03 -> 0.01 -> 0.01 lots
+
+    Each one half of what was left, each paying its own spread and
+    commission, and no runner surviving to reach the target.
+
+    `plan_actions` guards the partial with `not trade.get("partial_taken")`
+    — and the trades table had no such column, so nothing ever wrote it.
+    The guard read falsy on every position poll, 30 seconds apart, and
+    the partial fired again every time.
+
+    The backtester sets `partial_taken` on its own trade object, so
+    simulation took exactly one partial while production took six. That
+    is why the measured result did not describe what shipped — and I
+    turned this feature on by default on the strength of that
+    measurement.
+    """
+
+    from bot.execution.manager import PositionManager
+
+    executor = Executor(config, broker, repos, sleeper=lambda _s: None)
+    result = executor.execute(make_plan(), DEFAULT_SPEC, atr=0.0012)
+    assert result.ok
+
+    position_id = result.broker_position_id
+    manager = PositionManager(config, broker, repos)
+
+    # Price sits beyond the partial trigger and STAYS there, exactly as
+    # it does between two polls half a minute apart.
+    from bot.execution.manager import ManagementAction
+
+    action = ManagementAction(
+        kind="PARTIAL_CLOSE",
+        position_id=str(position_id),
+        symbol="EURUSD",
+        reason="reached 1.00R — taking 50% off",
+        quantity=0.05,
+    )
+    manager.apply([action])
+
+    trade = repos.trades.by_position_id(str(position_id))
+    assert trade["partial_taken"], "the flag has to survive the poll that set it"
+
+    # Which is what the guard reads: a second poll must plan no partial.
+    from bot.execution.manager import plan_actions
+
+    again = plan_actions(
+        position=broker.positions()[0],
+        trade=trade,
+        price=1.1090,
+        config=config,
+        now=SETUP_END,
+    )
+    assert not [a for a in again if a.kind == "PARTIAL_CLOSE"], (
+        "a partial that fires twice is not a partial, it is liquidation in slices"
+    )

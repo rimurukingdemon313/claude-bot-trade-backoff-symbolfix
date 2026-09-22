@@ -292,6 +292,11 @@ class PositionManager:
                     )
                 elif action.kind == "PARTIAL_CLOSE" and action.quantity:
                     self.broker.close_position(action.position_id, quantity=action.quantity)
+                    # Persist BEFORE anything else can poll again. The
+                    # guard in `plan_actions` reads this flag, and while
+                    # it went unwritten the partial fired on every poll
+                    # and halved the position each time.
+                    self.repos.trades.mark_partial_taken(action.position_id)
                 elif action.kind == "CLOSE":
                     self.broker.close_position(action.position_id)
                 else:

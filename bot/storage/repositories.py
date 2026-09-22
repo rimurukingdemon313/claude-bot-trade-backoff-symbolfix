@@ -347,6 +347,21 @@ class TradeRepository:
             ),
         )
 
+    def mark_partial_taken(self, broker_position_id: str) -> None:
+        """Record that the partial take-profit has fired on this trade.
+
+        Without this the partial is not a partial: `plan_actions` asks
+        `not trade.get("partial_taken")` on every position poll, so an
+        unwritten flag means it fires every 30 seconds and halves what
+        is left each time.
+        """
+
+        self.db.execute(
+            "UPDATE trades SET partial_taken = 1, updated_at = ? "
+            " WHERE broker_position_id = ?",
+            (utc_now().isoformat(), str(broker_position_id)),
+        )
+
     def mark_aborted(self, *, execution_id: str, reason: str) -> None:
         """An execution that never reached the broker.
 

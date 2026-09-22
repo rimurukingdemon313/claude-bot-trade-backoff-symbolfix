@@ -524,3 +524,71 @@ def test_a_protection_repair_that_did_take_is_not_reported_as_unprotected(
     kinds = [row.get("kind") for row in repos.reconciliations.recent(limit=20)]
     assert "UNPROTECTED_POSITION" not in kinds
     assert broker.modifications, "the repair must actually have been attempted"
+
+
+def _setup_ids(repos):
+    return repos.trades.traded_setup_ids(hours=24.0)
+
+
+def test_a_refused_order_does_not_mark_the_setup_as_traded(config, broker, repos):
+    """The bug that made a working bot look like a dead one.
+
+    `create_pending` writes the trade row BEFORE the order is submitted,
+    so it carries the setup_id from the start. Every clean abort after
+    that point — the spread guard, the fresh duplicate check, the
+    submission-time demo check, a broker rejection — left the row at
+    PENDING forever, and `traded_setup_ids` counted PENDING.
+
+    So a setup whose order was REFUSED was recorded as "already traded"
+    and locked out for the whole 24-hour re-entry window. The row is
+    invisible on the dashboard — open positions are read from the
+    broker, the history shows CLOSED only — so the operator saw a card
+    saying "this exact setup has already been traded" beside 0 open,
+    0 closed and 0 trades today, and reasonably concluded the bot was
+    broken.
+
+    It was worse than random: the better the setup, the sooner it is
+    ranked, attempted, refused and blocked. The system burned its own
+    best candidates for a day at a time.
+    """
+
+    executor = Executor(config, broker, repos, sleeper=lambda _s: None)
+    plan = make_plan(setup_id="f6e0d871084c7cea")
+
+    # A spread wide enough that the execution guard must refuse it.
+    from fakes import Quote
+
+    broker.quotes["EURUSD"] = Quote("EURUSD", 1.0990, 1.1050, SETUP_END)
+    result = executor.execute(plan, DEFAULT_SPEC, atr=0.0012)
+
+    assert result.ok is False
+    assert result.status == "ABORTED"
+    assert broker.submitted == [], "nothing may have been sent"
+
+    assert "f6e0d871084c7cea" not in _setup_ids(repos), (
+        "an order that never reached the broker is not a trade and must not "
+        "block the setup"
+    )
+    assert repos.trades.open_trades() == [], "nor may it sit in the book as open"
+
+
+def test_an_ambiguous_submission_still_blocks_the_setup(config, broker, repos):
+    """The control, and it matters more than the fix.
+
+    When the outcome is UNKNOWN a position may exist, so the row stays
+    PENDING and the setup stays blocked. Project rule 3: the only
+    recovery for an unknown write is to ask the broker — never to try
+    again. A fix that freed every pending row would have turned a
+    reconciliation case into a duplicate position.
+    """
+
+    executor = Executor(config, broker, repos, sleeper=lambda _s: None)
+    broker.place_order_hook = ambiguous_hook
+    plan = make_plan(setup_id="ambiguous-setup-id")
+
+    result = executor.execute(plan, DEFAULT_SPEC, atr=0.0012)
+
+    assert result.status == "AMBIGUOUS"
+    assert "ambiguous-setup-id" in _setup_ids(repos), (
+        "an unknown outcome must keep blocking the setup"
+    )

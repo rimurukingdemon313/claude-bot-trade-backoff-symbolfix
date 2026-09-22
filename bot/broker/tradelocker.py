@@ -199,6 +199,9 @@ class TradeLockerBroker:
         self._expires_at = 0.0
         self._acc_num: str | None = None
         self._trade_config: dict[str, Any] | None = None
+        #: The quote endpoint shape this deployment answers on, once
+        #: discovered. See `QUOTE_STRATEGIES`.
+        self._quote_strategy: tuple[str, str, str] | None = None
         self._instrument_cache: dict[str, InstrumentSpec] = {}
         self._instrument_cache_at = 0.0
         self._instrument_detail_error: str | None = None
@@ -776,13 +779,78 @@ class TradeLockerBroker:
 
     # -- market data -----------------------------------------------------
 
-    def quote(self, spec: InstrumentSpec) -> Quote:
+    #: Ways a TradeLocker backend can be asked for a live quote.
+    #:
+    #: The path was hard-coded to the account/instrument shape, and on
+    #: this deployment it answers 404 — so EVERY order died at
+    #: `Executor._spread_check`, which needs a live quote before
+    #: submitting. The setup passed every gate and then failed on the
+    #: last read, once per scan, silently.
+    #:
+    #: `bot/broker/history.py` already learned this lesson for candles:
+    #: deployments differ in path shape, and hard-coding one guess makes
+    #: the bot silently never trade on a broker that uses another. The
+    #: same discovery is applied here — probe a small matrix once, keep
+    #: what works, log it so the working shape is visible in the
+    #: deployment's own logs.
+    #:
+    #: Documented shape first: TradeLocker's own API exposes quotes at
+    #: /trade/quotes with the instrument and route as QUERY parameters.
+    QUOTE_STRATEGIES: tuple[tuple[str, str, str], ...] = (
+        ("documented", "/trade/quotes", "tradableInstrumentId"),
+        ("documented-instrumentId", "/trade/quotes", "instrumentId"),
+        ("instrument-path", "/trade/instruments/{instrument}/quotes", ""),
+        ("account-path", "/trade/accounts/{account}/instruments/{instrument}/quotes", ""),
+    )
+
+    def _quote_payload(self, spec: InstrumentSpec) -> Any:
+        """Fetch a quote, discovering the endpoint shape on first use."""
+
         route = spec.quote_route_id or spec.route_id
-        result = self.get(
-            f"/trade/accounts/{self.broker_config.account_id}/instruments/"
-            f"{spec.tradable_instrument_id}/quotes",
-            query={"routeId": route},
-        ) or {}
+        instrument = spec.tradable_instrument_id
+        account = self.broker_config.account_id
+
+        def attempt(strategy: tuple[str, str, str]) -> Any:
+            _name, template, id_param = strategy
+            path = template.format(account=account, instrument=instrument)
+            query: dict[str, Any] = {"routeId": route}
+            if id_param:
+                query[id_param] = instrument
+            return self.get(path, query=query)
+
+        with self._lock:
+            known = self._quote_strategy
+        if known is not None:
+            return attempt(known)
+
+        errors: list[str] = []
+        for strategy in self.QUOTE_STRATEGIES:
+            try:
+                result = attempt(strategy)
+            except BrokerError as exc:
+                errors.append(f"{strategy[0]}: {exc}")
+                continue
+            payload = result or {}
+            if _num(_first(payload, "bp", "bid", "bidPrice"), None) is None:
+                errors.append(f"{strategy[0]}: answered without a bid")
+                continue
+            with self._lock:
+                self._quote_strategy = strategy
+            log_event(
+                "BROKER",
+                f"quote endpoint discovered: {strategy[0]} ({strategy[1]})",
+                symbol=spec.symbol,
+            )
+            return result
+
+        raise BrokerError(
+            "no known TradeLocker quote endpoint answered for "
+            f"{spec.symbol}; tried {len(self.QUOTE_STRATEGIES)} shapes — "
+            + "; ".join(errors)[:600]
+        )
+
+    def quote(self, spec: InstrumentSpec) -> Quote:
+        result = self._quote_payload(spec) or {}
         bid = _num(_first(result, "bp", "bid", "bidPrice"), None)
         ask = _num(_first(result, "ap", "ask", "askPrice"), None)
         if bid is None or ask is None or bid <= 0 or ask <= 0:

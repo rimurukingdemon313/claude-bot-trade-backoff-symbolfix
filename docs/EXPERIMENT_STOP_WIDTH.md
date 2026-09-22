@@ -64,4 +64,60 @@ discovery table exists to choose which four runs are worth doing.
 
 ## Results: held out (seeds 500-511)
 
-To be filled in.
+    stop ATR / minRR   trades   win     avgR      P/L     maxDD
+    0.35 / 2.0  LIVE      158   46.8%  -0.125   -406.35   459.07
+    0.35 / 1.2               138   45.7%  -0.145   -330.52   457.02
+    0.60 / 1.2               129   45.7%  -0.151   -337.00   418.89
+    0.90 / 1.2                83   50.6%  -0.090   -109.66   295.20
+
+**Neither candidate qualifies. Nothing moves.**
+
+Condition 1 was a positive avgR on data that chose nothing. No row
+achieved it, so the rule stops here and the defaults stand.
+
+`0.60/1.2` is the instructive failure. On the discovery seeds it
+returned +0.013R and +$115 and was the best-balanced row in the table.
+On fresh seeds it is the WORST of the four. That is not bad luck; it is
+the signature of noise — a number that looks like an edge and inverts
+when the seed changes.
+
+## A correction I owe the record
+
+Reading the discovery table I wrote that the live setting (0.35 ATR,
+1:2) was "the worst row of six". On the held-out seeds it is the second
+BEST of four. I was generalising from one dataset, which is the exact
+error this document exists to prevent. The live setting is not the
+problem I described it as.
+
+## The finding that outlives the table
+
+    spread between best and worst config, same seeds   ~0.06R
+    spread for the SAME config across seed sets        ~0.16R
+
+Dataset variance is roughly three times configuration variance. This
+harness cannot separate these settings — not with more runs, not with a
+finer grid. Every positive number it has produced sits inside its own
+sampling noise.
+
+So the conclusion is about the method, not the parameter: **synthetic
+tuning of the stop floor is finished.** Continuing would not be work,
+it would be manufacturing attractive numbers that die on contact with a
+market, and the operator carries that cost.
+
+`0.90 ATR` is the only setting better than both baselines on BOTH sets
+— best win rate, best drawdown, smallest loss. It was never positive
+out of sample, so the rule refuses it, and a rule written before the
+results that is then argued around is decoration. It is recorded here
+as the best candidate for a properly powered test on real data, not as
+a recommendation.
+
+## What replaces this
+
+Paper trading, with the tuning fingerprint (d30f944) on every trade so
+runs stay separable. Twenty or thirty real fills will settle more than
+a thousand synthetic runs, because they carry the one thing no
+generated series has: a real spread that widens exactly when it hurts.
+
+The partial take-profit at 0.75R remains the only change in this
+repository that survived a held-out test (docs/EXPERIMENT_WIN_RATE.md).
+It is on by default. That is the configuration to run.

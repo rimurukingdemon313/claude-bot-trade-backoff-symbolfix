@@ -846,3 +846,73 @@ def test_an_unpriceable_close_is_still_reported_as_unknown(config, broker, repos
     trade = repos.trades.by_execution_id(result.plan.execution_id)
     assert trade["realized_pnl"] is None
     assert trade["exit_reason"] == "BROKER_CLOSED_PNL_UNKNOWN"
+
+
+def test_a_voluntary_exit_waits_for_a_sane_spread(config, broker, repos):
+    """The structural exit closed WORSE than the stop it was improving on.
+
+    Live: a SELL on USDCHF entered 0.82058 with its stop at 0.82115.
+    The structural exit fired and issued a market close while the spread
+    was 10.5 pips against a 5.7-pip stop — 184% of the trade's own risk.
+    It filled at 0.82131, 1.6 pips BEYOND the stop. $24.98 at the stop
+    became $32.00, so a feature that exists to protect the account cost
+    $7 more than doing nothing.
+
+    The executor validates the spread before OPENING. Nothing validated
+    it before a voluntary CLOSE.
+
+    Deferring is safe because the stop is still at the broker: the worst
+    case of waiting is the loss the trade was already sized for.
+    """
+
+    from fakes import Quote
+    from bot.execution.manager import ManagementAction, PositionManager
+
+    executor = Executor(config, broker, repos, sleeper=lambda _s: None)
+    result = executor.execute(make_plan(), DEFAULT_SPEC, atr=0.0012)
+    assert result.ok
+    position_id = str(result.broker_position_id)
+
+    manager = PositionManager(config, broker, repos)
+    close = ManagementAction(
+        "CLOSE", position_id, "EURUSD", "structure invalidated by a confirmed close"
+    )
+
+    # A spread wider than the trade's own risk, as at a rollover.
+    trade = repos.trades.by_position_id(position_id)
+    risk = abs(float(trade["actual_entry"]) - float(trade["stop_loss"]))
+    mid = float(trade["actual_entry"])
+    broker.quotes["EURUSD"] = Quote(
+        "EURUSD", mid - risk * 0.75, mid + risk * 0.75, SETUP_END
+    )
+    applied = manager.apply([close])
+
+    assert broker.closures == [], "no market close may go out into that spread"
+    assert applied and applied[0]["ok"] is False
+    assert "spread" in (applied[0].get("deferred") or "")
+
+
+def test_the_same_exit_goes_through_once_the_spread_is_normal(config, broker, repos):
+    """The control: deferring must not become never closing.
+
+    Without this, a guard that refuses every exit would pass the test
+    above while quietly disabling the structural exit altogether.
+    """
+
+    from fakes import Quote
+    from bot.execution.manager import ManagementAction, PositionManager
+
+    executor = Executor(config, broker, repos, sleeper=lambda _s: None)
+    result = executor.execute(make_plan(), DEFAULT_SPEC, atr=0.0012)
+    position_id = str(result.broker_position_id)
+
+    manager = PositionManager(config, broker, repos)
+    close = ManagementAction("CLOSE", position_id, "EURUSD", "structure invalidated")
+
+    trade = repos.trades.by_position_id(position_id)
+    mid = float(trade["actual_entry"])
+    broker.quotes["EURUSD"] = Quote("EURUSD", mid - 0.00001, mid + 0.00001, SETUP_END)
+    applied = manager.apply([close])
+
+    assert broker.closures, "a normal spread must let the exit through"
+    assert applied and applied[0]["ok"] is True

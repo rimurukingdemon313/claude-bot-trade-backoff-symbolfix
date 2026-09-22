@@ -144,6 +144,70 @@ class IntentRepository:
             raise
         return self.get(idempotency_key)  # type: ignore[return-value]
 
+    #: Intent states that PROVE no order exists at the broker, so the
+    #: same plan may be attempted again.
+    #:
+    #: FAILED is set in exactly two places: an abort BEFORE submission
+    #: (spread, duplicate check, demo verification) and an explicit
+    #: `BrokerRejected`, where the broker itself said no. ABANDONED is
+    #: set only by reconciliation after it has asked the broker and
+    #: established that nothing happened.
+    #:
+    #: AMBIGUOUS, SUBMITTED, ACKNOWLEDGED and FILLED are deliberately
+    #: absent. A position may exist under any of them, and project rule
+    #: 3 is absolute there: the recovery for a write whose outcome is
+    #: unknown is to query the broker, never to send it again.
+    RETRYABLE = ("FAILED", "ABANDONED")
+
+    def reopen(self, idempotency_key: str, plan: Mapping[str, Any]) -> bool:
+        """Re-arm an intent whose order never reached the broker.
+
+        Without this the idempotency key was a LIFETIME ban on a plan,
+        not a duplicate guard. A setup refused once by the spread guard
+        produced the identical execution_id on every later scan — same
+        symbol, direction, trigger time and levels — so it could never
+        be attempted again however much conditions improved. One wide
+        spread cost that setup permanently.
+
+        Returns False, leaving the row untouched, unless the existing
+        intent is in a state that proves nothing was sent. The extra
+        check on the broker ids is deliberate belt-and-braces: if any
+        code path ever recorded an order or position against this
+        intent, it is not retryable whatever its status says.
+        """
+
+        existing = self.get(idempotency_key)
+        if existing is None:
+            return False
+        if str(existing.get("status")) not in self.RETRYABLE:
+            return False
+        if existing.get("broker_order_id") or existing.get("broker_position_id"):
+            return False
+
+        now = utc_now().isoformat()
+        self.db.execute(
+            """
+            UPDATE execution_intents
+               SET status = 'CREATED',
+                   plan = ?,
+                   failure_reason = NULL,
+                   resolved_at = NULL,
+                   updated_at = ?
+             WHERE idempotency_key = ?
+               AND status IN ('FAILED','ABANDONED')
+               AND broker_order_id IS NULL
+               AND broker_position_id IS NULL
+            """,
+            (_dumps(plan), now, idempotency_key),
+        )
+        log_event(
+            "ORDER",
+            f"re-arming intent {idempotency_key} after {existing.get('status')}: the "
+            "previous attempt never reached the broker, so this plan may be tried again",
+            symbol=str(existing.get("symbol")),
+        )
+        return True
+
     def get(self, idempotency_key: str) -> dict[str, Any] | None:
         row = self.db.query_one(
             "SELECT * FROM execution_intents WHERE idempotency_key = ?", (idempotency_key,)
@@ -214,6 +278,38 @@ class TradeRepository:
 
     def create_pending(self, *, execution_id: str, plan: Mapping[str, Any]) -> None:
         now = utc_now().isoformat()
+
+        # `trades.execution_id` is UNIQUE, so a retried plan collides with
+        # the ABORTED row its own earlier attempt left behind. Revive that
+        # row rather than inserting a second one: same execution, same id,
+        # a new attempt. ONLY from ABORTED — an OPEN, PENDING, ORPHANED or
+        # CLOSED row is a real trade or a possible one, and overwriting
+        # any of those would erase a position from the book.
+        revived = self.db.execute(
+            """
+            UPDATE trades
+               SET status = 'PENDING',
+                   exit_reason = NULL,
+                   planned_entry = ?, stop_loss = ?, take_profit = ?,
+                   quantity = ?, risk_amount = ?, risk_pct = ?,
+                   expected_profit = ?, risk_reward = ?,
+                   setup_grade = ?, setup_score = ?, ai_confidence = ?,
+                   setup_id = ?, versions = ?, context = ?, updated_at = ?
+             WHERE execution_id = ? AND status = 'ABORTED'
+            """,
+            (
+                plan.get("entry"), plan.get("stop_loss"), plan.get("take_profit"),
+                plan.get("quantity"), plan.get("risk_amount"), plan.get("risk_pct"),
+                plan.get("expected_profit"), plan.get("risk_reward"),
+                plan.get("setup_grade"), plan.get("setup_score"),
+                plan.get("ai_confidence"), plan.get("setup_id"),
+                _dumps(version_stamp()), _dumps(plan.get("context", {})),
+                now, execution_id,
+            ),
+        )
+        if self.by_execution_id(execution_id) is not None:
+            return
+
         self.db.execute(
             """
             INSERT INTO trades (

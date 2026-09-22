@@ -55,6 +55,11 @@ class ExecutionResult:
     broker_position_id: str | None = None
     fill_price: float | None = None
     slippage: float | None = None
+    #: True when this refusal is about THIS symbol and nothing was sent,
+    #: so the scan may safely consider its next-best candidate. False for
+    #: anything account-wide (a failed demo check, an unreadable
+    #: database) and for anything whose broker outcome is uncertain.
+    symbol_specific: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -69,6 +74,7 @@ class ExecutionResult:
             "brokerPositionId": self.broker_position_id,
             "fillPrice": self.fill_price,
             "slippage": round(self.slippage, 6) if self.slippage is not None else None,
+            "symbolSpecific": self.symbol_specific,
         }
 
 
@@ -189,7 +195,18 @@ class Executor:
                 plan=plan.as_dict(),
             )
         except StorageError as exc:
-            return ExecutionResult(False, plan, "DUPLICATE", str(exc))
+            # An intent already exists for this exact plan. That is the
+            # duplicate guard — unless the previous attempt never reached
+            # the broker, in which case the key had become a lifetime ban
+            # on the setup rather than a guard against a second order.
+            # `reopen` re-arms ONLY from a state that proves nothing was
+            # sent, and refuses outright if any order or position id was
+            # ever recorded.
+            if not self.repos.intents.reopen(plan.execution_id, plan.as_dict()):
+                return ExecutionResult(False, plan, "DUPLICATE", str(exc))
+            self.repos.events.append(
+                plan.execution_id, "INTENT_REARMED", {"previous": str(exc)[:300]}
+            )
 
         self.repos.trades.create_pending(execution_id=plan.execution_id, plan=plan.as_dict())
         self.repos.events.append(plan.execution_id, "INTENT_CREATED", plan.as_dict())
@@ -200,7 +217,7 @@ class Executor:
             self.repos.intents.mark(plan.execution_id, "FAILED", failure_reason=duplicate)
             self.repos.events.append(plan.execution_id, "ABORTED_DUPLICATE", {"reason": duplicate})
             self.repos.trades.mark_aborted(execution_id=plan.execution_id, reason=duplicate)
-            return ExecutionResult(False, plan, "ABORTED", duplicate)
+            return ExecutionResult(False, plan, "ABORTED", duplicate, symbol_specific=True)
 
         # 5. Execution conditions.
         ok, reason, reference_price = self._spread_check(plan, spec, atr)
@@ -212,7 +229,7 @@ class Executor:
             # look "already traded" for the whole re-entry window, so a
             # spread that widened for one minute cost the setup a day.
             self.repos.trades.mark_aborted(execution_id=plan.execution_id, reason=reason or "spread")
-            return ExecutionResult(False, plan, "ABORTED", reason)
+            return ExecutionResult(False, plan, "ABORTED", reason, symbol_specific=True)
 
         # 6. DEMO verification #4 (submission) — immediately before the write.
         try:

@@ -570,6 +570,37 @@ class TradeRepository:
             str(row["setup_id"]) for row in rows if row.get("setup_id")
         )
 
+    def losses_by_symbol_since(self, moment: datetime) -> dict[str, dict[str, Any]]:
+        """Closed trades per symbol since `moment`: count, losses, net P/L.
+
+        Feeds the per-symbol guard in `risk/engine.py`. Trades whose P/L
+        could never be established are counted in `unmeasured` and left
+        out of the total rather than folded in as zero — a close we could
+        not price is not a break-even close (rule 6).
+        """
+
+        rows = self.db.query(
+            "SELECT symbol, realized_pnl FROM trades "
+            "WHERE status = 'CLOSED' AND closed_at IS NOT NULL AND closed_at >= ?",
+            (ensure_utc(moment).isoformat(),),
+        )
+        summary: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            symbol = str(row["symbol"]).upper()
+            entry = summary.setdefault(
+                symbol, {"closed": 0, "losses": 0, "net": 0.0, "unmeasured": 0}
+            )
+            entry["closed"] += 1
+            pnl = row["realized_pnl"]
+            if pnl is None:
+                entry["unmeasured"] += 1
+                continue
+            value = float(pnl)
+            entry["net"] += value
+            if value < 0:
+                entry["losses"] += 1
+        return summary
+
     def open_trades(self) -> list[dict[str, Any]]:
         rows = self.db.query(
             "SELECT * FROM trades WHERE status IN ('OPEN','ORPHANED','PENDING') ORDER BY created_at DESC"

@@ -24,7 +24,7 @@ import time
 import threading
 import uuid
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Sequence
 
 from .ai.client import AIClient
@@ -583,6 +583,7 @@ class Orchestrator:
             last_loss_at=last_loss,
             last_execution_failure_at=last_failure,
             traded_setup_ids=self._traded_setup_ids(moment),
+            recent_by_symbol=self._recent_by_symbol(moment),
         )
 
     def _traded_setup_ids(self, moment: datetime) -> frozenset[str]:
@@ -1155,6 +1156,30 @@ class Orchestrator:
             if blocking
             else None,
         }
+
+    def _recent_by_symbol(self, moment: datetime) -> dict[str, dict[str, Any]]:
+        """Per-symbol closed-trade record over the symbol-lock window.
+
+        Skipped entirely when the guard is off, so a disabled feature
+        costs no query. An unreadable record returns empty, which makes
+        the guard stand down rather than bench a symbol on a database
+        error — it may only ever refuse a trade, so silence must mean
+        "no evidence to refuse on", not "refuse everything".
+        """
+
+        limits = self.config.risk
+        if limits.symbol_lock_losses <= 0:
+            return {}
+        since = moment - timedelta(hours=limits.symbol_lock_lookback_hours)
+        try:
+            return self.repos.trades.losses_by_symbol_since(since)
+        except BotError as exc:
+            log_event(
+                "RISK",
+                f"could not read the per-symbol trade record: {exc}",
+                severity="warning",
+            )
+            return {}
 
     def _observe_spread(self, spec: InstrumentSpec, *, now: datetime) -> float | None:
         """Read the spread, persist a sample, and return it.

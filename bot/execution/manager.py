@@ -20,7 +20,7 @@ from typing import Any, Sequence
 
 from ..clock import ensure_utc, utc_now
 from ..config import R_EPSILON, TradingConfig
-from ..errors import BotError
+from ..errors import AmbiguousExecution, BotError
 from ..observability import log_event
 from ..smc.sessions import is_forex_weekend
 from ..storage.repositories import Repositories
@@ -381,6 +381,52 @@ class PositionManager:
                     )
                 log_event("POSITION", action.reason, symbol=action.symbol, action=action.kind)
                 applied.append({**action.as_dict(), "ok": True})
+            except AmbiguousExecution as exc:
+                # The write may have landed. Rule 3 says the only
+                # recovery is to ask the broker — never to try again.
+                #
+                # Nothing here retried in code, and that hid the problem:
+                # this method is called on EVERY poll, so a partial close
+                # whose outcome was unknown simply came back thirty
+                # seconds later and closed another slice. The guard that
+                # prevents that is `mark_partial_taken`, and it sat AFTER
+                # the broker call, so an ambiguous outcome skipped it.
+                # That is the same descending stack of slices that cost a
+                # live position — 0.17, 0.09, 0.04, 0.03, 0.01, 0.01 —
+                # reached by a different route than the missing column.
+                #
+                # So the flag is written on the ambiguous path too. It is
+                # the safe asymmetry: recording a partial that did not
+                # happen costs one runner left open a little larger than
+                # intended, and the reconciler corrects it from broker
+                # state. NOT recording one that did happen slices the
+                # position again, every poll, until nothing is left.
+                if action.kind == "PARTIAL_CLOSE":
+                    self.repos.trades.mark_partial_taken(action.position_id)
+                trade = self.repos.trades.by_position_id(action.position_id)
+                if trade:
+                    self.repos.events.append(
+                        str(trade["execution_id"]),
+                        f"MANAGE_{action.kind}_AMBIGUOUS",
+                        {**action.as_dict(), "reason": str(exc)},
+                    )
+                self.repos.reconciliations.record(
+                    "AMBIGUOUS_MANAGEMENT",
+                    {
+                        "positionId": action.position_id,
+                        "action": action.kind,
+                        "reason": str(exc),
+                    },
+                    symbol=action.symbol,
+                )
+                log_event(
+                    "POSITION",
+                    f"{action.kind} on {action.position_id} outcome UNKNOWN — not repeated, "
+                    f"handed to the reconciler: {exc}",
+                    severity="critical",
+                    symbol=action.symbol,
+                )
+                applied.append({**action.as_dict(), "ok": False, "ambiguous": str(exc)})
             except BotError as exc:
                 log_event(
                     "POSITION",

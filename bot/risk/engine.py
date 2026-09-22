@@ -64,6 +64,10 @@ class AccountRiskState:
     #: break of structure from the chart, so without this the next scan
     #: re-derives the same setup and takes it again.
     traded_setup_ids: frozenset[str] = frozenset()
+    #: symbol -> {closed, losses, net, unmeasured} over the lock lookback
+    #: window. Supplied by the orchestrator; empty means the per-symbol
+    #: guard has nothing to judge and stands down rather than guessing.
+    recent_by_symbol: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
 
     @property
     def drawdown_pct(self) -> float:
@@ -291,6 +295,31 @@ class RiskEngine:
                 f"a repeat inside {limits.setup_reentry_block_hours:g}h would be the same "
                 "trade twice, not a second opportunity"
             )
+
+        # A symbol that has been losing is benched on its own, without
+        # taking the rest of the book down with it.
+        #
+        # Every other guard here is global — a losing streak, a cooldown,
+        # a drawdown — so the symbol doing the damage keeps its turn in
+        # the scan while the innocent ones serve its sentence. Freqtrade
+        # gets this right with per-pair locks and the idea transfers
+        # directly.
+        #
+        # Off unless configured (rule 12: it has not earned its place on
+        # this account's evidence yet), and it can only ever REFUSE a
+        # trade, never permit one.
+        if limits.symbol_lock_losses > 0:
+            stats = account.recent_by_symbol.get(candidate.symbol.upper())
+            if stats:
+                losses = int(stats.get("losses") or 0)
+                if losses >= limits.symbol_lock_losses:
+                    net = stats.get("net")
+                    net_note = f", net {net:+.2f}" if isinstance(net, (int, float)) else ""
+                    reasons.append(
+                        f"{candidate.symbol} is benched: {losses} losing trades in the last "
+                        f"{limits.symbol_lock_lookback_hours:g}h{net_note} — the other symbols "
+                        "keep trading"
+                    )
 
         if account.trades_today >= limits.max_trades_per_day:
             reasons.append(

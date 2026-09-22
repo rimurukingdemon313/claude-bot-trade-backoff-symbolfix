@@ -592,3 +592,78 @@ def test_an_ambiguous_submission_still_blocks_the_setup(config, broker, repos):
     assert "ambiguous-setup-id" in _setup_ids(repos), (
         "an unknown outcome must keep blocking the setup"
     )
+
+
+def test_a_setup_refused_once_is_attempted_again_when_conditions_clear(
+    config, broker, repos
+):
+    """The second blocker, under the one fixed a commit earlier.
+
+    `execution_id` is derived from symbol, direction, trigger time and
+    the three levels. None of those change while the same sweep and
+    break of structure sit on the chart, so every later scan produced
+    the IDENTICAL key — and `intents.create` refused any existing
+    intent whatever its status. A setup the spread guard turned away
+    once could never be attempted again, however much conditions
+    improved. The idempotency key had become a lifetime ban on a plan
+    rather than a guard against a second order.
+
+    A spread that widened for one minute cost that setup permanently.
+    """
+
+    from fakes import Quote
+
+    executor = Executor(config, broker, repos, sleeper=lambda _s: None)
+
+    broker.quotes["EURUSD"] = Quote("EURUSD", 1.0990, 1.1050, SETUP_END)
+    first = executor.execute(make_plan(), DEFAULT_SPEC, atr=0.0012)
+    assert first.status == "ABORTED"
+    assert broker.submitted == []
+
+    # The spread narrows; the next scan re-derives the same setup.
+    broker.quotes["EURUSD"] = Quote("EURUSD", 1.12197, 1.12199, SETUP_END)
+    second = executor.execute(make_plan(), DEFAULT_SPEC, atr=0.0012)
+
+    assert second.ok is True, second.reason
+    assert len(broker.submitted) == 1, "exactly one order, on the second attempt"
+
+
+def test_a_filled_setup_is_never_attempted_again(config, broker, repos):
+    """The control that protects rule 3, and the reason this was delicate.
+
+    Re-arming is allowed ONLY from a state that proves nothing reached
+    the broker. A FILLED intent means a position exists, so the same
+    plan must still be refused — otherwise the fix above would have
+    turned the duplicate guard into a duplicate-position generator.
+    """
+
+    executor = Executor(config, broker, repos, sleeper=lambda _s: None)
+    first = executor.execute(make_plan(), DEFAULT_SPEC, atr=0.0012)
+    assert first.ok is True
+
+    second = executor.execute(make_plan(), DEFAULT_SPEC, atr=0.0012)
+
+    assert second.ok is False
+    assert second.status in ("DUPLICATE", "ABORTED")
+    assert len(broker.submitted) == 1, "a filled plan must never send a second order"
+
+
+def test_an_ambiguous_intent_is_never_re_armed(config, broker, repos):
+    """The other half of rule 3.
+
+    After an ambiguous submission a position MAY exist. Re-arming there
+    would resend a write whose outcome is unknown, which is the single
+    thing this codebase forbids most plainly.
+    """
+
+    executor = Executor(config, broker, repos, sleeper=lambda _s: None)
+    broker.place_order_hook = ambiguous_hook
+    first = executor.execute(make_plan(), DEFAULT_SPEC, atr=0.0012)
+    assert first.status == "AMBIGUOUS"
+
+    sent_before = len(broker.submitted)
+    broker.place_order_hook = None
+    second = executor.execute(make_plan(), DEFAULT_SPEC, atr=0.0012)
+
+    assert second.status == "DUPLICATE"
+    assert len(broker.submitted) == sent_before, "no resend while the outcome is unknown"

@@ -189,7 +189,18 @@ class Executor:
                 plan=plan.as_dict(),
             )
         except StorageError as exc:
-            return ExecutionResult(False, plan, "DUPLICATE", str(exc))
+            # An intent already exists for this exact plan. That is the
+            # duplicate guard — unless the previous attempt never reached
+            # the broker, in which case the key had become a lifetime ban
+            # on the setup rather than a guard against a second order.
+            # `reopen` re-arms ONLY from a state that proves nothing was
+            # sent, and refuses outright if any order or position id was
+            # ever recorded.
+            if not self.repos.intents.reopen(plan.execution_id, plan.as_dict()):
+                return ExecutionResult(False, plan, "DUPLICATE", str(exc))
+            self.repos.events.append(
+                plan.execution_id, "INTENT_REARMED", {"previous": str(exc)[:300]}
+            )
 
         self.repos.trades.create_pending(execution_id=plan.execution_id, plan=plan.as_dict())
         self.repos.events.append(plan.execution_id, "INTENT_CREATED", plan.as_dict())

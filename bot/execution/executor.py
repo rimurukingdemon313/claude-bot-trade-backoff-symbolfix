@@ -199,6 +199,7 @@ class Executor:
         if duplicate:
             self.repos.intents.mark(plan.execution_id, "FAILED", failure_reason=duplicate)
             self.repos.events.append(plan.execution_id, "ABORTED_DUPLICATE", {"reason": duplicate})
+            self.repos.trades.mark_aborted(execution_id=plan.execution_id, reason=duplicate)
             return ExecutionResult(False, plan, "ABORTED", duplicate)
 
         # 5. Execution conditions.
@@ -206,6 +207,11 @@ class Executor:
         if not ok:
             self.repos.intents.mark(plan.execution_id, "FAILED", failure_reason=reason)
             self.repos.events.append(plan.execution_id, "ABORTED_SPREAD", {"reason": reason})
+            # No order left this process, so the row `create_pending`
+            # wrote is not a trade. Leaving it PENDING made the setup
+            # look "already traded" for the whole re-entry window, so a
+            # spread that widened for one minute cost the setup a day.
+            self.repos.trades.mark_aborted(execution_id=plan.execution_id, reason=reason or "spread")
             return ExecutionResult(False, plan, "ABORTED", reason)
 
         # 6. DEMO verification #4 (submission) — immediately before the write.
@@ -218,6 +224,7 @@ class Executor:
             )
         except DemoVerificationError as exc:
             self.repos.intents.mark(plan.execution_id, "FAILED", failure_reason=str(exc))
+            self.repos.trades.mark_aborted(execution_id=plan.execution_id, reason=str(exc))
             return ExecutionResult(False, plan, "ABORTED", str(exc))
 
         # 7. Submit.
@@ -251,6 +258,12 @@ class Executor:
         except BrokerRejected as exc:
             self.repos.intents.mark(plan.execution_id, "FAILED", failure_reason=str(exc))
             self.repos.events.append(plan.execution_id, "REJECTED", {"reason": str(exc)})
+            # An explicit rejection is a KNOWN outcome: no position was
+            # created. The AmbiguousExecution paths above deliberately do
+            # NOT do this — there the row stays PENDING because a
+            # position may exist and rule 3 says the only recovery is to
+            # ask the broker, never to try again.
+            self.repos.trades.mark_aborted(execution_id=plan.execution_id, reason=str(exc))
             log(f"broker rejected the order: {exc}", severity="error")
             return ExecutionResult(False, plan, "REJECTED", str(exc))
         except BotError as exc:

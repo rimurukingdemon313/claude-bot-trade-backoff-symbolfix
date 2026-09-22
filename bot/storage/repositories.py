@@ -29,7 +29,10 @@ INTENT_STATES = (
     "ABANDONED",    # reconciliation proved nothing happened
 )
 
-TRADE_STATES = ("PENDING", "OPEN", "CLOSED", "ORPHANED")
+#: ABORTED is a row `create_pending` wrote for an order that never
+#: reached the broker. It is not a trade, and nothing may treat it
+#: as one — see `TradeRepository.mark_aborted`.
+TRADE_STATES = ("PENDING", "OPEN", "CLOSED", "ORPHANED", "ABORTED")
 
 
 def _is_unique_violation(exc: BaseException) -> bool:
@@ -199,7 +202,12 @@ class IntentRepository:
 
 
 class TradeRepository:
-    """The trade lifecycle: PENDING -> OPEN -> CLOSED (or ORPHANED)."""
+    """The trade lifecycle: PENDING -> OPEN -> CLOSED (or ORPHANED).
+
+    PENDING -> ABORTED is the fifth edge, and the one that was
+    missing: the row is written before submission, so an order the
+    executor refuses to send left it pending forever.
+    """
 
     def __init__(self, db: Database) -> None:
         self.db = db
@@ -241,6 +249,37 @@ class TradeRepository:
                 now,
                 now,
             ),
+        )
+
+    def mark_aborted(self, *, execution_id: str, reason: str) -> None:
+        """An execution that never reached the broker.
+
+        `create_pending` writes this row BEFORE the order is submitted,
+        so every clean abort after it — the spread guard, the fresh
+        duplicate check, the submission-time demo check, a broker
+        rejection — used to leave the row at PENDING forever. Nothing
+        cleaned it up.
+
+        That row is invisible on the dashboard: open positions come from
+        the broker and the history shows CLOSED only. But it carries the
+        `setup_id`, and `traded_setup_ids` counted it, so a setup whose
+        order was REFUSED was marked "already traded" and locked out for
+        the full re-entry window. The better the setup, the more likely
+        it burned itself — a high grade is ranked first, attempted
+        first, and blocked first.
+
+        ABORTED says what happened: no order, no position, nothing to
+        reconcile, and nothing to stop the same setup being taken when
+        the condition that blocked it clears.
+        """
+
+        self.db.execute(
+            """
+            UPDATE trades
+               SET status = 'ABORTED', exit_reason = ?, updated_at = ?
+             WHERE execution_id = ? AND status = 'PENDING'
+            """,
+            (reason[:300], utc_now().isoformat(), execution_id),
         )
 
     def mark_open(
@@ -403,8 +442,16 @@ class TradeRepository:
 
         moment = now or utc_now()
         cutoff = (moment - timedelta(hours=hours)).isoformat()
+        # ABORTED is excluded: that row is an execution that never
+        # reached the broker, so it is not a trade and must not block
+        # the setup. PENDING is deliberately INCLUDED — an ambiguous
+        # submission leaves the row pending and a position may exist,
+        # and project rule 3 says the recovery for an unknown write is
+        # to query the broker, never to try again.
         rows = self.db.query(
-            "SELECT setup_id FROM trades WHERE setup_id IS NOT NULL AND created_at >= ?",
+            "SELECT setup_id FROM trades "
+            " WHERE setup_id IS NOT NULL AND created_at >= ? "
+            "   AND status IN ('PENDING','OPEN','ORPHANED','CLOSED')",
             (cutoff,),
         )
         return frozenset(

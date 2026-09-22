@@ -88,7 +88,16 @@ class Strategy(Protocol):
     profile: StrategyProfile
 
     def analyze(
-        self, symbol: str, series: dict[str, Series], *, now: datetime | None = None
+        self,
+        symbol: str,
+        series: dict[str, Series],
+        *,
+        now: datetime | None = None,
+        #: The live spread, when one could be read. `None` means it could
+        #: not be — the stop is then built without a spread term and the
+        #: executor's spread gate remains the only protection, which is
+        #: the honest fallback rather than a guessed number (rule 6).
+        spread: float | None = None,
     ) -> SmcResult: ...
 
 

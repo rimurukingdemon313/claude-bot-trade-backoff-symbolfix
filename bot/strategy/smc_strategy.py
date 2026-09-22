@@ -39,6 +39,11 @@ class SmcStrategy:
         self.engine = SmcEngine(config)
 
     def analyze(
-        self, symbol: str, series: dict[str, Series], *, now: datetime | None = None
+        self,
+        symbol: str,
+        series: dict[str, Series],
+        *,
+        now: datetime | None = None,
+        spread: float | None = None,
     ) -> SmcResult:
-        return self.engine.analyze(symbol, series, now=now)
+        return self.engine.analyze(symbol, series, now=now, spread=spread)

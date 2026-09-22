@@ -915,6 +915,26 @@ class Orchestrator:
         # 1. Instrument specification (also the symbol-availability check).
         spec = self.broker.instrument(symbol)
 
+        # 1b. The live spread, read once and used twice: to pad the
+        #     structural stop by the amount the broker will trigger it
+        #     early by, and to record a sample so the thing that has
+        #     demonstrably cost us trades stops being invisible.
+        #
+        #     Taken HERE, before every gate below it, on purpose. A
+        #     spread recorded only on scans that reached the strategy
+        #     would be a sample of the calm hours: stale data, a news
+        #     blackout and a thin session all correlate with the wide
+        #     spreads this table exists to catch, and excluding them
+        #     would describe a market we do not trade in. The `session`
+        #     column is there so an analysis can filter afterwards, which
+        #     is the honest order — record everything, decide later.
+        #
+        #     Best effort. A quote that cannot be read is reported as
+        #     None, never as zero — the strategy then builds an unpadded
+        #     stop, and the executor's spread gate is still ahead of any
+        #     order (rule 6, rule 7).
+        spread = self._observe_spread(spec, now=now)
+
         # 2. News blackout — checked before data work, because it is cheap
         #    and definitive.
         news = self.news.check(symbol, now=now)
@@ -930,7 +950,7 @@ class Orchestrator:
         # 4. Strategy — SMC or the reversion mode, whichever is selected.
         #    Everything after this point is identical either way: a
         #    candidate is a candidate, and risk decides its fate.
-        smc_result = self.strategy.analyze(symbol, series, now=now)
+        smc_result = self.strategy.analyze(symbol, series, now=now, spread=spread)
         if smc_result.candidate is None:
             return SymbolOutcome(
                 symbol, "SMC", "NO_SETUP", smc_result.rejection, smc=smc_result
@@ -1135,6 +1155,46 @@ class Orchestrator:
             if blocking
             else None,
         }
+
+    def _observe_spread(self, spec: InstrumentSpec, *, now: datetime) -> float | None:
+        """Read the spread, persist a sample, and return it.
+
+        Recording is deliberately separate from acting on it. Every
+        argument we have had about why a trade lost has been an argument
+        about the spread conducted without a single stored measurement of
+        it — inferring one moment's spread from a different moment's
+        screenshot. A sample per symbol per scan turns that into data:
+        which symbols are chronically expensive, which hours are, and
+        whether the rollover blackout is the right width.
+
+        Neither the read nor the write may break a scan, and neither
+        substitutes a number for a failure.
+        """
+
+        try:
+            quote = self.broker.quote(spec)
+        except BotError as exc:
+            log_event("SPREAD", f"no quote for {spec.symbol}: {exc}", symbol=spec.symbol)
+            return None
+        spread = quote.spread
+        if spread is None or spread < 0:
+            return None
+        try:
+            self.repos.spreads.record(
+                symbol=spec.symbol,
+                observed_at=now,
+                bid=quote.bid,
+                ask=quote.ask,
+                spread=spread,
+                session=classify_session(now, self.config.sessions).name,
+            )
+        except BotError as exc:
+            # A measurement we failed to file is not a reason to skip a
+            # trade. It is a reason to say so.
+            log_event(
+                "SPREAD", f"could not record a spread sample: {exc}", symbol=spec.symbol
+            )
+        return spread
 
     def _rate_lookup(self, base: str, quote: str) -> float | None:
         """Broker-sourced FX rate for cross-currency risk conversion."""

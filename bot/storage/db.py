@@ -27,7 +27,7 @@ from ..observability import log_event
 #: Bump when ddl() changes. Every statement is CREATE ... IF NOT EXISTS, so
 #: migration stays idempotent and safe to run on every boot; the version is
 #: recorded so a deployment's schema generation is attributable.
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 #: (table, column, definition) added after the first release. Applied on
 #: every boot and safe to re-run: an existing column raises and is ignored.
@@ -344,6 +344,37 @@ class Database:
             )
             """,
             f"""
+            -- Every spread we have ever observed, because until now we
+            -- had observed none of them.
+            --
+            -- The spread is the only mechanism we have PROVEN destroys
+            -- our trades: a short closed at 0.82131 when the market
+            -- never traded within 6.1 pips of that price, +5.8 pips on
+            -- the bid, booked at -7.3. Yet nothing in this system wrote
+            -- a spread down, so every diagnosis of it has been one
+            -- moment's screenshot argued against another moment's
+            -- measurement.
+            --
+            -- One row per symbol per scan answers, with arithmetic
+            -- instead of argument: which symbols are chronically
+            -- expensive, which hours are, whether the rollover blackout
+            -- is the right width, and whether the candle series is quoted
+            -- on the bid, the mid or the ask — which decides how much
+            -- padding a stop actually needs.
+            --
+            -- Pure observation. Nothing here gates a trade.
+            CREATE TABLE IF NOT EXISTS spread_samples (
+                id {serial},
+                symbol TEXT NOT NULL,
+                observed_at TEXT NOT NULL,
+                bid REAL,
+                ask REAL,
+                spread REAL NOT NULL,
+                session TEXT,
+                hour_utc INTEGER
+            )
+            """,
+            f"""
             -- Broker metadata that does not change: the contract size for
             -- an instrument is a property of the instrument, not of a
             -- session. TradeLocker's instrument DIRECTORY omits it, so it
@@ -400,6 +431,7 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_intents_status ON execution_intents(status)",
             "CREATE INDEX IF NOT EXISTS idx_exec_events_id ON execution_events(execution_id)",
             "CREATE INDEX IF NOT EXISTS idx_equity_created ON equity_snapshots(created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_spread_symbol_time ON spread_samples(symbol, observed_at)",
         ]
 
     def _column_exists(self, cursor: Any, table: str, column: str) -> bool:

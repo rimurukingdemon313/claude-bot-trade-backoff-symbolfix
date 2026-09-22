@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Sequence
 
-from ..config import SmcConfig, TradingConfig
+from ..config import R_EPSILON, SmcConfig, TradingConfig
 from ..marketdata.candles import Candle
 from ..marketdata.provider import Series
 from .checks import Check, Checklist, summarise
@@ -312,7 +312,12 @@ class SmcEngine:
     # -- multi timeframe -------------------------------------------------
 
     def analyze(
-        self, symbol: str, series: dict[str, Series], *, now: datetime | None = None
+        self,
+        symbol: str,
+        series: dict[str, Series],
+        *,
+        now: datetime | None = None,
+        spread: float | None = None,
     ) -> SmcResult:
         analyses = {
             timeframe: self.analyze_timeframe(
@@ -320,7 +325,7 @@ class SmcEngine:
             )
             for timeframe, data in series.items()
         }
-        result = self.evaluate(symbol, analyses, now=now)
+        result = self.evaluate(symbol, analyses, now=now, spread=spread)
         return SmcResult(
             symbol=symbol,
             analyses=analyses,
@@ -332,16 +337,26 @@ class SmcEngine:
         )
 
     def build_candidate(
-        self, symbol: str, analyses: dict[str, TimeframeAnalysis], *, now: datetime | None = None
+        self,
+        symbol: str,
+        analyses: dict[str, TimeframeAnalysis],
+        *,
+        now: datetime | None = None,
+        spread: float | None = None,
     ) -> tuple[SetupCandidate | None, str | None]:
         """Backwards-compatible view of `evaluate` for callers that only
         need the candidate and the reason there isn't one."""
 
-        result = self.evaluate(symbol, analyses, now=now)
+        result = self.evaluate(symbol, analyses, now=now, spread=spread)
         return result.candidate, result.rejection
 
     def evaluate(
-        self, symbol: str, analyses: dict[str, TimeframeAnalysis], *, now: datetime | None = None
+        self,
+        symbol: str,
+        analyses: dict[str, TimeframeAnalysis],
+        *,
+        now: datetime | None = None,
+        spread: float | None = None,
     ) -> Evaluation:
         chain = Checklist()
 
@@ -482,6 +497,7 @@ class SmcEngine:
             poi=poi,
             analysis=m15,
             index=index,
+            spread=spread,
         )
         if levels is None:
             chain.failed(
@@ -524,7 +540,16 @@ class SmcEngine:
         )
 
         risk_reward = reward_distance / stop_distance
-        if risk_reward < self.config.risk.min_risk_reward:
+        # `- R_EPSILON`, like every other R comparison in the system
+        # (risk/engine.py, strategy/reversion.py, execution/manager.py).
+        # This one was the exception, and the exception was wrong: the
+        # target is chosen with `min_distance=minimum_reward + offset`
+        # and then has that same offset subtracted, so a setup sitting
+        # exactly on the floor arrives here as 1.2 minus a float ulp and
+        # was refused for arithmetic rather than for structure. Harmless
+        # while stops were narrow enough that nothing landed on the
+        # boundary; the spread term put a setup there and it failed.
+        if risk_reward < self.config.risk.min_risk_reward - R_EPSILON:
             chain.failed(
                 "risk_reward",
                 f"1:{risk_reward:.2f}, below the required "
@@ -604,6 +629,7 @@ class SmcEngine:
         poi: Any,
         analysis: TimeframeAnalysis,
         index: int,
+        spread: float | None = None,
     ) -> tuple[float, float, float, dict[str, Any] | None] | None:
         """Entry/stop/target from structure. No model, no guesswork.
 
@@ -612,7 +638,27 @@ class SmcEngine:
         make every downstream R calculation a fiction.
         """
 
-        buffer = atr_value * 0.2
+        # Volatility buffer, plus the spread the stop will actually be
+        # triggered on.
+        #
+        # A broker-side stop is not evaluated against the candle series.
+        # A long is closed by selling, so its stop triggers on the BID; a
+        # short is closed by buying, so its stop triggers on the ASK. The
+        # chart is one of bid/mid/ask, so on at least one side the stop
+        # fires while the visible price is still a full spread away from
+        # the invalidation level — the trade is closed for being wrong
+        # before the market has said it is wrong.
+        #
+        # We have not measured which convention this broker's history
+        # endpoint uses, so both directions are padded. That is the
+        # choice that does not depend on knowing (see
+        # RiskConfig.stop_spread_multiple). Risk in money does not move:
+        # the risk engine sizes from the stop distance, so a wider stop
+        # simply buys fewer lots.
+        spread_pad = 0.0
+        if spread is not None and spread > 0:
+            spread_pad = spread * self.config.risk.stop_spread_multiple
+        buffer = atr_value * 0.2 + spread_pad
         entry = price
         # The sweep extreme is the ultimate invalidation, but it is only
         # the RELEVANT one when the sweep happened at or after the point of

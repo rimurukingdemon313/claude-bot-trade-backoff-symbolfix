@@ -13,15 +13,15 @@ import hashlib
 import json
 from typing import Any
 
-SYSTEM_VERSION = "6.23.0"
-SMC_ENGINE_VERSION = "smc-4.2.0"
-SCORING_VERSION = "score-3.3.0"
+SYSTEM_VERSION = "6.24.0"
+SMC_ENGINE_VERSION = "smc-4.3.0"
+SCORING_VERSION = "score-3.4.0"
 RISK_ENGINE_VERSION = "risk-3.4.0"
 EXECUTION_VERSION = "exec-2.15.0"
 AI_PROMPT_VERSION = "ai-prompt-2.2.0"
 #: Which strategy produced a trade. Recorded alongside the rest so two
 #: modes' results are never averaged together into a meaningless number.
-STRATEGY_VERSION = "reversion-2.1.0"
+STRATEGY_VERSION = "reversion-2.2.0"
 
 
 #: Config sections whose values change WHAT gets traded or HOW it is

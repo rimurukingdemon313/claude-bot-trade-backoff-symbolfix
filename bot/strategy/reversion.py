@@ -108,13 +108,18 @@ class ReversionStrategy:
         self.smc = SmcEngine(config)
 
     def analyze(
-        self, symbol: str, series: dict[str, Series], *, now: datetime | None = None
+        self,
+        symbol: str,
+        series: dict[str, Series],
+        *,
+        now: datetime | None = None,
+        spread: float | None = None,
     ) -> SmcResult:
         analyses = {
             timeframe: self.smc.analyze_timeframe(list(data.candles), timeframe=timeframe, now=now)
             for timeframe, data in series.items()
         }
-        candidate, rejection = self.build_candidate(symbol, analyses, now=now)
+        candidate, rejection = self.build_candidate(symbol, analyses, now=now, spread=spread)
         return SmcResult(
             symbol=symbol,
             analyses=analyses,
@@ -126,7 +131,12 @@ class ReversionStrategy:
     # -- candidate --------------------------------------------------------
 
     def build_candidate(
-        self, symbol: str, analyses: dict[str, TimeframeAnalysis], *, now: datetime | None = None
+        self,
+        symbol: str,
+        analyses: dict[str, TimeframeAnalysis],
+        *,
+        now: datetime | None = None,
+        spread: float | None = None,
     ) -> tuple[SetupCandidate | None, str | None]:
         m15 = analyses.get("M15")
         h1 = analyses.get("H1")
@@ -181,7 +191,7 @@ class ReversionStrategy:
                     "too close to the bottom to be selling"
                 )
 
-        levels = self._price_levels(direction, sweep, m15, price, drange)
+        levels = self._price_levels(direction, sweep, m15, price, drange, spread=spread)
         if levels is None:
             return None, "the sweep wick sits the wrong side of price — no stop to place"
         entry, stop_loss, take_profit = levels
@@ -303,6 +313,7 @@ class ReversionStrategy:
         m15: TimeframeAnalysis,
         price: float,
         drange: Any,
+        spread: float | None = None,
     ) -> tuple[float, float, float] | None:
         """Entry at the market, stop beyond the wick, target at a fixed R.
 
@@ -319,7 +330,15 @@ class ReversionStrategy:
         strategy's job.
         """
 
-        buffer = m15.atr * self.params.stop_buffer_atr
+        # Same correction as the SMC engine: a broker-side stop triggers
+        # on the bid for a long and the ask for a short, not on the candle
+        # series, so without a spread term the stop fires a full spread
+        # before price reaches the wick this thesis rests on. Sizing is
+        # unchanged in money — the risk engine works from the distance.
+        spread_pad = 0.0
+        if spread is not None and spread > 0:
+            spread_pad = spread * self.config.risk.stop_spread_multiple
+        buffer = m15.atr * self.params.stop_buffer_atr + spread_pad
         swept_candle = m15.candles[sweep.index]
         entry = price
         reach = self.profile.min_risk_reward

@@ -133,3 +133,44 @@ def session_extremes(
                 "low": min(c.low for c in members),
             }
     return result
+
+
+def in_rollover_blackout(moment: datetime, config: Any) -> tuple[bool, str | None]:
+    """Is this within the blackout around the broker's daily rollover?
+
+    Measured on a live account: USDCHF's spread was 9.2 pips ELEVEN
+    minutes after rollover, against a normal 1-2. A trade opened just
+    before it carries a stop a few pips wide into a spread wider than
+    that stop — and a broker-side stop cannot be deferred the way a
+    voluntary exit can. It triggers on the ask, so the spread alone can
+    take out a position whose mid price never moved.
+
+    Returns (blocked, reason).
+    """
+
+    hour = getattr(config, "rollover_utc_hour", None)
+    if hour is None:
+        return False, None
+    before = getattr(config, "rollover_blackout_before_minutes", 0)
+    after = getattr(config, "rollover_blackout_after_minutes", 0)
+    if before <= 0 and after <= 0:
+        return False, None
+
+    moment = ensure_utc(moment)
+    rollover = moment.replace(hour=int(hour), minute=0, second=0, microsecond=0)
+    # Minutes from the rollover, signed, taking the nearest occurrence so
+    # a window spanning midnight is handled without special-casing it.
+    best = None
+    for shift in (-1, 0, 1):
+        candidate = rollover + timedelta(days=shift)
+        delta = (moment - candidate).total_seconds() / 60.0
+        if best is None or abs(delta) < abs(best):
+            best = delta
+    assert best is not None
+    if -before <= best <= after:
+        when = "before" if best < 0 else "after"
+        return True, (
+            f"{abs(best):.0f} minutes {when} the broker's daily rollover "
+            f"({int(hour):02d}:00 UTC) — spreads widen far beyond a normal stop there"
+        )
+    return False, None

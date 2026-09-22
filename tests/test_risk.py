@@ -679,3 +679,70 @@ def test_raising_the_frequency_caps_never_raises_the_money_caps():
     assert wide.max_drawdown_pct == stock.max_drawdown_pct
     assert wide.base_risk_pct == stock.base_risk_pct
     assert wide.max_risk_pct == stock.max_risk_pct
+
+
+def test_no_new_trade_inside_the_rollover_blackout(config, candidate):
+    """The window that turned a winner into a loser.
+
+    Live: a USDCHF SELL opened 23:49 broker time (20:49 UTC), eleven
+    minutes before the daily rollover. At 21:04 UTC the spread was 9.2
+    pips against a 5.7-pip stop, and the position closed at 0.82131 — a
+    price the market never traded, six pips above the session high. It
+    was +5.8 pips on the bid and came out -7.3.
+
+    A voluntary exit can wait for a sane spread. A broker-side STOP
+    cannot: it triggers on the ask, so the spread alone can take out a
+    position whose mid price never moved. The only defence is not to be
+    holding a fresh, tight-stopped position when the rollover arrives.
+    """
+
+    import dataclasses
+    from datetime import datetime, timezone
+
+    inside = datetime(2026, 9, 22, 20, 49, tzinfo=timezone.utc)
+    decision = RiskEngine(config).evaluate(
+        candidate=candidate, tier="A", account=make_account(), spec=DEFAULT_SPEC, now=inside
+    )
+
+    assert decision.approved is False
+    assert any("rollover" in reason for reason in decision.reasons), decision.reasons
+
+
+def test_the_blackout_is_a_window_not_a_ban(config, candidate):
+    """The control: it must close again.
+
+    A guard that refused every hour would pass the test above while
+    quietly stopping the bot trading at all.
+    """
+
+    from datetime import datetime, timezone
+
+    clear = datetime(2026, 9, 22, 14, 0, tzinfo=timezone.utc)
+    decision = RiskEngine(config).evaluate(
+        candidate=candidate, tier="A", account=make_account(), spec=DEFAULT_SPEC, now=clear
+    )
+    assert not any("rollover" in reason for reason in decision.reasons), decision.reasons
+
+
+def test_the_rollover_hour_is_configurable_because_brokers_differ():
+    """This broker rolls at 21:00 UTC. Another will not."""
+
+    from datetime import datetime, timezone
+
+    from bot.config import load_config
+    from bot.smc.sessions import in_rollover_blackout
+
+    shifted = load_config({"SESSION_ROLLOVER_UTC_HOUR": "0"}).sessions
+    assert shifted.rollover_utc_hour == 0
+    blocked, _ = in_rollover_blackout(
+        datetime(2026, 9, 22, 0, 10, tzinfo=timezone.utc), shifted
+    )
+    assert blocked is True
+
+    off = load_config(
+        {"SESSION_ROLLOVER_BLACKOUT_BEFORE": "0", "SESSION_ROLLOVER_BLACKOUT_AFTER": "0"}
+    ).sessions
+    blocked, _ = in_rollover_blackout(
+        datetime(2026, 9, 22, 21, 0, tzinfo=timezone.utc), off
+    )
+    assert blocked is False, "an operator must be able to switch it off entirely"

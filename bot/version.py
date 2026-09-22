@@ -13,10 +13,10 @@ import hashlib
 import json
 from typing import Any
 
-SYSTEM_VERSION = "6.21.0"
+SYSTEM_VERSION = "6.22.0"
 SMC_ENGINE_VERSION = "smc-4.2.0"
 SCORING_VERSION = "score-3.3.0"
-RISK_ENGINE_VERSION = "risk-3.2.0"
+RISK_ENGINE_VERSION = "risk-3.3.0"
 EXECUTION_VERSION = "exec-2.15.0"
 AI_PROMPT_VERSION = "ai-prompt-2.2.0"
 #: Which strategy produced a trade. Recorded alongside the rest so two

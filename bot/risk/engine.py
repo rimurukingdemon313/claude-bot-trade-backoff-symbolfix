@@ -31,7 +31,7 @@ from ..config import TradingConfig, R_EPSILON
 from ..observability import log_event
 from ..safety.kill_switch import KillSwitch
 from ..smc.engine import SetupCandidate
-from ..smc.sessions import classify_session, is_forex_weekend
+from ..smc.sessions import classify_session, in_rollover_blackout, is_forex_weekend
 from ..version import RISK_ENGINE_VERSION
 from .correlation import ExposureReport, analyse_exposure
 from .reward import RewardVerdict, evaluate_reward
@@ -206,6 +206,16 @@ class RiskEngine:
         session = classify_session(now, self.config.sessions)
         if not session.tradeable:
             reasons.append(f"{session.name} session liquidity is too thin to trade")
+
+        # The broker's daily rollover. Measured live: USDCHF's spread was
+        # 9.2 pips eleven minutes past it, against a normal 1-2. A trade
+        # opened here carries a stop a few pips wide into a spread wider
+        # than the stop — and unlike a voluntary exit, a broker-side stop
+        # cannot be deferred. It triggers on the ask, so the spread alone
+        # takes out a position whose mid price never moved.
+        rollover_blocked, rollover_reason = in_rollover_blackout(now, self.config.sessions)
+        if rollover_blocked and rollover_reason:
+            reasons.append(rollover_reason)
 
         max_daily_loss = account.balance * limits.max_daily_loss_pct
         if account.daily_pnl <= -max_daily_loss:

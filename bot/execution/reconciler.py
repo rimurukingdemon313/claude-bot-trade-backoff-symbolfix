@@ -280,6 +280,25 @@ class Reconciler:
         a gap an operator can see (project rule 6).
         """
 
+        # Closed POSITIONS first — that is where a realized result lives.
+        #
+        # This used to consult order history alone, matching on
+        # `positionId` and `realizedPl`. An ordersHistory row on this
+        # backend is an ORDER and carries neither, so the match could
+        # never succeed and every closed trade was recorded
+        # BROKER_CLOSED_PNL_UNKNOWN — while the broker's own app showed
+        # the figures plainly under its "Closed Positions" tab. The
+        # honest-gap machinery worked perfectly; it was reporting a gap
+        # that only existed because the wrong endpoint was being asked.
+        reader = getattr(self.broker, "closed_position_result", None)
+        if callable(reader):
+            try:
+                realized, exit_price = reader(position_id)
+            except BotError:
+                realized, exit_price = None, None
+            if realized is not None:
+                return realized, exit_price
+
         try:
             history = self.broker.order_history(limit=200)
         except BotError:

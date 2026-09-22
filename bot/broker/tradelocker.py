@@ -112,6 +112,16 @@ PANEL_ALIASES: dict[str, tuple[str, ...]] = {
         "ordersHistoryColumnConfig",
         "historyConfig",
     ),
+    # Closed POSITIONS, which is where a realized result actually lives.
+    # Orders and positions are different objects on this backend: an
+    # order row carries no positionId and no realized P/L, so asking
+    # ordersHistory for a closed trade's result can only ever fail.
+    "positionsHistoryConfig": (
+        "positionsHistoryConfig",
+        "positionHistoryConfig",
+        "closedPositionsConfig",
+        "positionsHistoryColumnConfig",
+    ),
 }
 
 
@@ -202,6 +212,8 @@ class TradeLockerBroker:
         #: The quote endpoint shape this deployment answers on, once
         #: discovered. See `QUOTE_STRATEGIES`.
         self._quote_strategy: tuple[str, str, str] | None = None
+        #: Where this brand keeps closed positions, once discovered.
+        self._closed_positions_path: str | None = None
         self._instrument_cache: dict[str, InstrumentSpec] = {}
         self._instrument_cache_at = 0.0
         self._instrument_detail_error: str | None = None
@@ -955,6 +967,76 @@ class TradeLockerBroker:
             reverse=True,
         )
         return [self._to_order(row) for row in rows[:limit]]
+
+    #: Where a brand keeps its closed positions.
+    CLOSED_POSITION_PATHS = (
+        "/trade/accounts/{account}/positionsHistory",
+        "/trade/accounts/{account}/closedPositions",
+        "/trade/positionsHistory",
+    )
+
+    #: Keys a realized result can arrive under.
+    REALIZED_KEYS = (
+        "realizedPl", "realizedPnL", "realizedPnl", "netPl", "netPnL",
+        "profit", "pnl", "closePl", "grossPl",
+    )
+
+    def closed_positions(self, limit: int = 200) -> list[dict[str, Any]]:
+        """Positions the broker has closed, with their realized result.
+
+        `order_history` cannot answer this. An ordersHistory row is an
+        ORDER: it carries no positionId and no realized P/L, so the
+        reconciler matching on both could never price a closed trade and
+        recorded every one as BROKER_CLOSED_PNL_UNKNOWN — while the
+        broker's own app showed the figures plainly under a separate
+        "Closed Positions" tab.
+
+        Path and panel name both vary by brand, so both are discovered
+        rather than assumed, the way quotes and candles already are.
+        Returns [] when nothing answers; the caller reports the gap
+        instead of inventing a number.
+        """
+
+        account = self.broker_config.account_id
+        with self._lock:
+            known = self._closed_positions_path
+        paths = (known,) if known else self.CLOSED_POSITION_PATHS
+
+        for template in paths:
+            path = template.format(account=account)
+            try:
+                result = self.get(path) or {}
+            except BrokerError:
+                continue
+            raw = _first(
+                result, "positionsHistory", "closedPositions", "positions", "d", default=[]
+            )
+            if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)) or not raw:
+                continue
+            try:
+                rows = self._decode(list(raw), "positionsHistoryConfig")
+            except BrokerError:
+                continue
+            if not rows:
+                continue
+            with self._lock:
+                self._closed_positions_path = template
+            log_event("BROKER", f"closed-position history discovered at {path}")
+            return rows[:limit]
+        return []
+
+    def closed_position_result(self, position_id: str) -> tuple[float | None, float | None]:
+        """(realized, exit price) for one closed position, or (None, None)."""
+
+        for row in self.closed_positions():
+            row_id = _first(row, "positionId", "id", "position_id")
+            if row_id in (None, "") or str(row_id) != str(position_id):
+                continue
+            value = _first(row, *self.REALIZED_KEYS)
+            realized = _num(value, None) if value not in (None, "") else None
+            exit_price = _num(_first(row, "closePrice", "exitPrice", "price"), None)
+            return realized, exit_price
+        return None, None
 
     def _to_order(self, row: Mapping[str, Any]) -> BrokerOrder:
         created = _first(row, "createdDate", "lastModified")

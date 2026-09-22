@@ -782,3 +782,67 @@ def test_the_partial_take_profit_fires_exactly_once(config, broker, repos):
     assert not [a for a in again if a.kind == "PARTIAL_CLOSE"], (
         "a partial that fires twice is not a partial, it is liquidation in slices"
     )
+
+
+def test_a_closed_position_is_priced_from_position_history_not_orders(
+    config, broker, repos
+):
+    """Every real trade came back BROKER_CLOSED_PNL_UNKNOWN.
+
+    The reconciler priced a closed trade by scanning ORDER history for a
+    row carrying both `positionId` and `realizedPl`. On TradeLocker an
+    ordersHistory row is an ORDER and carries neither, so the match
+    could never succeed — and the operator saw three trades with a dash
+    where the P/L belonged while the broker's own app showed -$17.62 and
+    -$33.06 under a separate "Closed Positions" tab.
+
+    The honest-gap machinery was working exactly as built. It was
+    reporting a gap that existed only because the wrong endpoint was
+    being asked.
+    """
+
+    executor = Executor(config, broker, repos, sleeper=lambda _s: None)
+    result = executor.execute(make_plan(), DEFAULT_SPEC, atr=0.0012)
+    position_id = str(result.broker_position_id)
+
+    # The broker closed it, and order history knows nothing about it —
+    # exactly the live situation.
+    broker.remove_position(position_id)
+    broker._history.clear()
+    broker.closed_position_result = lambda pid: (  # type: ignore[attr-defined]
+        (-17.62, 157.486) if pid == position_id else (None, None)
+    )
+
+    report = Reconciler(config, broker, repos).reconcile()
+
+    assert position_id not in report.unmeasured_closes, (
+        "a result the broker can state must not be recorded as unknown"
+    )
+    trade = repos.trades.by_execution_id(result.plan.execution_id)
+    assert trade["realized_pnl"] == pytest.approx(-17.62)
+    assert trade["exit_reason"] == "BROKER_CLOSED"
+    assert repos.daily.today()["realized_pnl"] == pytest.approx(-17.62)
+
+
+def test_an_unpriceable_close_is_still_reported_as_unknown(config, broker, repos):
+    """The control: the honest gap survives the new source.
+
+    If neither position history nor order history can price the close,
+    it must still be recorded as unknown rather than credited with a
+    zero — that guard is why the operator could see the problem at all.
+    """
+
+    executor = Executor(config, broker, repos, sleeper=lambda _s: None)
+    result = executor.execute(make_plan(), DEFAULT_SPEC, atr=0.0012)
+    position_id = str(result.broker_position_id)
+
+    broker.remove_position(position_id)
+    broker._history.clear()
+    broker.closed_position_result = lambda pid: (None, None)  # type: ignore[attr-defined]
+
+    report = Reconciler(config, broker, repos).reconcile()
+
+    assert position_id in report.unmeasured_closes
+    trade = repos.trades.by_execution_id(result.plan.execution_id)
+    assert trade["realized_pnl"] is None
+    assert trade["exit_reason"] == "BROKER_CLOSED_PNL_UNKNOWN"

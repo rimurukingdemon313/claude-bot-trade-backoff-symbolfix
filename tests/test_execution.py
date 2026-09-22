@@ -11,7 +11,7 @@ import dataclasses
 import pytest
 
 from bot.errors import AmbiguousExecution, BrokerRejected, StorageError
-from bot.execution.executor import Executor
+from bot.execution.executor import ExecutionResult, Executor
 from bot.execution.plan import TradePlan, build_execution_id, build_plan
 from bot.execution.reconciler import Reconciler
 from bot.storage.repositories import Repositories
@@ -667,3 +667,58 @@ def test_an_ambiguous_intent_is_never_re_armed(config, broker, repos):
 
     assert second.status == "DUPLICATE"
     assert len(broker.submitted) == sent_before, "no resend while the outcome is unknown"
+
+
+def test_a_spread_abort_does_not_stop_the_whole_bot_for_twenty_minutes(
+    orchestrator, broker, repos
+):
+    """The cooldown fired on ANY unsuccessful execution.
+
+    By far the commonest is ABORTED from the spread guard, which is
+    market state and not a failure: no order was sent and nothing broke.
+    But it started `execution_failure_cooldown_minutes` — 20 minutes
+    blocking EVERY symbol. The scan interval is 15, so one temporarily
+    wide spread on one pair silently skipped the next whole scan across
+    all twelve.
+
+    It also cancelled the retry fix in df5b18d: setups may now be
+    re-attempted when conditions clear, and each attempt that met a wide
+    spread would have re-armed a global block.
+    """
+
+    from fakes import Quote
+
+    executor = Executor(orchestrator.config, broker, repos, sleeper=lambda _s: None)
+    broker.quotes["EURUSD"] = Quote("EURUSD", 1.0990, 1.1050, SETUP_END)
+    result = executor.execute(make_plan(), DEFAULT_SPEC, atr=0.0012)
+    assert result.status == "ABORTED"
+
+    started = orchestrator._record_execution_outcome(result)
+
+    assert started is False, "a guard refusing to send an order is not a failure"
+    assert repos.state.get("last_execution_failure_at") is None
+
+
+@pytest.mark.parametrize("status", ["AMBIGUOUS", "REJECTED"])
+def test_a_real_execution_failure_still_starts_the_cooldown(
+    orchestrator, repos, status
+):
+    """The control: the cooldown must still exist for what it was built for.
+
+    An unknown broker outcome, or an order the broker refused, are the
+    cases worth pausing on. Narrowing the trigger must not remove it.
+    """
+
+    import dataclasses
+
+    from fakes import Quote  # noqa: F401  (kept for symmetry with the test above)
+
+    refused = ExecutionResult(False, make_plan(), status, "broker said no")
+    assert orchestrator._record_execution_outcome(refused) is True
+    assert repos.state.get("last_execution_failure_at") is not None
+
+
+def test_a_successful_execution_never_starts_the_cooldown(orchestrator, repos):
+    filled = ExecutionResult(True, make_plan(), "FILLED", None)
+    assert orchestrator._record_execution_outcome(filled) is False
+    assert repos.state.get("last_execution_failure_at") is None

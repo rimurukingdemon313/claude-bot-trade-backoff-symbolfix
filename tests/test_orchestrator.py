@@ -505,3 +505,90 @@ def test_a_refusal_names_the_gate_that_fired_not_the_tier_threshold(
     )
     assert score.gate is not None
     assert "session" in score.gate.lower(), score.notes
+
+
+def _stub_result(symbol, *, ok, status, symbol_specific=False):
+    from bot.execution.executor import ExecutionResult
+
+    class _Plan:
+        direction = "BUY"
+
+    plan = _Plan()
+    plan.symbol = symbol  # type: ignore[attr-defined]
+    return ExecutionResult(ok, plan, status, None, symbol_specific=symbol_specific)  # type: ignore[arg-type]
+
+
+def _outcomes(*symbols):
+    from bot.orchestrator import SymbolOutcome
+
+    return [SymbolOutcome(name, "CANDIDATE", "CANDIDATE") for name in symbols]
+
+
+def test_a_wide_spread_on_the_best_symbol_does_not_waste_the_whole_scan(orchestrator):
+    """Only the top-ranked candidate was ever attempted.
+
+    The scan ranks every executable candidate and took `[0]` alone. If
+    the spread guard refused that one — a condition on THAT symbol, with
+    no order sent — the cycle ended and the next-best candidate was
+    never tried, although it had passed every gate in its own right. At
+    a 15-minute scan interval, one pair's momentary spread cost a whole
+    cycle across all twelve.
+    """
+
+    attempted: list[str] = []
+
+    def fake_execute(outcome, *, scan_id):
+        attempted.append(outcome.symbol)
+        if outcome.symbol == "BEST":
+            return _stub_result("BEST", ok=False, status="ABORTED", symbol_specific=True)
+        return _stub_result(outcome.symbol, ok=True, status="FILLED")
+
+    orchestrator._execute = fake_execute  # type: ignore[assignment]
+    orchestrator._rank = staticmethod(lambda items: list(items))  # type: ignore[assignment]
+
+    executed = orchestrator._execute_best(_outcomes("BEST", "SECOND"), scan_id="s")
+
+    assert attempted == ["BEST", "SECOND"], "the second candidate must get its turn"
+    assert executed is not None and executed.ok
+
+
+def test_the_scan_still_stops_at_the_first_order_that_goes_out(orchestrator):
+    """"One trade per cycle" is not relaxed by walking the ranking."""
+
+    attempted: list[str] = []
+
+    def fake_execute(outcome, *, scan_id):
+        attempted.append(outcome.symbol)
+        return _stub_result(outcome.symbol, ok=True, status="FILLED")
+
+    orchestrator._execute = fake_execute  # type: ignore[assignment]
+    orchestrator._rank = staticmethod(lambda items: list(items))  # type: ignore[assignment]
+
+    orchestrator._execute_best(_outcomes("FIRST", "SECOND", "THIRD"), scan_id="s")
+
+    assert attempted == ["FIRST"], "exactly one order per cycle"
+
+
+def test_an_account_wide_refusal_stops_the_scan_dead(orchestrator):
+    """The control, and the reason this needed a flag rather than a status.
+
+    A failed demo check, an unreadable database or an unknown broker
+    outcome say something about the ACCOUNT, not the pair. Trying the
+    next symbol there would be routing around a safety stop, which is
+    the opposite of what this change is for.
+    """
+
+    attempted: list[str] = []
+
+    def fake_execute(outcome, *, scan_id):
+        attempted.append(outcome.symbol)
+        # symbol_specific defaults to False — e.g. a demo verification
+        # failure, which aborts for every symbol equally.
+        return _stub_result(outcome.symbol, ok=False, status="ABORTED")
+
+    orchestrator._execute = fake_execute  # type: ignore[assignment]
+    orchestrator._rank = staticmethod(lambda items: list(items))  # type: ignore[assignment]
+
+    orchestrator._execute_best(_outcomes("FIRST", "SECOND"), scan_id="s")
+
+    assert attempted == ["FIRST"], "an account-wide refusal must not be routed around"

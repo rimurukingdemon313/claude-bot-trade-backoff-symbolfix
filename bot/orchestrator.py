@@ -651,6 +651,41 @@ class Orchestrator:
         except ValueError:
             return None
 
+    #: Execution outcomes that justify pausing the whole bot.
+    #:
+    #: AMBIGUOUS means the broker state is unknown, and hammering a
+    #: broker you cannot read is exactly wrong. REJECTED means it
+    #: refused an order we believed was sound, which is a reason to slow
+    #: down and look.
+    #:
+    #: ABORTED and DUPLICATE are deliberately absent. Those are OUR
+    #: guards declining to send: no order left the process and nothing
+    #: broke.
+    EXECUTION_FAILURE_STATUSES = ("AMBIGUOUS", "REJECTED")
+
+    def _record_execution_outcome(self, result: ExecutionResult) -> bool:
+        """Start the failure cooldown only for a real failure.
+
+        This used to fire on ANY unsuccessful execution, and the
+        commonest by far is ABORTED from the spread guard — market
+        state, not a failure. One temporarily wide spread on one symbol
+        started `execution_failure_cooldown_minutes`, which blocks EVERY
+        symbol for 20 minutes against a 15-minute scan interval, so a
+        single abort silently skipped the next whole scan across all
+        twelve pairs.
+
+        It also cancelled out the retry fix in df5b18d: setups may now
+        be re-attempted once conditions clear, and every attempt that
+        met a wide spread would have re-armed a global block.
+
+        Returns whether the cooldown was started.
+        """
+
+        if result.ok or result.status not in self.EXECUTION_FAILURE_STATUSES:
+            return False
+        self._record_event_time("execution_failure")
+        return True
+
     def _record_event_time(self, kind: str, moment: datetime | None = None) -> None:
         self.repos.state.set(f"last_{kind}_at", (moment or utc_now()).isoformat())
 
@@ -798,8 +833,19 @@ class Orchestrator:
         if not executable:
             result.skipped_reason = "no symbol produced an executable candidate"
         else:
-            best = self._rank(executable)[0]
-            result.executed = self._execute(best, scan_id=scan_id)
+            # Work DOWN the ranking while a refusal is about that symbol
+            # alone. Only the top candidate was ever attempted, so a
+            # single wide spread on the best-ranked pair ended the scan
+            # and the next-best candidate — which had passed every gate
+            # in its own right — was never tried. With a 15-minute scan
+            # that cost a whole cycle for a condition on one symbol.
+            #
+            # This does NOT relax "one trade per cycle" (§39): the loop
+            # stops at the first order that goes out, and stops dead on
+            # any refusal that is not symbol-specific — a failed demo
+            # check, an unreadable database, an unknown broker outcome.
+            # Each candidate still passes every gate on its own.
+            result.executed = self._execute_best(executable, scan_id=scan_id)
             if result.executed is not None and result.executed.ok:
                 self._bump_session_count(moment)
                 # Show the new position now, not at the next poll. A trade
@@ -816,7 +862,7 @@ class Orchestrator:
                         event_id=scan_id,
                     )
             elif result.executed is not None:
-                self._record_event_time("execution_failure")
+                self._record_execution_outcome(result.executed)
 
         result.finished_at = utc_now().isoformat()
         self.last_scan = result
@@ -1120,6 +1166,33 @@ class Orchestrator:
             )
 
         return sorted(outcomes, key=key, reverse=True)
+
+    def _execute_best(
+        self, executable: Sequence[SymbolOutcome], *, scan_id: str
+    ) -> ExecutionResult | None:
+        """Take the best opportunity that can actually be executed.
+
+        Only `_rank(...)[0]` was ever attempted. If the spread guard
+        refused it — a condition on THAT symbol, with no order sent —
+        the cycle ended and the next-best candidate was never tried,
+        though it had passed every gate in its own right. At a
+        15-minute scan interval one pair's momentary spread cost a whole
+        cycle across all twelve.
+
+        This does not relax "one trade per cycle" (§39): the loop stops
+        at the first order that goes out. It also stops dead on any
+        refusal that is NOT symbol-specific — a failed demo check, an
+        unreadable database, an unknown broker outcome — because those
+        say something about the account, not about the pair, and trying
+        the next symbol would be trying to route around a safety stop.
+        """
+
+        last: ExecutionResult | None = None
+        for outcome in self._rank(executable):
+            last = self._execute(outcome, scan_id=scan_id)
+            if last is None or last.ok or not last.symbol_specific:
+                return last
+        return last
 
     def _execute(self, outcome: SymbolOutcome, *, scan_id: str) -> ExecutionResult | None:
         candidate = outcome.candidate

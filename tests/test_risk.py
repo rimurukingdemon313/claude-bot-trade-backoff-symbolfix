@@ -635,3 +635,47 @@ def test_the_exposure_report_counts_what_it_could_not_price():
         "the unknown is left out of the sum rather than entered as a zero"
     )
     assert report.as_dict()["unpricedPositions"] == 1
+
+
+def test_the_session_trade_cap_is_settable_like_every_other_limit():
+    """The tighter of the two frequency caps had no override.
+
+    `max_trades_per_day` (6), `max_open_positions` (3), the daily loss
+    limit and the drawdown limit are all environment-settable. The
+    SESSION cap — 3, and therefore the one that binds first — was a bare
+    constant. An operator raising the daily limit would still have hit
+    three per session with nothing in the config to explain it.
+    """
+
+    from bot.config import load_config
+
+    assert load_config({}).risk.max_trades_per_session == 3
+    tuned = load_config({"RISK_MAX_TRADES_PER_SESSION": "12"}).risk
+    assert tuned.max_trades_per_session == 12
+
+
+def test_raising_the_frequency_caps_never_raises_the_money_caps():
+    """Frequency and exposure are separate questions.
+
+    Opening the trade count wide is the operator's call. It must not
+    quietly widen what the account can LOSE — the daily loss limit and
+    the drawdown limit feed the kill switch, and they stay where they
+    are whatever the frequency is set to.
+    """
+
+    from bot.config import load_config
+
+    wide = load_config(
+        {
+            "RISK_MAX_TRADES_PER_SESSION": "30",
+            "RISK_MAX_TRADES_PER_DAY": "30",
+            "RISK_MAX_OPEN_POSITIONS": "10",
+        }
+    ).risk
+    stock = load_config({}).risk
+
+    assert wide.max_trades_per_day == 30 and wide.max_open_positions == 10
+    assert wide.max_daily_loss_pct == stock.max_daily_loss_pct
+    assert wide.max_drawdown_pct == stock.max_drawdown_pct
+    assert wide.base_risk_pct == stock.base_risk_pct
+    assert wide.max_risk_pct == stock.max_risk_pct

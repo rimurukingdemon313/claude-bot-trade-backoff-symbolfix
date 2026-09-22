@@ -629,6 +629,12 @@ def load_config(env: Mapping[str, str] | None = None) -> TradingConfig:
         max_drawdown_pct=_env_float("RISK_MAX_DRAWDOWN_PCT", 0.10, low=0.02, high=0.25),
         max_open_positions=_env_int("RISK_MAX_OPEN_POSITIONS", 3, low=1, high=10),
         max_trades_per_day=_env_int("RISK_MAX_TRADES_PER_DAY", 6, low=1, high=30),
+        # The tighter of the two frequency caps, and the only one that
+        # had no environment override — so an operator raising the daily
+        # limit still hit three per session and had no way to see why.
+        # Its siblings are all settable; this was an omission, not a
+        # policy.
+        max_trades_per_session=_env_int("RISK_MAX_TRADES_PER_SESSION", 3, low=1, high=30),
         min_risk_reward=_env_float("RISK_MIN_RR", 1.2, low=1.0, high=10.0),
         # Friction is `spread / stop_distance` - the contract size and the
         # lot count cancel - so a TIGHT stop does not reduce cost, it

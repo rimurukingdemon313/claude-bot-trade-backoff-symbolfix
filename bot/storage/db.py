@@ -27,7 +27,7 @@ from ..observability import log_event
 #: Bump when ddl() changes. Every statement is CREATE ... IF NOT EXISTS, so
 #: migration stays idempotent and safe to run on every boot; the version is
 #: recorded so a deployment's schema generation is attributable.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 #: (table, column, definition) added after the first release. Applied on
 #: every boot and safe to re-run: an existing column raises and is ignored.
@@ -36,6 +36,22 @@ ADDED_COLUMNS = (
     # Which setup this trade came from, so the same one is not taken
     # twice - see bot/smc/identity.py.
     ("trades", "setup_id", "TEXT"),
+    # Whether the partial take-profit has already fired on this trade.
+    #
+    # `PositionManager` guards the partial with
+    # `not trade.get("partial_taken")` — and nothing ever wrote it,
+    # because the column did not exist. So the guard read falsy on every
+    # poll and the partial fired again every 30 seconds, halving the
+    # position each time. On a live account that showed up as one trade
+    # closing in a descending stack of slices — 0.17, 0.09, 0.04, 0.03,
+    # 0.01, 0.01 lots — each paying its own spread and commission, with
+    # no runner left to reach the target.
+    #
+    # The backtester sets its own `partial_taken` on the trade object, so
+    # simulation took exactly one partial and production took six. That
+    # is the whole reason the measured result did not describe what
+    # shipped.
+    ("trades", "partial_taken", "INTEGER DEFAULT 0"),
 )
 
 

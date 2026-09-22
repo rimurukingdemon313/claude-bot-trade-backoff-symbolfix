@@ -849,6 +849,25 @@ class TradeLockerBroker:
             + "; ".join(errors)[:600]
         )
 
+    def describe_quotes(self) -> dict[str, Any]:
+        """Which quote shape this deployment answers on.
+
+        Surfaced in `/health` — and therefore on the System panel —
+        rather than only in the process log. An operator should never
+        have to open a hosting provider's log viewer to find out whether
+        the bot can price an instrument, and the day this mattered the
+        answer was buried in exactly that place.
+        """
+
+        with self._lock:
+            strategy = self._quote_strategy
+        if strategy is None:
+            return {
+                "discovered": False,
+                "note": "no quote has been fetched yet this process",
+            }
+        return {"discovered": True, "shape": strategy[0], "path": strategy[1]}
+
     def quote(self, spec: InstrumentSpec) -> Quote:
         result = self._quote_payload(spec) or {}
         bid = _num(_first(result, "bp", "bid", "bidPrice"), None)
@@ -1020,5 +1039,6 @@ class TradeLockerBroker:
             "accountResolved": self._acc_num is not None,
             "instrumentsCached": len(self._instrument_cache),
             "history": self.history.describe(),
+            "quotes": self.describe_quotes(),
             **self.transport.health(),
         }

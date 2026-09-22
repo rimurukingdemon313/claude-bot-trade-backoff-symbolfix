@@ -376,6 +376,37 @@ class SessionConfig:
     tradeable_sessions: tuple[str, ...] = ("LONDON", "NEW_YORK", "OVERLAP")
     block_low_liquidity: bool = True
 
+    #: The broker's daily rollover, in UTC, and how wide a blackout to
+    #: keep around it.
+    #:
+    #: Spreads explode at rollover — measured at 9.2 pips on USDCHF
+    #: ELEVEN minutes after it, against a normal 1-2. A position opened
+    #: just before it has a stop only a few pips wide facing a spread
+    #: wider than the stop, and a broker-side stop cannot be deferred
+    #: the way a voluntary exit can: it triggers on the ask, and the
+    #: spread alone can take it out while the mid price never moves.
+    #:
+    #: The window runs longer AFTER than before because that is where
+    #: the measurement put the damage.
+    rollover_utc_hour: int = 21
+    rollover_blackout_before_minutes: int = 45
+    rollover_blackout_after_minutes: int = 30
+
+    #: Hours before the Friday close during which no NEW position may be
+    #: opened.
+    #:
+    #: `is_forex_weekend` already stops scanning at Friday 21:00 UTC, but
+    #: a trade opened at 18:00 is still held across the whole weekend —
+    #: and the Sunday reopen can gap straight past its stop. A gap does
+    #: not respect a stop loss: it fills at the first available price,
+    #: which can be far beyond it. That is a loss LARGER than the one the
+    #: trade was sized for, which project rule 2 does not permit the
+    #: system to accept on purpose.
+    #:
+    #: This blocks the entry rather than force-closing anything later: a
+    #: position that has time to resolve is left alone.
+    weekend_entry_blackout_hours: int = 4
+
 
 @dataclass(frozen=True, slots=True)
 class NewsConfig:
@@ -772,6 +803,18 @@ def load_config(env: Mapping[str, str] | None = None) -> TradingConfig:
         ai=ai,
         storage=storage,
         scheduler=scheduler,
+        sessions=SessionConfig(
+            rollover_utc_hour=_env_int("SESSION_ROLLOVER_UTC_HOUR", 21, low=0, high=23),
+            rollover_blackout_before_minutes=_env_int(
+                "SESSION_ROLLOVER_BLACKOUT_BEFORE", 45, low=0, high=240
+            ),
+            rollover_blackout_after_minutes=_env_int(
+                "SESSION_ROLLOVER_BLACKOUT_AFTER", 30, low=0, high=240
+            ),
+            weekend_entry_blackout_hours=_env_int(
+                "SESSION_WEEKEND_BLACKOUT_HOURS", 4, low=0, high=24
+            ),
+        ),
         news=NewsConfig(enabled=_env_bool("NEWS_FILTER_ENABLED", True)),
         dashboard_token=_env_str("DASHBOARD_TOKEN"),
         trading_enabled_default=_env_bool("TRADING_ENABLED_DEFAULT", True),

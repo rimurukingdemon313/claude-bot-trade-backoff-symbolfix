@@ -279,6 +279,50 @@ class PositionManager:
             return None
         return round((moment - ensure_utc(position.opened_at)).total_seconds() / 60.0, 1)
 
+    #: A voluntary exit is deferred while the spread alone would cost
+    #: this share of the position's own risk.
+    #:
+    #: A live structural exit fired while the spread was 10.5 pips on a
+    #: 5.7-pip stop — 184% — and the market close filled 1.6 pips BEYOND
+    #: the stop it was meant to improve on. $24.98 at the stop became
+    #: $32.00, so a feature that exists to protect the account cost more
+    #: than doing nothing at all.
+    #:
+    #: Deferring is safe precisely because the stop loss is still sitting
+    #: at the broker. The worst case of waiting is the loss the trade was
+    #: already sized for; the worst case of closing into a spread wider
+    #: than the stop is a LARGER loss than the design permits. Half the
+    #: risk in spread alone is absurd for an exit nobody is forcing.
+    MAX_EXIT_SPREAD_FRACTION_OF_RISK = 0.5
+
+    def _exit_is_affordable(self, action: ManagementAction) -> tuple[bool, str | None]:
+        """Is the spread sane enough to close this position voluntarily?"""
+
+        trade = self.repos.trades.by_position_id(action.position_id)
+        if not trade:
+            return True, None
+        entry = trade.get("actual_entry") or trade.get("planned_entry")
+        stop = trade.get("stop_loss")
+        if not entry or not stop:
+            return True, None
+        risk_distance = abs(float(entry) - float(stop))
+        if risk_distance <= 0:
+            return True, None
+        try:
+            spec = self.broker.instrument(str(trade.get("symbol") or action.symbol))
+            spread = self.broker.quote(spec).spread
+        except BotError:
+            # No quote, no judgement. The stop still protects the
+            # position, so deferring is the conservative answer.
+            return False, "could not read a quote to price this exit"
+        if spread > risk_distance * self.MAX_EXIT_SPREAD_FRACTION_OF_RISK:
+            return False, (
+                f"spread {spread:.5f} is {spread / risk_distance:.0%} of this trade's "
+                "risk — closing into it would cost more than the stop it replaces; "
+                "waiting for a normal spread, the stop is still in place"
+            )
+        return True, None
+
     def apply(self, actions: Sequence[ManagementAction]) -> list[dict[str, Any]]:
         """Execute management actions. Each failure is isolated."""
 
@@ -298,6 +342,18 @@ class PositionManager:
                     # and halved the position each time.
                     self.repos.trades.mark_partial_taken(action.position_id)
                 elif action.kind == "CLOSE":
+                    # A voluntary exit, never a stop. The stop lives at
+                    # the broker and is untouched by this.
+                    affordable, why = self._exit_is_affordable(action)
+                    if not affordable:
+                        log_event(
+                            "POSITION",
+                            f"deferring {action.reason}: {why}",
+                            symbol=action.symbol,
+                            severity="warning",
+                        )
+                        applied.append({**action.as_dict(), "ok": False, "deferred": why})
+                        continue
                     self.broker.close_position(action.position_id)
                 else:
                     continue

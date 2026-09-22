@@ -133,3 +133,78 @@ def session_extremes(
                 "low": min(c.low for c in members),
             }
     return result
+
+
+def in_rollover_blackout(moment: datetime, config: Any) -> tuple[bool, str | None]:
+    """Is this within the blackout around the broker's daily rollover?
+
+    Measured on a live account: USDCHF's spread was 9.2 pips ELEVEN
+    minutes after rollover, against a normal 1-2. A trade opened just
+    before it carries a stop a few pips wide into a spread wider than
+    that stop — and a broker-side stop cannot be deferred the way a
+    voluntary exit can. It triggers on the ask, so the spread alone can
+    take out a position whose mid price never moved.
+
+    Returns (blocked, reason).
+    """
+
+    hour = getattr(config, "rollover_utc_hour", None)
+    if hour is None:
+        return False, None
+    before = getattr(config, "rollover_blackout_before_minutes", 0)
+    after = getattr(config, "rollover_blackout_after_minutes", 0)
+    if before <= 0 and after <= 0:
+        return False, None
+
+    moment = ensure_utc(moment)
+    rollover = moment.replace(hour=int(hour), minute=0, second=0, microsecond=0)
+    # Minutes from the rollover, signed, taking the nearest occurrence so
+    # a window spanning midnight is handled without special-casing it.
+    best = None
+    for shift in (-1, 0, 1):
+        candidate = rollover + timedelta(days=shift)
+        delta = (moment - candidate).total_seconds() / 60.0
+        if best is None or abs(delta) < abs(best):
+            best = delta
+    assert best is not None
+    if -before <= best <= after:
+        when = "before" if best < 0 else "after"
+        return True, (
+            f"{abs(best):.0f} minutes {when} the broker's daily rollover "
+            f"({int(hour):02d}:00 UTC) — spreads widen far beyond a normal stop there"
+        )
+    return False, None
+
+
+def in_weekend_entry_blackout(moment: datetime, config: Any) -> tuple[bool, str | None]:
+    """Too close to the Friday close to open a NEW position.
+
+    `is_forex_weekend` stops trading at Friday 21:00 UTC. But a trade
+    opened at 18:00 is held across the entire weekend, and the Sunday
+    reopen can gap straight past its stop. A gap does not respect a stop
+    loss — it fills at the first available price, which can be far
+    beyond it — so the position can lose considerably more than it was
+    sized to lose.
+
+    Blocks the ENTRY rather than force-closing later: a position with
+    time to resolve is left to resolve.
+
+    Returns (blocked, reason).
+    """
+
+    hours = getattr(config, "weekend_entry_blackout_hours", 0) or 0
+    if hours <= 0:
+        return False, None
+
+    moment = ensure_utc(moment)
+    if moment.weekday() != 4:  # Friday only
+        return False, None
+
+    close = moment.replace(hour=21, minute=0, second=0, microsecond=0)
+    remaining = (close - moment).total_seconds() / 3600.0
+    if 0 < remaining <= hours:
+        return True, (
+            f"{remaining:.1f}h from the Friday close — a position opened now is held "
+            "across the weekend, and a Sunday gap can fill far beyond its stop"
+        )
+    return False, None

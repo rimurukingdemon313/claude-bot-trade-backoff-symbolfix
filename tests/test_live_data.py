@@ -273,3 +273,81 @@ def test_the_doctor_is_read_only():
     source = inspect.getsource(doctor)
     for forbidden in ("place_market_order", "close_position", "modify_position", "write("):
         assert forbidden not in source, f"doctor references a write path: {forbidden}"
+
+
+# -- quote endpoint discovery ---------------------------------------------
+
+
+def _quote_broker(handler):
+    """A broker whose only live dependency is a stubbed `get`."""
+
+    import dataclasses
+
+    from bot.broker.models import InstrumentSpec
+    from bot.broker.tradelocker import TradeLockerBroker
+    from bot.config import load_config
+    from fakes import DEFAULT_SPEC
+
+    broker = TradeLockerBroker(load_config({}))
+    broker.get = handler  # type: ignore[assignment]
+    spec = dataclasses.replace(
+        DEFAULT_SPEC, tradable_instrument_id=13445, route_id=1250823, quote_route_id=1250823
+    )
+    return broker, spec
+
+
+def test_the_quote_endpoint_is_discovered_when_the_first_shape_404s():
+    """The live failure that blocked every order on this deployment.
+
+    `quote()` hard-coded one path — the account/instrument shape — and
+    the broker answered 404. `Executor._spread_check` needs a live quote
+    before submitting, so EVERY setup passed every gate and then died on
+    the last read, once per scan, with nothing to show for it.
+
+    `bot/broker/history.py` already learned this for candles: TradeLocker
+    deployments differ in path shape, and hard-coding one guess makes the
+    bot silently never trade on a broker that uses another. The lesson
+    just had not been carried across to quotes.
+    """
+
+    from bot.errors import BrokerRejected
+
+    tried: list[str] = []
+
+    def handler(path, query=None):
+        tried.append(path)
+        if "/accounts/" in path or "/instruments/" in path:
+            raise BrokerRejected(f"rejected (404): Not Found for {path}")
+        assert query and query.get("tradableInstrumentId") == 13445
+        return {"bp": 1.1000, "ap": 1.1001}
+
+    broker, spec = _quote_broker(handler)
+    quote = broker.quote(spec)
+
+    assert quote.bid == pytest.approx(1.1000)
+    assert quote.ask == pytest.approx(1.1001)
+    assert "/trade/quotes" in tried, "the documented shape has to be among those tried"
+
+    # The learned shape is reused rather than re-probed.
+    tried.clear()
+    broker.quote(spec)
+    assert tried == ["/trade/quotes"]
+
+
+def test_a_deployment_answering_no_quote_shape_says_so_clearly():
+    """No silent zero, and no guessed price (rule 6).
+
+    A bot that cannot price an instrument must refuse the order and name
+    what it tried, not invent a spread.
+    """
+
+    from bot.errors import BrokerError, BrokerRejected
+
+    def handler(path, query=None):
+        raise BrokerRejected(f"rejected (404): Not Found for {path}")
+
+    broker, spec = _quote_broker(handler)
+
+    with pytest.raises(BrokerError) as excinfo:
+        broker.quote(spec)
+    assert "quote endpoint" in str(excinfo.value)

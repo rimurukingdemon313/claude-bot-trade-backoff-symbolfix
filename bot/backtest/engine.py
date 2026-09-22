@@ -29,6 +29,7 @@ from ..marketdata.validation import ValidationReport
 from ..execution.manager import plan_actions
 from ..risk.engine import AccountRiskState, RiskEngine
 from ..risk.reward import evaluate_reward
+from ..marketdata.validation import validate_spread
 from ..risk.sizing import (
     RateLookup,
     SizingError,
@@ -392,6 +393,31 @@ class Backtester:
         )
         if not reward.meets_objective:
             return None, "reward objective"
+
+        # The execution spread guard, which the backtest did not have.
+        #
+        # This harness PAID the spread on entry and then never asked the
+        # question the live executor asks last: is this spread too large
+        # relative to THIS setup's stop and target? So it counted trades
+        # the bot would refuse at submission, and a backtest reporting
+        # 180 trades described a live system that took far fewer. That is
+        # not a small discrepancy — it is the difference between "the
+        # strategy is too selective" and "the strategy proposes setups it
+        # cannot execute", which are opposite problems with opposite
+        # fixes.
+        #
+        # Same function, same config as `Executor._spread_check`, so the
+        # two cannot drift.
+        ok, spread_reason = validate_spread(
+            spread=spread,
+            atr=candidate.atr,
+            stop_distance=abs(entry - candidate.stop_loss),
+            take_profit_distance=abs(candidate.take_profit - entry),
+            max_spread_atr_fraction=self.config.execution.max_spread_atr_fraction,
+            max_spread_tp_fraction=self.config.execution.max_spread_tp_fraction,
+        )
+        if not ok:
+            return None, "spread guard"
 
         return (
             SimulatedTrade(

@@ -400,6 +400,32 @@ class HttpTransport:
                     # thread back; the circuit is for a broker that is down.
                     raise BrokerRateLimited(f"{method} {url} rate limited: {detail}")
                 elif 500 <= exc.code < 600:
+                    if is_write:
+                        # A 5xx on a WRITE is the ambiguous case, not a
+                        # clean failure. The request reached the server —
+                        # it answered — and 500/502/503/504 says nothing
+                        # about whether the matching engine behind that
+                        # gateway accepted the order. A 504 in particular
+                        # is the classic shape of "it worked, the reply
+                        # was lost".
+                        #
+                        # This branch used to raise a plain BrokerError.
+                        # The executor's catch-all happened to route that
+                        # to the ambiguous path anyway, so no live order
+                        # was ever lost — but the classification was
+                        # wrong at the source, which meant every other
+                        # caller of a write inherited the wrong answer.
+                        # `PositionManager._apply` is one, and there it
+                        # mattered (see its AmbiguousExecution handling).
+                        #
+                        # A status code is definitive only when the
+                        # venue's own semantics prove the command was not
+                        # accepted. 4xx below does; 5xx does not.
+                        raise AmbiguousExecution(
+                            f"{method} {url} returned {exc.code}; the order may or may not "
+                            f"have reached the matching engine: {detail}. Not retried — "
+                            "reconcile against broker state."
+                        ) from exc
                     last_error = BrokerError(f"{method} {url} server error ({exc.code}): {detail}")
                 else:
                     self.circuit.record_success()

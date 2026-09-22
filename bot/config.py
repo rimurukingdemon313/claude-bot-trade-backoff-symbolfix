@@ -208,6 +208,28 @@ class RiskConfig:
     #: broker's, so padding both sides is the choice that does not
     #: require knowing it. 0.0 restores the old behaviour.
     stop_spread_multiple: float = 1.0
+    #: Bench a SYMBOL that has been losing, without punishing the others.
+    #:
+    #: Every guard in this engine is global: a losing streak, a cooldown,
+    #: a drawdown limit. They stop the whole book. So the symbol actually
+    #: doing the damage keeps its turn in the scan, and the symbols that
+    #: did nothing wrong serve its sentence.
+    #:
+    #: Freqtrade solves this with per-pair locks (`LowProfitPairs`,
+    #: `StoplossGuard` with `only_per_pair`) and the idea transfers
+    #: exactly. `symbol_lock_losses` closed losses on one symbol inside
+    #: `symbol_lock_lookback_hours` benches that symbol for
+    #: `symbol_lock_hours`; everything else keeps trading.
+    #:
+    #: DEFAULT OFF (0 = disabled), deliberately. This changes how many
+    #: trades get taken, and turning it on at the same time as the
+    #: spread-aware stop would make the next fortnight unreadable — we
+    #: would not know which change produced the result. It ships ready
+    #: and stays off until the trade record says it earns its place
+    #: (rules 9 and 12).
+    symbol_lock_losses: int = 0
+    symbol_lock_lookback_hours: float = 24.0
+    symbol_lock_hours: float = 12.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -757,6 +779,11 @@ def load_config(env: Mapping[str, str] | None = None) -> TradingConfig:
         stop_spread_multiple=_env_float(
             "RISK_STOP_SPREAD_MULTIPLE", 1.0, low=0.0, high=5.0
         ),
+        symbol_lock_losses=_env_int("RISK_SYMBOL_LOCK_LOSSES", 0, low=0, high=20),
+        symbol_lock_lookback_hours=_env_float(
+            "RISK_SYMBOL_LOCK_LOOKBACK_HOURS", 24.0, low=1.0, high=720.0
+        ),
+        symbol_lock_hours=_env_float("RISK_SYMBOL_LOCK_HOURS", 12.0, low=1.0, high=720.0),
     )
     reward = RewardConfig(
         min_reward_r=_env_float("REWARD_MIN_R", 1.2, low=1.0, high=10.0),

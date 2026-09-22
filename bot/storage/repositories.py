@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime
 from typing import Any, Iterable, Mapping
 
-from ..clock import trading_day, utc_now
+from ..clock import ensure_utc, trading_day, utc_now
 from ..errors import StorageError
 from ..observability import log_event
 from ..version import version_stamp
@@ -988,6 +989,133 @@ class EquityRepository:
         )
 
 
+class SpreadRepository:
+    """Observed spreads. Measurement only — nothing here gates a trade.
+
+    This table exists because every discussion about why a trade lost has
+    been conducted without a single stored spread. The spread is the one
+    mechanism we have proven destroys our trades, and it was the one
+    number the system never wrote down.
+
+    What it is for, in order of value:
+
+    * `by_symbol` ranks instruments by what they cost to trade. A symbol
+      whose median spread is a large fraction of a typical stop is not a
+      symbol with occasional bad luck, it is a symbol we should not be
+      trading, and no amount of setup quality fixes it.
+    * `by_hour` says whether the rollover blackout is the right width,
+      and whether any other hour deserves one. Right now those bounds are
+      set from one live observation.
+    * `bid`/`ask` beside the candle series eventually answer whether this
+      broker quotes history on the bid, the mid or the ask — which is
+      exactly how much padding a stop needs (`RiskConfig.stop_spread_multiple`).
+
+    Percentiles are computed in Python rather than in SQL because SQLite
+    has no percentile function and the row counts here are small. A
+    summary over too few samples reports its `n` and is labelled
+    insufficient rather than quoted as fact (rule 6).
+    """
+
+    #: Below this, a summary is reported but explicitly marked as too
+    #: small to conclude from. One scan every few minutes reaches 30 in
+    #: about two hours of trading.
+    MIN_SAMPLES = 30
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    def record(
+        self,
+        *,
+        symbol: str,
+        observed_at: datetime,
+        bid: float | None,
+        ask: float | None,
+        spread: float,
+        session: str | None = None,
+    ) -> None:
+        moment = ensure_utc(observed_at)
+        self.db.execute(
+            "INSERT INTO spread_samples "
+            "(symbol, observed_at, bid, ask, spread, session, hour_utc) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                symbol.upper(),
+                moment.isoformat(),
+                float(bid) if bid is not None else None,
+                float(ask) if ask is not None else None,
+                float(spread),
+                session,
+                moment.hour,
+            ),
+        )
+
+    @staticmethod
+    def _summarise(values: list[float]) -> dict[str, Any]:
+        """Median, p90 and max over a sample, with its own size attached.
+
+        `sample` is part of the answer, not decoration: two observations
+        of a spread describe two moments, and a median over them is not a
+        typical spread. The caller is told which it is holding.
+        """
+
+        ordered = sorted(values)
+        count = len(ordered)
+
+        def percentile(fraction: float) -> float:
+            if not ordered:
+                return 0.0
+            position = min(count - 1, int(round(fraction * (count - 1))))
+            return ordered[position]
+
+        return {
+            "n": count,
+            "median": percentile(0.5),
+            "p90": percentile(0.9),
+            "max": ordered[-1] if ordered else 0.0,
+            "sample": "sufficient" if count >= SpreadRepository.MIN_SAMPLES else "insufficient",
+        }
+
+    def by_symbol(self, *, since: datetime | None = None) -> dict[str, dict[str, Any]]:
+        if since is not None:
+            rows = self.db.query(
+                "SELECT symbol, spread FROM spread_samples WHERE observed_at >= ?",
+                (ensure_utc(since).isoformat(),),
+            )
+        else:
+            rows = self.db.query("SELECT symbol, spread FROM spread_samples")
+        grouped: dict[str, list[float]] = {}
+        for row in rows:
+            grouped.setdefault(str(row["symbol"]), []).append(float(row["spread"]))
+        return {symbol: self._summarise(values) for symbol, values in sorted(grouped.items())}
+
+    def by_hour(self, symbol: str | None = None) -> dict[int, dict[str, Any]]:
+        if symbol:
+            rows = self.db.query(
+                "SELECT hour_utc, spread FROM spread_samples WHERE symbol = ?",
+                (symbol.upper(),),
+            )
+        else:
+            rows = self.db.query("SELECT hour_utc, spread FROM spread_samples")
+        grouped: dict[int, list[float]] = {}
+        for row in rows:
+            hour = row["hour_utc"]
+            if hour is None:
+                continue
+            grouped.setdefault(int(hour), []).append(float(row["spread"]))
+        return {hour: self._summarise(values) for hour, values in sorted(grouped.items())}
+
+    def prune(self, keep: int = 20000) -> None:
+        """Bounded growth, same argument as the equity curve: this table
+        grows on a timer rather than per trade."""
+
+        self.db.execute(
+            "DELETE FROM spread_samples WHERE id NOT IN "
+            "(SELECT id FROM spread_samples ORDER BY observed_at DESC LIMIT ?)",
+            (keep,),
+        )
+
+
 class PaperRepository:
     """Simulated positions and account, persisted like the real thing.
 
@@ -1195,6 +1323,7 @@ class Repositories:
         self.equity = EquityRepository(db)
         self.paper = PaperRepository(db)
         self.instruments = InstrumentSpecRepository(db)
+        self.spreads = SpreadRepository(db)
 
     @property
     def healthy(self) -> bool:

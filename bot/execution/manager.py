@@ -217,12 +217,29 @@ class PositionManager:
             entry = position.entry_price
             stop = (trade or {}).get("stop_loss") or position.stop_loss
             price, price_status = self._current_price(position, moment)
-            current_r = (
-                r_multiple(direction=position.direction, entry=entry, stop=float(stop), price=price)
-                if stop and price
-                else 0.0
-            )
-            if price:
+            # An entry price the broker did not report is not an entry
+            # price of zero. Every number below is measured FROM it, so a
+            # zero here does not produce a slightly wrong R — it produces
+            # an R of several thousand and an MFE equal to the whole
+            # price of the instrument.
+            measurable = entry is not None and entry > 0
+            if not measurable:
+                price_status = "broker reported no entry price for this position"
+            # Rule 6, at the place it was still being broken. `0.0` is
+            # not "unknown", it is "exactly break-even" — the single most
+            # reassuring value this field can take, displayed at the
+            # moment we can measure nothing. `_current_price` two
+            # functions down refuses to invent a price for precisely this
+            # reason; the R computed from it was inventing one anyway.
+            current_r: float | None = None
+            if measurable and stop and price:
+                current_r = r_multiple(
+                    direction=position.direction,
+                    entry=entry,
+                    stop=float(stop),
+                    price=price,
+                )
+            if measurable and price:
                 excursion = (
                     price - entry if position.direction == "BUY" else entry - price
                 )
@@ -234,7 +251,7 @@ class PositionManager:
                     **position.as_dict(),
                     "currentPrice": price,
                     "priceStatus": price_status,
-                    "rMultiple": round(current_r, 3),
+                    "rMultiple": round(current_r, 3) if current_r is not None else None,
                     "riskAmount": (trade or {}).get("risk_amount"),
                     "setupGrade": (trade or {}).get("setup_grade"),
                     "executionId": (trade or {}).get("execution_id"),

@@ -227,6 +227,19 @@ class Backtester:
         self.scorer = SetupScorer(config)
         self.risk = RiskEngine(config)
 
+    def _modelled_spread(self) -> float | None:
+        """The cost model's spread, converted from ticks to price units.
+
+        The strategy pads its stop by the spread and the fill model
+        charges one. Handing those two different numbers would simulate a
+        bot that does not exist, so they come from the same place.
+        """
+
+        tick = self.spec.tick_size or 0.0
+        if tick <= 0 or self.costs.spread_points <= 0:
+            return None
+        return self.costs.spread_points * tick
+
     def run(
         self,
         m15: Sequence[Candle],
@@ -320,7 +333,13 @@ class Backtester:
             "M15": _series(self.spec.symbol, "M15", list(visible_m15)),
             "H1": _series(self.spec.symbol, "H1", list(visible_h1)),
         }
-        analysis = self.smc.analyze(self.spec.symbol, series, now=cutoff)
+        # The same spread the fill model charges is the spread the stop
+        # is padded by. Handing the strategy a different number here than
+        # the one the simulation costs would measure a bot that does not
+        # exist.
+        analysis = self.smc.analyze(
+            self.spec.symbol, series, now=cutoff, spread=self._modelled_spread()
+        )
         if analysis.candidate is None:
             return None, (analysis.rejection or "unknown").split(":")[0][:60]
 

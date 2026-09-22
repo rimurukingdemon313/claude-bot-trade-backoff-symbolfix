@@ -38,7 +38,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from ..config import RewardConfig
+from ..config import R_EPSILON, RewardConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,7 +91,8 @@ def evaluate_reward(
             "reward objective disabled",
         )
 
-    if risk_reward < minimum:
+    # Consistent with every other R comparison in the system.
+    if risk_reward < minimum - R_EPSILON:
         return RewardVerdict(
             False,
             risk_reward,

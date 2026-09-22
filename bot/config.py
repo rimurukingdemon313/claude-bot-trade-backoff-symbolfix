@@ -181,6 +181,33 @@ class RiskConfig:
     drawdown_derisk_pct: float = 0.05
     min_stop_distance_atr: float = 0.35
     max_stop_distance_atr: float = 3.5
+    #: How many spread widths of padding the structural stop carries.
+    #:
+    #: A broker-side stop does not trigger on the price drawn on the
+    #: chart. It triggers on the price that CLOSES the position: the bid
+    #: for a long, the ask for a short. The candle series is one of those
+    #: two (or the mid), so on at least one side of every trade the stop
+    #: fires before the visible price reaches it, by exactly the spread.
+    #:
+    #: Measured live: a short was stopped at 0.82131 when nothing in the
+    #: market traded within 6.1 pips of it. On the bid the position was
+    #: +5.8 pips. It was closed at -7.3. Not one pip of that 13.1-pip
+    #: swing was price movement — it was the ask, and the structural
+    #: buffer of 0.2 ATR was a fraction of the spread at that moment.
+    #:
+    #: Padding the stop by the spread restores the stop's MEANING: price
+    #: has to reach the invalidation level for the trade to be wrong.
+    #: It does not increase risk — `risk/engine.py` sizes from the stop
+    #: distance, so a wider stop buys fewer lots for the same money. What
+    #: it does cost is R:R, and a setup that can no longer pay for its
+    #: own stop once the spread is honest was never the setup it looked
+    #: like.
+    #:
+    #: 1.0 pads both directions by one full spread. The chart convention
+    #: (bid, mid or ask) differs per brand and we have not measured this
+    #: broker's, so padding both sides is the choice that does not
+    #: require knowing it. 0.0 restores the old behaviour.
+    stop_spread_multiple: float = 1.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -621,6 +648,49 @@ DEFAULT_SYMBOLS = (
 )
 
 
+def _scoring_from_env() -> ScoringConfig:
+    """Score bands, plus the grade floor expressed as a GRADE.
+
+    `SCORING_MIN_TRADEABLE` already existed and works, but it is a raw
+    number: an operator who wants "A setups only" has to know that A
+    begins at 68 — and has to remember to change it again if the band
+    ever moves. Naming the grade removes both problems, and a band and
+    its floor can no longer drift apart.
+
+    `SCORING_MIN_TIER` accepts A+, A or B. The numeric variable still
+    wins where it asks for MORE, never less: the scorer takes the max of
+    every floor it is given, so these two settings cannot be played
+    against each other to lower a limit.
+    """
+
+    tier_a_plus = _env_float("SCORING_TIER_A_PLUS", 80.0, low=1.0, high=100.0)
+    tier_a = _env_float("SCORING_TIER_A", 68.0, low=1.0, high=100.0)
+    tier_b = _env_float("SCORING_TIER_B", 56.0, low=1.0, high=100.0)
+    numeric_floor = _env_float("SCORING_MIN_TRADEABLE", 56.0, low=1.0, high=100.0)
+
+    raw_tier = (_env_str("SCORING_MIN_TIER", "") or "").strip().upper()
+    if raw_tier:
+        bands = {"A+": tier_a_plus, "A": tier_a, "B": tier_b}
+        if raw_tier not in bands:
+            # An unrecognised grade is refused rather than quietly
+            # ignored. Silently defaulting to B would mean an operator
+            # who typed "A1" ran a fortnight of B trades believing they
+            # were filtering by grade — the same class of failure as the
+            # dead knob this replaces.
+            raise ConfigError(
+                f"SCORING_MIN_TIER={raw_tier!r} is not a grade this scorer produces. "
+                f"Use one of {', '.join(bands)}."
+            )
+        numeric_floor = max(numeric_floor, bands[raw_tier])
+
+    return ScoringConfig(
+        tier_a_plus=tier_a_plus,
+        tier_a=tier_a,
+        tier_b=tier_b,
+        min_tradeable_score=numeric_floor,
+    )
+
+
 def load_config(env: Mapping[str, str] | None = None) -> TradingConfig:
     """Build the config from the process environment.
 
@@ -683,6 +753,9 @@ def load_config(env: Mapping[str, str] | None = None) -> TradingConfig:
         ),
         max_stop_distance_atr=_env_float(
             "RISK_MAX_STOP_ATR", 3.5, low=0.5, high=20.0
+        ),
+        stop_spread_multiple=_env_float(
+            "RISK_STOP_SPREAD_MULTIPLE", 1.0, low=0.0, high=5.0
         ),
     )
     reward = RewardConfig(
@@ -766,15 +839,7 @@ def load_config(env: Mapping[str, str] | None = None) -> TradingConfig:
             commission_per_lot=_env_float("PAPER_COMMISSION_PER_LOT", 7.0, low=0.0, high=200.0),
         ),
         broker=broker,
-        scoring=ScoringConfig(
-            tier_a_plus=_env_float("SCORING_TIER_A_PLUS", 80.0, low=1.0, high=100.0),
-            tier_a=_env_float("SCORING_TIER_A", 68.0, low=1.0, high=100.0),
-            tier_b=_env_float("SCORING_TIER_B", 56.0, low=1.0, high=100.0),
-            # Raise this to trade only the higher grades. See ScoringConfig.
-            min_tradeable_score=_env_float(
-                "SCORING_MIN_TRADEABLE", 56.0, low=1.0, high=100.0
-            ),
-        ),
+        scoring=_scoring_from_env(),
         risk=risk,
         # Position management is the one area the project says must be
         # EARNED by testing rather than switched on because it sounds

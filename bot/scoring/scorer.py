@@ -38,7 +38,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from ..config import ScoringConfig, TradingConfig
+from ..config import R_EPSILON, ScoringConfig, TradingConfig
 from ..smc.engine import SetupCandidate
 
 WEIGHTS = {
@@ -198,7 +198,12 @@ def _risk_reward_component(candidate: SetupCandidate, minimum: float) -> tuple[f
     """
 
     ratio = candidate.risk_reward
-    if ratio < minimum:
+    # `- R_EPSILON` for the same reason the engine's own gate has it, and
+    # it matters more here: `risk_reward` is a CRITICAL component, so a
+    # zero is not a low score, it is an unconditional veto. A setup built
+    # to land exactly on the floor arrived as the floor minus a float
+    # ulp and was thrown out as though it had no target at all.
+    if ratio < minimum - R_EPSILON:
         return 0.0, f"R:R 1:{ratio:.2f} below minimum"
     span = max(0.5, 4.0 - minimum)
     score = min(1.0, (ratio - minimum) / span * 0.7 + 0.3)

@@ -45,6 +45,25 @@ MIN_CACHE_SECONDS = 20.0
 PUBLISH_GRACE_SECONDS = 5.0
 
 
+#: How many closed bars the LIVE engine sees per timeframe.
+#:
+#: Named and exported because the backtester must show the engine the
+#: same window. It did not: it passed the entire history up to bar i, so
+#: on bar 200,000 the SMC engine analysed 200,000 candles while the live
+#: bot analyses 400. That is not only O(n^2) — a ten-year run never
+#: finished one symbol — it is a different computation. The liquidity
+#: map, the dealing range and the swing structure are all built from the
+#: window they are given, so a backtest fed the whole history picked
+#: targets from pools the live bot cannot see and measured a bot that
+#: never traded.
+LIVE_LOOKBACK: dict[str, int] = {"M15": 400, "H1": 300}
+DEFAULT_LOOKBACK = 300
+
+
+def live_lookback(timeframe: str) -> int:
+    return LIVE_LOOKBACK.get(timeframe.upper(), DEFAULT_LOOKBACK)
+
+
 @dataclass(frozen=True, slots=True)
 class Series:
     symbol: str
@@ -148,7 +167,7 @@ class MarketDataProvider:
 
         result: dict[str, Series] = {}
         for timeframe in timeframes:
-            count = 400 if timeframe == "M15" else 300
+            count = live_lookback(timeframe)
             result[timeframe] = self.series(spec, timeframe, count=count, now=now)
         return result
 

@@ -295,3 +295,63 @@ def test_monte_carlo_is_reproducible_for_a_given_seed():
     first = monte_carlo(pnls, runs=200, seed=42)
     second = monte_carlo(pnls, runs=200, seed=42)
     assert first.as_dict() == second.as_dict()
+
+
+def test_the_backtester_shows_the_engine_exactly_the_live_window(config):
+    """The backtest must measure the computation that trades.
+
+    The live provider hands the SMC engine the last 400 M15 and 300 H1
+    bars. The backtester used to hand it the ENTIRE history up to bar i —
+    on bar 200,000 of a ten-year run, 200,000 candles. That was O(n^2),
+    so a long run never finished a single symbol, and it was a different
+    computation: swings, the dealing range and the liquidity map are all
+    built from the window they are given, so the backtest picked targets
+    from pools the live bot cannot see.
+
+    Spies on the real engine rather than replacing it (rule 10): the
+    analysis still runs; the test only records what it was shown.
+    """
+
+    from bot.backtest.engine import Backtester
+    from bot.marketdata.provider import live_lookback
+    from fakes import DEFAULT_SPEC, series_from_path, trending_path
+
+    m15 = series_from_path(
+        trending_path(count=900, start_price=1.1, step=0.0002, wobble=0.0001, direction=1),
+        timeframe="M15",
+    )
+    h1 = series_from_path(
+        trending_path(count=500, start_price=1.1, step=0.0006, wobble=0.0002, direction=1),
+        timeframe="H1",
+        end=m15[-1].close_time,
+    )
+
+    tester = Backtester(config, DEFAULT_SPEC)
+    seen: list[tuple[int, int, object, object]] = []
+    real_analyze = tester.smc.analyze
+
+    def spy(symbol, series, **kwargs):
+        seen.append(
+            (
+                len(series["M15"].candles),
+                len(series["H1"].candles),
+                series["M15"].candles[-1].close_time,
+                kwargs.get("now"),
+            )
+        )
+        return real_analyze(symbol, series, **kwargs)
+
+    tester.smc.analyze = spy
+    tester.run(m15, h1, warmup=120, step=25)
+
+    assert seen, "the engine was never consulted"
+    assert max(m for m, _, _, _ in seen) <= live_lookback("M15"), (
+        "the backtest showed the engine more M15 history than the live bot ever sees"
+    )
+    assert max(h for _, h, _, _ in seen) <= live_lookback("H1")
+    # Late in the run the window must actually be FULL, or the cap is
+    # hiding a different bug (a window that never grows).
+    assert max(m for m, _, _, _ in seen) == live_lookback("M15")
+    # And the look-ahead guarantee is untouched: the newest bar shown is
+    # never later than the decision time.
+    assert all(last <= now for _, _, last, now in seen if now is not None)

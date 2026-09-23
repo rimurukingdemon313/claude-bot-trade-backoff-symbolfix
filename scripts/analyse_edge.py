@@ -73,6 +73,34 @@ def stats(rs: list[float]) -> dict:
     return {"n": n, "win": wins / n, "avgR": mean, "sumR": sum(rs), "t": t}
 
 
+def welch_t(a: list[float], b: list[float]) -> float | None:
+    """t-statistic of mean(a) - mean(b), unequal variances."""
+
+    if len(a) < 2 or len(b) < 2:
+        return None
+    ma, mb = sum(a) / len(a), sum(b) / len(b)
+    va = sum((x - ma) ** 2 for x in a) / (len(a) - 1)
+    vb = sum((x - mb) ** 2 for x in b) / (len(b) - 1)
+    se = math.sqrt(va / len(a) + vb / len(b))
+    return (ma - mb) / se if se > 0 else None
+
+
+def judge_difference(label: str, better: list[float], worse: list[float], names: tuple[str, str]) -> None:
+    """A pre-registered 'X beats Y' test: X mean higher AND Welch t > 2."""
+
+    sb, sw = stats(better), stats(worse)
+    t = welch_t(better, worse)
+    higher = sb["avgR"] is not None and sw["avgR"] is not None and sb["avgR"] > sw["avgR"]
+    significant = t is not None and t > 2.0
+    print(f"\n{label}")
+    print(f"  {names[0]:<12}: {fmt(sb)}")
+    print(f"  {names[1]:<12}: {fmt(sw)}")
+    print(f"  (1) {names[0]} avgR > {names[1]} avgR : {'PASS' if higher else 'FAIL'}")
+    print(f"  (2) Welch t of difference > 2.0 : {'PASS' if significant else 'FAIL'}"
+          f"   (t = {'n/a' if t is None else f'{t:+.2f}'})")
+    print(f"  VERDICT: {'PASSED' if higher and significant else 'NOT SUPPORTED'}")
+
+
 def fmt(s: dict) -> str:
     if s["n"] == 0:
         return "   n=0"
@@ -144,6 +172,25 @@ def main(argv: list[str]) -> int:
     else:
         verdict = "INCONCLUSIVE — not enough evidence to recommend SCORING_MIN_TIER=A."
     print(f"  VERDICT: {verdict}")
+
+    # ---- H2, pre-registered after the design-period look ----
+    print("\n" + "-" * 78)
+    print("H2 — pre-registered in docs/EXPERIMENT_HISTORICAL_EDGE.md  (HELD-OUT, pooled)")
+    print("-" * 78)
+    judge_difference(
+        "H2a — grade ordering inverted (B beats A+)",
+        [float(t["rMultiple"]) for t in held if t.get("setupGrade") == "B"],
+        [float(t["rMultiple"]) for t in held if t.get("setupGrade") == "A+"],
+        ("B", "A+"),
+    )
+    judge_difference(
+        "H2b — projected targets beat structural ones",
+        [float(t["rMultiple"]) for t in held if t.get("projectedTarget")],
+        [float(t["rMultiple"]) for t in held if not t.get("projectedTarget")],
+        ("projected", "structural"),
+    )
+    print("\n  Passing either would NOT justify trading that subset: both are below")
+    print("  zero in the design period. See the pre-registration for what would follow.")
 
     # ---- exploratory, design period ONLY ----
     print("\n" + "-" * 78)

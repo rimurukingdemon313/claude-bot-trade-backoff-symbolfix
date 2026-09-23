@@ -176,3 +176,49 @@ Welch t of the difference is > 2.0.
   evidence: stop scaling risk UP by grade. Nothing would scale it up
   elsewhere.
 - Failing means the design-period pattern was noise, and nothing changes.
+
+---
+
+## H2 RESULTS (held-out, pooled — judged by the rules above, unchanged)
+
+| Test | Better | Worse | Welch t | Verdict |
+|---|---|---|---|---|
+| H2a: B beats A+ | B −0.074R (n 1,640) | A+ −0.112R (n 1,777) | +1.11 | **NOT SUPPORTED** |
+| H2b: projected beats structural | projected −0.026R (n 999) | structural −0.093R (n 5,801) | +2.10 | **PASSED** |
+
+**H2a:** the direction replicated — A+ was worse than B again — but at
+t = 1.11 the difference is well within noise. The scorer is not shown to be
+inverted. As fixed in advance, nothing changes; the tier risk multipliers
+stay as they are.
+
+**H2b:** passed by the rule written down, and only just. Two things said
+plainly so it is not over-read:
+
+- Two H2 tests were run and no multiple-comparison correction was
+  pre-registered. Under a Bonferroni correction for two tests (threshold
+  ≈ 2.24) this would **not** pass. It is a marginal result.
+- The winning group is still below zero (−0.026R, t = −0.88). Closer,
+  minimum-R targets lose less than structural ones; they do not make
+  money. As fixed in advance, this does **not** justify trading only
+  projected targets.
+
+What H2b does say is narrow and worth keeping: the scorer multiplies a
+projected-target setup's total by 0.85, and on held-out data that penalty
+points the wrong way. Any change to it is a scorer change, needs its own
+pre-registered test, and would not by itself make the strategy
+profitable.
+
+## Conclusion
+
+Across 14,594 trades on twelve instruments over nine years, the strategy
+as implemented has **negative expectancy after costs, t = −9.29**, in
+both the design and held-out periods. No filter tested — by grade, setup
+type, session, direction, or target kind — produces a positive result.
+The one hypothesis that passed identifies a less-bad subset, not a
+profitable one.
+
+The live safety system is what would have limited the damage: every
+symbol would have tripped the 10% drawdown kill switch.
+
+Open question, being measured separately: how much of the −0.075R is the
+signal and how much is cost. See the frictionless run.

@@ -275,3 +275,38 @@ def test_the_average_rule_enters_on_the_cross_not_merely_in_the_state():
         before = ind.sma50[i - 1] - ind.sma200[i - 1]
         now = ind.sma50[i] - ind.sma200[i]
         assert (before > 0) != (now > 0), "entered without a cross on the signal bar"
+
+
+# -- the dataset clock ---------------------------------------------------------
+
+
+def test_server_time_is_converted_to_utc_across_daylight_saving():
+    """The files are MetaTrader server time (New York + 7h), not UTC.
+
+    Read as UTC, every intraday bar sat two to three hours off, and every
+    session filter, rollover blackout and weekend gate ran on the wrong
+    hours without anything breaking. The FX week opening at Sunday 22:00
+    UTC in winter and 21:00 in summer is what the server's Monday 00:00
+    must become.
+    """
+
+    from bot.research.data import server_to_utc
+
+    winter = server_to_utc(datetime(2019, 1, 7, 0, 0))
+    summer = server_to_utc(datetime(2019, 7, 8, 0, 0))
+    assert (winter.strftime("%a %H:%M"), winter.tzinfo) == ("Sun 22:00", timezone.utc)
+    assert summer.strftime("%a %H:%M") == "Sun 21:00"
+    # London's 08:00 local open is server 10:00 in both seasons.
+    assert server_to_utc(datetime(2019, 11, 11, 10, 0)).hour == 8
+    assert server_to_utc(datetime(2019, 3, 18, 10, 0)).hour == 7
+
+
+def test_a_daily_bar_keeps_its_trading_date_after_conversion():
+    """A daily bar opens at the New York close, i.e. the previous UTC
+    evening. Month logic must use the trading day, not that UTC date."""
+
+    from bot.research.data import server_to_utc, trading_date
+
+    opened = server_to_utc(datetime(2019, 2, 1, 0, 0))
+    assert opened.date().isoformat() == "2019-01-31"
+    assert trading_date(opened).isoformat() == "2019-02-01"

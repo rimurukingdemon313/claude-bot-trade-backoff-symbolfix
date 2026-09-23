@@ -18,12 +18,44 @@ imports it rather than keeping its own.
 from __future__ import annotations
 
 import csv
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from ..marketdata.candles import Candle
 
 _DATE_FORMATS = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d")
+
+#: The files are in MetaTrader SERVER time, not UTC.
+#:
+#: Measured, not assumed: in 481 of 485 weekends the first bar is Monday
+#: 00:00 and the last is Friday 23:45. The FX week opens Sunday 21:00/22:00
+#: UTC, so midnight here is the New York close — the common broker clock,
+#: New York time plus seven hours, which follows US daylight saving:
+#: UTC+2 in winter, UTC+3 in summer.
+#:
+#: Reading these timestamps as UTC — which the first version of this loader
+#: did — shifts every intraday bar two to three hours. Nothing breaks; the
+#: session filters, the rollover blackout and the weekend gate simply run
+#: on the wrong hours, and a backtest measures a strategy trading sessions
+#: it was never meant to trade.
+_NEW_YORK = ZoneInfo("America/New_York")
+SERVER_OFFSET_FROM_NEW_YORK = timedelta(hours=7)
+
+
+def server_to_utc(naive: datetime) -> datetime:
+    """A server-clock timestamp as an aware UTC datetime."""
+
+    local = (naive - SERVER_OFFSET_FROM_NEW_YORK).replace(tzinfo=_NEW_YORK)
+    return local.astimezone(timezone.utc)
+
+
+def trading_date(moment: datetime) -> date:
+    """The trading day a UTC instant belongs to: days end at the New York
+    close. A daily bar's calendar logic (month boundaries) uses this, not
+    the UTC date of its open, which falls on the previous evening."""
+
+    return (moment.astimezone(_NEW_YORK) + SERVER_OFFSET_FROM_NEW_YORK).date()
 
 
 def plausible_band(symbol: str) -> tuple[float, float]:
@@ -72,7 +104,7 @@ def digits_for(symbol: str) -> int:
 def _parse(stamp: str) -> datetime:
     for fmt in _DATE_FORMATS:
         try:
-            return datetime.strptime(stamp, fmt).replace(tzinfo=timezone.utc)
+            return server_to_utc(datetime.strptime(stamp, fmt))
         except ValueError:
             continue
     raise ValueError(f"unrecognised timestamp {stamp!r}")

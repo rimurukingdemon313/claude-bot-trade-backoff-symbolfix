@@ -205,7 +205,13 @@ class TimeSeriesMomentum:
     lookback: int = 252
 
     def _boundary(self, bars, i) -> bool:
-        return i > 0 and bars[i].timestamp.month != bars[i - 1].timestamp.month
+        # The TRADING date: a daily bar opens at the New York close, i.e.
+        # on the previous UTC evening, so its UTC month is not its month.
+        from .data import trading_date
+
+        return i > 0 and trading_date(bars[i].timestamp).month != trading_date(
+            bars[i - 1].timestamp
+        ).month
 
     def _sign(self, bars, i) -> int:
         if i < self.lookback:

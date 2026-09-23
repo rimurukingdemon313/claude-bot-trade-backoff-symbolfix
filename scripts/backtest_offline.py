@@ -96,7 +96,14 @@ def _plausible_band(symbol: str) -> tuple[float, float]:
         return 5.0, 100.0
     if symbol.endswith("JPY"):
         return 40.0, 400.0
-    return 0.3, 10.0
+    # Every non-JPY major and cross traded in the last two decades sits
+    # between ~0.5 (NZDUSD's lows) and ~2.1 (GBPUSD's highs). The band
+    # must be narrower than one power of ten, or two divisors fit it.
+    # It was [0.3, 10], and AUDUSD at 73739 points divided by 10,000 gave
+    # 7.37 — inside the band, a factor of ten wrong, and it ran a full
+    # 731-trade backtest at that price with the spread effectively ten
+    # times too cheap.
+    return 0.4, 3.0
 
 
 def _scale_for(symbol: str, raw_median: float) -> float:
@@ -108,10 +115,22 @@ def _scale_for(symbol: str, raw_median: float) -> float:
     """
 
     low, high = _plausible_band(symbol)
-    for exponent in range(0, 9):
-        divisor = 10.0**exponent
-        if low <= raw_median / divisor <= high:
-            return divisor
+    fits = [
+        10.0**exponent
+        for exponent in range(0, 9)
+        if low <= raw_median / 10.0**exponent <= high
+    ]
+    if len(fits) == 1:
+        return fits[0]
+    if len(fits) > 1:
+        # Taking the first fit is how the last two scale bugs happened.
+        # More than one fit means the band cannot tell the scales apart,
+        # and a guess here is silent: the run completes and looks normal.
+        raise SystemExit(
+            f"{symbol}: a median raw price of {raw_median:g} fits the band "
+            f"[{low}, {high}] at {len(fits)} different scales "
+            f"({', '.join(f'/{d:g}' for d in fits)}). Refusing to pick one."
+        )
     raise SystemExit(
         f"{symbol}: cannot place a median raw price of {raw_median:g} inside the "
         f"plausible band [{low}, {high}]. Refusing to guess a scale — a wrong one "
@@ -193,24 +212,48 @@ def build_spec(symbol: str, *, digits: int) -> InstrumentSpec:
     )
 
 
-def _rate_lookup_for(symbol: str):
-    """Quote-currency -> account-currency conversion.
+def build_rate_lookup(root: Path) -> tuple[dict[str, float], "callable"]:
+    """Quote-currency -> USD conversion, from the dataset's own pairs.
 
-    Only the pairs quoted in USD are handled exactly (rate 1.0). Anything
-    else returns None, which makes the sizer REFUSE rather than invent a
-    cross rate — the same behaviour as production (rule 6).
+    The sizer only needs this for true CROSSES. A USD-quoted pair converts
+    at 1.0 and a USD-based one (USDJPY) from its own price, both exactly,
+    without ever calling this. EURCHF, EURGBP and the JPY crosses need a
+    bridge, and without one the sizer correctly refuses — which is why the
+    first run reported ZERO trades on every cross. That zero described
+    this harness, not the strategy: EURCHF had ~3,000 setups reach sizing
+    and every one died there.
+
+    The bridge is each USD pair's MEDIAN close over the whole dataset, a
+    deliberate approximation, stated on every run:
+
+    * it moves LOT SIZE, so it scales the dollar P/L of a cross trade by
+      up to the pair's range over the decade (USDJPY ran ~80-125);
+    * it does NOT move a single R multiple, win or loss — those come from
+      price distances on the traded pair alone;
+    * it does not change which trades are taken: the risk engine works in
+      risk amounts, not lots.
+
+    So for crosses, trust the R column and read the dollar column as
+    approximate. A per-bar rate would need the engine's sizing call to
+    carry a timestamp, which is an engine change for a report column.
     """
 
-    quote = symbol.upper()[3:6]
+    medians: dict[str, float] = {}
+    for pair in ("EURUSD", "GBPUSD", "AUDUSD", "NZDUSD", "USDJPY", "USDCHF", "USDCAD"):
+        path = root / pair / f"{pair}h1.csv"
+        if not path.exists():
+            continue
+        candles, _, _ = load_candles(path, symbol=pair, timeframe="H1")
+        closes = sorted(candle.close for candle in candles)
+        medians[pair] = closes[len(closes) // 2]
 
     def lookup(base: str, target: str) -> float | None:
+        base, target = base.upper(), target.upper()
         if base == target:
             return 1.0
-        if quote == "USD":
-            return 1.0
-        return None
+        return medians.get(base + target)
 
-    return lookup
+    return medians, lookup
 
 
 def report(name: str, result, *, note: str = "") -> dict:
@@ -279,6 +322,7 @@ def main(argv: list[str] | None = None) -> int:
         else [args.symbol.upper()]
     )
 
+    rate_medians, rate_lookup = build_rate_lookup(root)
     config = load_config()
     costs = BacktestCosts(
         spread_points=args.spread_points,
@@ -295,6 +339,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Engine      : SmcEngine + SetupScorer + RiskEngine, unmodified")
     print(f"Costs       : spread {args.spread_points}pts, slip {args.slippage_points}pts, "
           f"commission ${args.commission}/lot")
+    print("Cross rates : fixed MEDIAN of each USD pair — R figures exact, $ figures on "
+          "crosses approximate")
+    print("              " + ", ".join(f"{k}={v:g}" for k, v in sorted(rate_medians.items())))
     print()
 
     reports = []
@@ -321,7 +368,7 @@ def main(argv: list[str] | None = None) -> int:
             spec,
             costs=costs,
             starting_balance=args.balance,
-            rate_lookup=_rate_lookup_for(symbol),
+            rate_lookup=rate_lookup,
         )
         result = tester.run(m15, h1, warmup=args.warmup, step=args.step)
         entry = report(symbol, result)

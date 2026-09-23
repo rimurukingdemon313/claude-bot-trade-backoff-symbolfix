@@ -129,6 +129,27 @@ account comes after that — never before.
 
 ---
 
+## Clarifications — committed after the plan, still before any run
+
+Two details above were ambiguous. Resolving them after seeing results would
+let the result choose the reading, so they are fixed here first.
+
+1. **Spread.** The data are single prices, not bid and ask. The spread is
+   charged as half at each fill — one full spread per round trip, which is
+   what crossing the book costs. A second run with the spread **doubled** is
+   also reported. **If a candidate's verdict differs between the two runs,
+   it is treated as FAILED**: a result that depends on how the spread is
+   read is not robust enough to deploy.
+
+2. **C2's month-end.** Recognising a month's LAST bar requires the next
+   bar's date, which the engine is not allowed to see. So the month
+   boundary is detected causally: the signal is computed on the first bar
+   of each new month and filled at the next open. That is one bar later
+   than the literature's rebalance, and it is the only way to keep the
+   no-look-ahead guarantee exact.
+
+---
+
 ## RESULTS
 
 (Filled in after the run.)

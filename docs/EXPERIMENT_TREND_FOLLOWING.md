@@ -152,4 +152,52 @@ let the result choose the reading, so they are fixed here first.
 
 ## RESULTS
 
-(Filled in after the run.)
+Twelve instruments, daily bars 2012-12 → 2022-03, run once by
+`scripts/research_trend.py` (committed before it ran). Every scale was
+printed and checked.
+
+| Candidate | Design avgR (n) | Held-out avgR (n) | Held-out t | Verdict |
+|---|---|---|---|---|
+| C1 Donchian 55/20 | −0.131 (199) | **−0.280** (262) | **−3.09** | FAILED |
+| C2 Time-series momentum 252 | +0.073 (79) | **−0.391** (151) | **−3.15** | FAILED |
+| C3 SMA 50/200 | +0.315 (55) | −0.292 (92) | −1.50 | FAILED |
+
+Doubling the spread changes nothing: all three fail under both readings.
+
+**No candidate passed. As pre-registered, none is recommended, and no
+candidate is added to this round.**
+
+### What the numbers say beyond the verdict
+
+**Held-out is not merely "not good enough" — two of three are
+significantly negative.** C1 and C2 lost at t ≈ −3.1 over 2017–2022. Where
+the design period looked positive (C2, C3), it did not carry forward: the
+design-period result was one regime, which is exactly what condition (3)
+together with (1) was written to catch.
+
+**The swap assumption matters a great deal, and it is an assumption.**
+Without it (sensitivity only, not the verdict):
+
+| | All avgR | Held-out avgR | Held-out t |
+|---|---|---|---|
+| C1 | −0.071 | −0.135 | −1.37 |
+| C2 | +0.119 | −0.078 | −0.54 |
+| C3 | +0.312 | +0.083 | +0.36 |
+
+Even with financing ignored entirely — which no real account can do —
+nothing approaches the held-out threshold, and C3's best case is 92
+trades at t = +0.36. That is the low-power outcome the pre-registration
+anticipated, and it means the same thing for the account: not deployable.
+
+The lesson worth keeping from this line: **a strategy that holds for
+weeks is exposed to financing costs on the scale of its edge.** Any future
+multi-week strategy has to be measured against the broker's real swap
+rates, not an assumption — the same principle that made the spread the
+thing that sank SMC.
+
+### Status after this round
+
+Four strategies have now been measured on this data: SMC (14,594 trades,
+no edge even before costs) and three published trend-following rules
+(none passes out of sample). The bot's other built-in mode, `reversion`,
+has not yet been measured at all.

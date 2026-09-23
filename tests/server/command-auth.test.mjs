@@ -96,7 +96,7 @@ describe("command surface authentication", () => {
   });
 
   it("refuses to switch strategy without the token", async () => {
-    const { status } = await post("/api/control/strategy", { strategy: "reversion" });
+    const { status } = await post("/api/control/strategy", { strategy: "smc" });
     assert.equal(status, 401);
   });
 
@@ -108,7 +108,7 @@ describe("command surface authentication", () => {
     // auth rather than being refused by it.
     const { status, body } = await post(
       "/api/control/strategy",
-      { strategy: "reversion" },
+      { strategy: "smc" },
       { "X-Dashboard-Token": TOKEN },
     );
     assert.notEqual(status, 401, "the right token must unlock the switch");

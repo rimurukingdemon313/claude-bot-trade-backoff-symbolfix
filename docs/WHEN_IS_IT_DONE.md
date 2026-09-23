@@ -1,5 +1,21 @@
 # When is this finished?
 
+> **Superseded, September 2026.** This page planned to wait for about
+> twenty live trades before judging the strategy. That question has since
+> been answered far more strongly than twenty trades ever could:
+>
+> - SMC: 14,594 historical trades over nine years and twelve instruments,
+>   no edge after costs (t = −9.3) and none before them either
+>   (`EXPERIMENT_HISTORICAL_EDGE.md`).
+> - The built-in `reversion` mode could never trade, and its signal lost on
+>   38,971 trades (t = −14.3). It has been removed (`EXPERIMENT_REVERSION.md`).
+> - Three published trend-following rules were tested as replacements; none
+>   passed out of sample (`EXPERIMENT_TREND_FOLLOWING.md`).
+>
+> The honest state is that the bot has no strategy with a demonstrated edge,
+> and the right action is to pause trading until one passes the same test.
+> The engineering below is still accurate; the plan it ends with is not.
+
 Written because the operator asked, after days of daily fixes, when we
 stop editing and start running. It is a fair question and it deserves a
 straight answer rather than reassurance.

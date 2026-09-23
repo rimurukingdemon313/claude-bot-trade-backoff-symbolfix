@@ -10,18 +10,28 @@ from __future__ import annotations
 from ..config import TradingConfig
 from ..errors import ConfigError
 from .base import BUILDERS, Strategy, StrategyProfile
-from .reversion import ReversionStrategy
 from .smc_strategy import SmcStrategy
 
 #: The mode used when nothing has been chosen. SMC is the strategy this
 #: system was built around and the conservative default: it trades least.
 DEFAULT_STRATEGY = "smc"
 
-BUILDERS.update({"smc": SmcStrategy, "reversion": ReversionStrategy})
+BUILDERS.update({"smc": SmcStrategy})
 
+#: `reversion` is NOT here, deliberately (docs/EXPERIMENT_REVERSION.md).
+#:
+#: It was selectable on the dashboard and could never trade: the scorer
+#: treats an FVG or order-block entry zone as critical, and a strategy that
+#: fades a sweep at market never has one, so 691 of 691 candidates were
+#: vetoed. Measured with that veto bypassed, its signal lost on all twelve
+#: instruments: 38,971 trades, -0.069R, t = -14.3. So the one outcome worse
+#: than a dead switch was fixing it. It was removed instead, as the
+#: pre-registration committed to before the result was known.
+#:
+#: The module stays in bot/strategy/reversion.py so that experiment remains
+#: reproducible; it is simply no longer a mode anyone can select.
 PROFILES: dict[str, StrategyProfile] = {
     "smc": SmcStrategy.profile,
-    "reversion": ReversionStrategy.profile,
 }
 
 

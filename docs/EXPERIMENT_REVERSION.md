@@ -98,3 +98,23 @@ avgR > 0, pooled over all twelve symbols.
   one.
 - **PASS** → the scorer is wrong for this mode, and fixing that becomes its
   own change, with its own test, before anything goes near the account.
+
+## RESULTS — part 2: the signal, with the scorer bypassed
+
+| Period | Trades | Win | avgR | t |
+|---|---|---|---|---|
+| All | 38,971 | 48.8% | **−0.069** | **−14.30** |
+| Design (< 2017) | 20,257 | 49.0% | −0.062 | −9.28 |
+| Held-out (≥ 2017) | 18,714 | 48.6% | −0.076 | −11.00 |
+
+**FAILED on all three conditions.** No symbol is positive; all twelve are
+significantly negative (t from −2.23 on EURGBP to −7.59 on GBPJPY). The
+prior stated before the run — more trades and smaller targets than SMC,
+on the same cost structure, so more cost per unit of edge — was right.
+
+**Consequence, as fixed before the run: the switch is removed.** Fixing
+the scorer so this mode could trade would turn a dead switch into a live
+one that loses about 0.07R on every trade, several times a day.
+
+So the scorer's veto was, by accident, protecting the account. That is not
+a reason to keep a control that looks like it does something and doesn't.

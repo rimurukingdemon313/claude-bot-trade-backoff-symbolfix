@@ -29,7 +29,76 @@ from fakes import (
 )
 
 
+# -- a second mode, for testing the SWITCH rather than any strategy ---------
+
+
+class _AltStrategy:
+    """Test-only. Exists so the switching mechanism — persistence, the risk
+    floor, the demo guard, the version stamp — stays covered now that the
+    product has a single selectable mode. It proposes exactly what SMC
+    would, because these tests are about the switch, not the strategy."""
+
+    profile = StrategyProfile(
+        key="alt",
+        name="Test-only second mode",
+        description="exists so the switch mechanism stays tested",
+        min_risk_reward=1.5,
+        expected_frequency="never — tests only",
+        thesis="none",
+    )
+
+    def __init__(self, config):
+        self._smc = SmcStrategy(config)
+
+    def analyze(self, symbol, series, *, now=None, spread=None):
+        return self._smc.analyze(symbol, series, now=now, spread=spread)
+
+
+@pytest.fixture()
+def second_mode(monkeypatch):
+    from bot.strategy import registry
+    from bot.strategy.base import BUILDERS
+
+    monkeypatch.setitem(BUILDERS, "alt", _AltStrategy)
+    monkeypatch.setitem(registry.PROFILES, "alt", _AltStrategy.profile)
+    return "alt"
+
+
 # -- the registry ---------------------------------------------------------
+
+
+def test_reversion_is_no_longer_a_mode_anyone_can_select():
+    """Removed on evidence, as the pre-registration committed to.
+
+    It could not trade (the scorer vetoed 691 of 691 candidates for having
+    no entry zone), and with that veto bypassed its signal lost on all
+    twelve instruments — 38,971 trades, t = -14.3. Fixing the dead switch
+    would have made it a live, losing one. docs/EXPERIMENT_REVERSION.md.
+    """
+
+    with pytest.raises(ConfigError, match="unknown strategy"):
+        normalise("reversion")
+    assert "reversion" not in [profile.key for profile in available()]
+
+
+def test_a_database_that_still_remembers_reversion_restarts_safely(orchestrator, repos, config):
+    """A deploy must not break a bot whose stored choice was reversion.
+
+    It resolves to the default and says so in the log — it must not raise
+    and take the process down. (It never placed a trade in that mode, so
+    no position depends on it.)
+    """
+
+    from bot.orchestrator import STATE_STRATEGY, Orchestrator
+
+    repos.state.set(STATE_STRATEGY, "reversion")
+    restarted = Orchestrator(
+        config=config,
+        broker=orchestrator.broker,
+        repositories=repos,
+        market_data=orchestrator.market_data,
+    )
+    assert restarted.strategy_key == "smc"
 
 
 def test_the_default_is_the_strategy_that_trades_least():
@@ -173,10 +242,10 @@ def test_reversion_finds_setups_where_smc_finds_none(config):
 # -- the switch -----------------------------------------------------------
 
 
-def test_switching_persists_across_a_restart(orchestrator, repos, config):
+def test_switching_persists_across_a_restart(orchestrator, repos, config, second_mode):
     assert orchestrator.strategy_key == "smc"
-    orchestrator.set_strategy("reversion")
-    assert orchestrator.strategy_key == "reversion"
+    orchestrator.set_strategy(second_mode)
+    assert orchestrator.strategy_key == second_mode
 
     # A fresh orchestrator over the same storage is what a restart is.
     from bot.orchestrator import Orchestrator
@@ -187,15 +256,15 @@ def test_switching_persists_across_a_restart(orchestrator, repos, config):
         repositories=repos,
         market_data=orchestrator.market_data,
     )
-    assert restarted.strategy_key == "reversion"
+    assert restarted.strategy_key == second_mode
 
 
-def test_switching_moves_the_risk_floor_without_lowering_any_other_limit(orchestrator):
+def test_switching_moves_the_risk_floor_without_lowering_any_other_limit(orchestrator, second_mode):
     before = orchestrator.risk.limits
-    orchestrator.set_strategy("reversion")
+    orchestrator.set_strategy(second_mode)
     after = orchestrator.risk.limits
 
-    assert after.min_risk_reward == ReversionStrategy.profile.min_risk_reward
+    assert after.min_risk_reward == _AltStrategy.profile.min_risk_reward
     # Everything that bounds loss is untouched. A mode switch is not a
     # risk change (project rule 2).
     assert after.max_risk_pct == before.max_risk_pct
@@ -236,12 +305,12 @@ def test_the_switch_shows_what_a_trade_is_worth_without_promising_anything(orche
         assert option["minRiskReward"] >= orchestrator.config.reward.min_reward_r
 
 
-def test_a_switch_cannot_bypass_the_demo_guard(orchestrator, broker):
+def test_a_switch_cannot_bypass_the_demo_guard(orchestrator, broker, second_mode):
     """Project rule 11: no control may bypass the demo guard."""
 
     broker.metadata = {"accountType": "LIVE"}
     broker.claims = None
-    orchestrator.set_strategy("reversion")
+    orchestrator.set_strategy(second_mode)
     # An explicit weekday: the weekend gate stands the scan down before
     # anything else, and this test is about the guard, not the calendar.
     result = orchestrator.scan(source="test", now=SETUP_END)
@@ -320,8 +389,8 @@ def test_a_trade_plan_records_the_strategy_that_produced_it(config, broker, repo
         assert plan.as_dict()["versions"]["strategy"] == mode
 
 
-def test_the_orchestrator_stamps_the_mode_actually_in_force(orchestrator):
+def test_the_orchestrator_stamps_the_mode_actually_in_force(orchestrator, second_mode):
     """Not the configured default — the one the switch selected."""
 
-    orchestrator.set_strategy("reversion")
-    assert orchestrator.strategy_key == "reversion"
+    orchestrator.set_strategy(second_mode)
+    assert orchestrator.strategy_key == second_mode

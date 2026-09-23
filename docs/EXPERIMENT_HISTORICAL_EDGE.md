@@ -222,3 +222,35 @@ symbol would have tripped the 10% drawdown kill switch.
 
 Open question, being measured separately: how much of the −0.075R is the
 signal and how much is cost. See the frictionless run.
+
+---
+
+## Is it the signal, or the costs? (frictionless run)
+
+Same engine, same four major symbols, spread, slippage and commission all
+set to zero. This is not a market anyone can trade; it asks only whether
+the SIGNAL predicts anything before friction.
+
+| Symbol | Trades | avgR | t |
+|---|---|---|---|
+| EURUSD | 3,058 | +0.024 | +1.30 |
+| GBPUSD | 2,958 | +0.027 | +1.43 |
+| USDJPY | 2,889 | +0.022 | +1.19 |
+| XAUUSD | 3,076 | −0.010 | −0.58 |
+| **Pooled** | **11,981** | **+0.016** | **+1.68** |
+
+**Before any cost, the signal's edge is not distinguishable from zero.**
+The costs are not eating a good signal; they are turning a signal with no
+demonstrated predictive power into a clear loss.
+
+Note the trade counts roughly triple with zero cost (EURUSD 1,159 → 3,058):
+the spread gates and the spread-padded stop filter out most setups when
+friction is real. So this is not "the same trades, minus costs" — it is
+the strategy's raw selection, measured without the filters friction
+imposes. The conclusion does not depend on that: neither set shows an
+edge.
+
+This closes one door explicitly. Widening stops, a longer timeframe, a
+cheaper broker — every route that reduces cost per R — can at best move
+this toward zero. None can make it positive, because there is no gross
+edge underneath for them to uncover.

@@ -78,20 +78,45 @@ def _digits_for(symbol: str, sample_close: float) -> int:
     return 5
 
 
-def _scale_for(raw_median: float, digits: int) -> float:
-    """The divisor that turns the file's integers into real prices.
+def _plausible_band(symbol: str) -> tuple[float, float]:
+    """Where this instrument's price actually lives.
 
-    Chosen so the result lands in a plausible band for the instrument
-    rather than assumed, and the caller prints it so a wrong guess is
-    visible instead of quietly poisoning every ATR comparison.
+    One band for everything was the bug this function replaces: it
+    accepted anything from 0.3 to 5000, so EURUSD at 109305 points
+    divided by 100 gave 1093.05 — inside the band, wildly wrong, and
+    silent. Every level stayed self-consistent, so nothing looked broken;
+    only the ATR-relative gates quietly compared against a price a
+    thousand times too large, and the run took zero trades.
     """
 
-    for exponent in range(0, 8):
+    symbol = symbol.upper()
+    if symbol.startswith("XAU"):
+        return 200.0, 5000.0
+    if symbol.startswith("XAG"):
+        return 5.0, 100.0
+    if symbol.endswith("JPY"):
+        return 40.0, 400.0
+    return 0.3, 10.0
+
+
+def _scale_for(symbol: str, raw_median: float) -> float:
+    """The divisor that turns the file's integers into real prices.
+
+    Derived and then PRINTED by the caller, never assumed, because a
+    wrong divisor does not raise — it silently rescales every
+    volatility comparison in the engine.
+    """
+
+    low, high = _plausible_band(symbol)
+    for exponent in range(0, 9):
         divisor = 10.0**exponent
-        candidate = raw_median / divisor
-        if 0.3 <= candidate <= 5000.0:
+        if low <= raw_median / divisor <= high:
             return divisor
-    return 10.0**digits
+    raise SystemExit(
+        f"{symbol}: cannot place a median raw price of {raw_median:g} inside the "
+        f"plausible band [{low}, {high}]. Refusing to guess a scale — a wrong one "
+        "produces a run that looks fine and measures nothing."
+    )
 
 
 def load_candles(path: Path, *, symbol: str, timeframe: str) -> tuple[list[Candle], float, int]:
@@ -121,7 +146,7 @@ def load_candles(path: Path, *, symbol: str, timeframe: str) -> tuple[list[Candl
 
     closes = sorted(item[4] for item in rows)
     digits = _digits_for(symbol, closes[len(closes) // 2])
-    scale = _scale_for(closes[len(closes) // 2], digits)
+    scale = _scale_for(symbol, closes[len(closes) // 2])
 
     candles = [
         Candle(

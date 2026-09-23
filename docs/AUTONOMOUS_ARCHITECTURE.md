@@ -198,12 +198,20 @@ its ideas are tested on data by code.
    remember as a trader.
 
 **Overfitting**
-1. **An experiment registry** records every hypothesis, variant and parameter
-   tried, and which data segments it touched. It is the denominator every
-   significance claim is divided by.
-2. **The 2019–2022 segment is already contaminated.** Thirteen families were
-   judged on it. It can still train and validate; it can no longer serve as
-   an untouched test.
+1. **An experiment registry** (`bot/research/registry.py`, built) records every
+   hypothesis, variant and parameter tried, and which data ranges it touched
+   in which role (fit, select, judge). It is the denominator every
+   significance claim is divided by. It is append-only, refuses back-filled
+   or duplicate entries on write and on load, and makes the sealed holdout
+   mechanically single-use. `python scripts/registry.py` prints the count.
+2. **The whole public dataset is already contaminated.** Counted properly in
+   the registry (`research/registry.jsonl`), sixteen verdicts have been read
+   from it — not thirteen: SMC's H2 was two tests and reversion was two —
+   and every calendar year 2012–2022 was used by at least fourteen of them,
+   because the earlier experiments held out from 2017 and the eight-family
+   program judged all three of its segments. The next test on this data must
+   beat |t| > 2.97. It can still train and validate; no part of it can serve
+   as an untouched test.
 3. **The sealed final test is broker data from 2022-03 to the present**, which
    no one in this project has used for research. It is exported and
    evaluated **once, on Railway, by a committed script**, and only the

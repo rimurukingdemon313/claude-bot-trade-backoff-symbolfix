@@ -295,3 +295,95 @@ def test_monte_carlo_is_reproducible_for_a_given_seed():
     first = monte_carlo(pnls, runs=200, seed=42)
     second = monte_carlo(pnls, runs=200, seed=42)
     assert first.as_dict() == second.as_dict()
+
+
+def test_the_backtester_shows_the_engine_exactly_the_live_window(config):
+    """The backtest must measure the computation that trades.
+
+    The live provider hands the SMC engine the last 400 M15 and 300 H1
+    bars. The backtester used to hand it the ENTIRE history up to bar i —
+    on bar 200,000 of a ten-year run, 200,000 candles. That was O(n^2),
+    so a long run never finished a single symbol, and it was a different
+    computation: swings, the dealing range and the liquidity map are all
+    built from the window they are given, so the backtest picked targets
+    from pools the live bot cannot see.
+
+    Spies on the real engine rather than replacing it (rule 10): the
+    analysis still runs; the test only records what it was shown.
+    """
+
+    from bot.backtest.engine import Backtester
+    from bot.marketdata.provider import live_lookback
+    from fakes import DEFAULT_SPEC, series_from_path, trending_path
+
+    m15 = series_from_path(
+        trending_path(count=900, start_price=1.1, step=0.0002, wobble=0.0001, direction=1),
+        timeframe="M15",
+    )
+    h1 = series_from_path(
+        trending_path(count=500, start_price=1.1, step=0.0006, wobble=0.0002, direction=1),
+        timeframe="H1",
+        end=m15[-1].close_time,
+    )
+
+    tester = Backtester(config, DEFAULT_SPEC)
+    seen: list[tuple[int, int, object, object]] = []
+    real_analyze = tester.smc.analyze
+
+    def spy(symbol, series, **kwargs):
+        seen.append(
+            (
+                len(series["M15"].candles),
+                len(series["H1"].candles),
+                series["M15"].candles[-1].close_time,
+                kwargs.get("now"),
+            )
+        )
+        return real_analyze(symbol, series, **kwargs)
+
+    tester.smc.analyze = spy
+    tester.run(m15, h1, warmup=120, step=25)
+
+    assert seen, "the engine was never consulted"
+    assert max(m for m, _, _, _ in seen) <= live_lookback("M15"), (
+        "the backtest showed the engine more M15 history than the live bot ever sees"
+    )
+    assert max(h for _, h, _, _ in seen) <= live_lookback("H1")
+    # Late in the run the window must actually be FULL, or the cap is
+    # hiding a different bug (a window that never grows).
+    assert max(m for m, _, _, _ in seen) == live_lookback("M15")
+    # And the look-ahead guarantee is untouched: the newest bar shown is
+    # never later than the decision time.
+    assert all(last <= now for _, _, last, now in seen if now is not None)
+
+
+def test_the_drawdown_halt_is_on_by_default_and_only_lifts_when_asked(config):
+    """A backtest simulates the bot unless told it is measuring.
+
+    Live, reaching max drawdown trips the kill switch and nothing more is
+    traded. The backtester does the same by default. Lifting it exists so
+    a long history can be MEASURED past that point — and must never be
+    what a run does without saying so.
+    """
+
+    from bot.backtest.engine import Backtester
+    from fakes import DEFAULT_SPEC, SETUP_END, aligned_htf, bullish_setup_m15
+
+    m15 = bullish_setup_m15()
+    h1 = aligned_htf(m15, timeframe="H1")
+    deep = dict(
+        index=len(m15) - 1,
+        cutoff=SETUP_END,
+        balance=8_000.0,   # 20% below peak — past the 10% limit
+        peak=10_000.0,
+        consecutive_losses=0,
+    )
+
+    halted = Backtester(config, DEFAULT_SPEC)
+    assert halted.halt_on_max_drawdown is True
+    _, reason = halted.propose(m15, h1, **deep)
+    assert reason == "max drawdown", "the default must stop exactly as the live kill switch does"
+
+    measuring = Backtester(config, DEFAULT_SPEC, halt_on_max_drawdown=False)
+    _, reason = measuring.propose(m15, h1, **deep)
+    assert reason != "max drawdown", "measure mode must look past the halt"

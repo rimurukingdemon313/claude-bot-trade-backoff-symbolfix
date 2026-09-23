@@ -17,6 +17,7 @@ Fill modelling is pessimistic on purpose:
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Sequence
@@ -24,7 +25,7 @@ from typing import Any, Sequence
 from ..broker.models import InstrumentSpec
 from ..config import TradingConfig
 from ..marketdata.candles import Candle
-from ..marketdata.provider import Series
+from ..marketdata.provider import Series, live_lookback
 from ..marketdata.validation import ValidationReport
 from ..execution.manager import plan_actions
 from ..risk.engine import AccountRiskState, RiskEngine
@@ -209,9 +210,26 @@ class Backtester:
         costs: BacktestCosts | None = None,
         starting_balance: float = 10_000.0,
         rate_lookup: RateLookup | None = None,
+        halt_on_max_drawdown: bool = True,
     ) -> None:
         self.config = config
         self.spec = spec
+        #: Whether reaching `max_drawdown_pct` stops the run for good, as
+        #: the kill switch does live. On by default: that IS what the bot
+        #: does.
+        #:
+        #: Off is for MEASURING, never for simulating the bot. With it on,
+        #: a long history answers only "when would it have stopped itself?"
+        #: — EURUSD reached the limit after 164 trades and the remaining
+        #: years contributed nothing but 3,425 "max drawdown" rejections.
+        #: That is a real and useful answer, and it is not "does the
+        #: strategy have an edge", which needs the whole history.
+        #:
+        #: Only the halt is lifted. The drawdown de-risking inside the risk
+        #: engine is untouched, so a run with this off follows exactly the
+        #: same path as one with it on up to the bar where the halt would
+        #: have fired — which is how a single run can report both answers.
+        self.halt_on_max_drawdown = halt_on_max_drawdown
         self.costs = costs or BacktestCosts()
         self.starting_balance = starting_balance
         #: How a quote currency converts into the account currency.
@@ -256,6 +274,11 @@ class Backtester:
         consecutive_losses = 0
 
         h1_by_time = sorted(h1, key=lambda candle: candle.timestamp)
+        # Close times in order, so "every H1 bar closed by the cutoff" is a
+        # binary search rather than a scan of the whole series per bar.
+        h1_close_times = [candle.close_time for candle in h1_by_time]
+        m15_window = live_lookback("M15")
+        h1_window = live_lookback("H1")
 
         for index in range(warmup, len(m15)):
             bar = m15[index]
@@ -281,9 +304,19 @@ class Backtester:
                 continue
 
             # --- analysis sees ONLY closed bars up to and including i ---
-            visible_m15 = list(m15[: index + 1])
+            #
+            # And only as MANY of them as the live bot sees. The upper
+            # bound is the look-ahead guarantee (unchanged: nothing after
+            # bar i is ever in the list). The lower bound is fidelity: the
+            # live provider hands the engine the last `live_lookback` bars
+            # per timeframe, and every structure the engine builds —
+            # swings, dealing range, liquidity pools — depends on the
+            # window it is given. See LIVE_LOOKBACK for what feeding it the
+            # full history used to do.
+            visible_m15 = list(m15[max(0, index + 1 - m15_window): index + 1])
             cutoff = bar.close_time
-            visible_h1 = [candle for candle in h1_by_time if candle.close_time <= cutoff]
+            h1_end = bisect_right(h1_close_times, cutoff)
+            visible_h1 = h1_by_time[max(0, h1_end - h1_window): h1_end]
             if len(visible_h1) < 40:
                 continue
 
@@ -349,7 +382,7 @@ class Backtester:
             return None, "below tier"
 
         drawdown = (peak - balance) / peak if peak > 0 else 0.0
-        if drawdown >= self.config.risk.max_drawdown_pct:
+        if self.halt_on_max_drawdown and drawdown >= self.config.risk.max_drawdown_pct:
             return None, "max drawdown"
 
         # Sizing goes through the SAME risk engine the live path uses.

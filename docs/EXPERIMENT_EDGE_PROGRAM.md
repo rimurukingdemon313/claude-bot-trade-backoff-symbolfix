@@ -171,6 +171,26 @@ re-fitting inside the walk-forward, because nothing is fitted anywhere.
 Any ambiguity found while implementing is resolved in a commit to this
 section BEFORE the first run, never after.
 
+**C-1 (F4 lookback).** F4's "lookback 48" sets the SMA, the SD and the ER
+windows together; the plateau varies all three at once. The 48-bar time
+exit is separate and stays fixed at 48.
+
+**C-2 (F7 regime timing).** F7 classifies the regime from bar i−1's values
+(X and ER(48)), then asks the chosen family's entry rule about bar i. F5
+defines compression on bar i−1, and a breakout bar's own rising ATR would
+otherwise reclassify it out of the regime that produced it. In the RANGING
+branch, F4's internal ER limit is F7's ranging threshold.
+
+**C-3 (session windows).** "Entries from 09:00 to 11:59" means the decision
+bar STARTS in that window; its order fills at the next open. For F10's
+plateau, the range is the first N bars from 08:00 London and the entry
+window begins immediately after them; "one entry per day" means only the
+first bar of the day's window that closes beyond the range may signal, a
+rule computed from that day's bars alone. F6's entry window is decision
+bars starting 10:00–15:59, and "forced exit at 17:00" means the decision at
+the close of the bar ending 17:00, filled at the next open. F10's 16:00 exit
+is read the same way.
+
 ## RESULTS
 
 (Filled in after the run.)

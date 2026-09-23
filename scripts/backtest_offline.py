@@ -357,7 +357,7 @@ def report(name: str, result, *, note: str = "", halt_limit: float | None = None
         # Every closed trade, so the loss can be taken apart afterwards
         # by grade, setup type, session, direction and exit reason —
         # without re-running a decade of bars to ask a new question.
-        "trades": [trade.as_dict() for trade in closed],
+        "tradeRecords": [trade.as_dict() for trade in closed],
         "note": note,
         "topRejections": sorted(
             result.setups_rejected.items(), key=lambda kv: -kv[1]

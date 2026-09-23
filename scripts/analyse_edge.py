@@ -49,7 +49,7 @@ def load_trades(dirs: list[Path]) -> tuple[list[dict], dict[str, str]]:
                 continue
             for entry in payload if isinstance(payload, list) else [payload]:
                 symbol = entry.get("name")
-                records = entry.get("trades")
+                records = entry.get("tradeRecords")
                 if not symbol or not records:
                     continue
                 if symbol in source:

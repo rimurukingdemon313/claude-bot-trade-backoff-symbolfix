@@ -193,4 +193,66 @@ is read the same way.
 
 ## RESULTS
 
-(Filled in after the run.)
+Run once, by `scripts/research_program.py` as committed in `3f3d446`,
+after the timezone correction (`e3622ab`). The gate logic was tested on
+known-answer trade lists before it saw real data.
+
+**No family passed. None came close: no family cleared even G1.**
+
+| Family | IS avgR | VAL avgR | OOS avgR (n) | OOS t | Plateau + | Verdict |
+|---|---|---|---|---|---|---|
+| F1 adaptive trend (D1) | +0.441 | −0.370 | −0.165 (98) | −1.31 | 0/9 | FAILED |
+| F3 cross-sectional momentum (D1) | −0.018 | −0.138 | −0.138 (63) | −1.81 | 3/9 | FAILED |
+| F4 z-score mean reversion (H1) | −0.167 | −0.155 | −0.133 (3,519) | −5.75 | 0/9 | FAILED |
+| F5 volatility breakout (H1) | −0.139 | −0.073 | −0.134 (2,915) | −5.15 | 0/9 | FAILED |
+| F6 tick-VWAP reversion (M15) | −0.274 | −0.272 | −0.307 (10,784) | −25.98 | 0/9 | FAILED |
+| F7 regime switching (H1) | −0.140 | −0.133 | −0.124 (5,640) | −6.65 | 0/9 | FAILED |
+| F9 trend pullback (H4) | −0.081 | −0.092 | −0.093 (1,403) | −2.76 | 0/9 | FAILED |
+| F10 London opening range (M15) | −0.080 | −0.099 | −0.090 (8,562) | −8.47 | 0/9 | FAILED |
+
+Six of eight are significantly negative in every one of the three periods.
+F1's in-sample +0.441 is the only positive segment of any size, and it
+reversed in validation (−0.370, t −4.41) — one regime, which is exactly what
+requiring all three periods is for. F1 and F3 also trade too rarely for the
+breadth gate to evaluate a single pair (none reached 20 OOS trades).
+
+### Signal or cost?
+
+| Family | OOS net avgR | Avg cost per trade | ≈ before cost |
+|---|---|---|---|
+| F1 | −0.165 | 0.133 | −0.031 |
+| F3 | −0.138 | 0.069 | −0.068 |
+| F4 | −0.133 | 0.145 | +0.012 |
+| F5 | −0.134 | 0.140 | +0.006 |
+| F6 | −0.307 | 0.286 | −0.021 |
+| F7 | −0.124 | 0.138 | +0.014 |
+| F9 | −0.093 | 0.088 | −0.005 |
+| F10 | −0.090 | 0.114 | +0.024 |
+
+**Before costs, every family is within a few hundredths of an R of zero.**
+None has a signal that predicts direction; the costs then turn "nothing"
+into a steady loss. It is the same shape as SMC's frictionless result
+(+0.016R, t 1.68) — and what one would expect of simple price-based rules
+on the most liquid market in the world.
+
+(The cost column counts slippage on every exit, including target fills
+that pay none, so it slightly overstates cost and the "before cost"
+column is, if anything, generous.)
+
+### Robustness views (reported, gating nothing)
+
+Monte Carlo 5th percentile of OOS avgR is negative for all eight. Sharpe of
+the OOS daily R series is negative for all eight (−0.94 to −9.91). In the
+walk-forward view — rolling 12-month windows, nothing re-fitted — F4, F6,
+F7 and F10 were positive in 0 of 100 windows, F5 in 2, F9 in 8.
+
+## Conclusion
+
+Thirteen strategies have now been tested on this data, under
+pre-registered rules and realistic costs: SMC, the built-in reversion
+mode, three published trend rules, and these eight. None has a
+demonstrated edge, and none shows a meaningful edge even before costs.
+
+This round's rule applies: none is recommended, and no ninth family is
+added to find one that passes. Carry and the carry hybrid remain
+untested, waiting on real broker swap data.

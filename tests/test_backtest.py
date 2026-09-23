@@ -387,3 +387,57 @@ def test_the_drawdown_halt_is_on_by_default_and_only_lifts_when_asked(config):
     measuring = Backtester(config, DEFAULT_SPEC, halt_on_max_drawdown=False)
     _, reason = measuring.propose(m15, h1, **deep)
     assert reason != "max drawdown", "measure mode must look past the halt"
+
+
+def test_the_backtester_runs_the_strategy_it_is_given_not_smc_by_another_name(config):
+    """A backtest labelled "reversion" must have been proposed by the
+    reversion code. Spies on the real strategy; nothing is replaced."""
+
+    from bot.backtest.engine import Backtester
+    from bot.strategy.reversion import ReversionStrategy
+    from fakes import DEFAULT_SPEC, series_from_path, trending_path
+
+    m15 = series_from_path(
+        trending_path(count=600, start_price=1.1, step=0.0002, wobble=0.0003, direction=1),
+        timeframe="M15",
+    )
+    h1 = series_from_path(
+        trending_path(count=300, start_price=1.1, step=0.0006, wobble=0.0004, direction=1),
+        timeframe="H1",
+        end=m15[-1].close_time,
+    )
+    strategy = ReversionStrategy(config)
+    calls = []
+    real = strategy.analyze
+
+    def spy(symbol, series, **kwargs):
+        calls.append(symbol)
+        return real(symbol, series, **kwargs)
+
+    strategy.analyze = spy
+    tester = Backtester(config, DEFAULT_SPEC, strategy=strategy)
+    assert tester.strategy_name == "reversion"
+    tester.run(m15, h1, warmup=120, step=20)
+    assert calls, "the reversion strategy was never consulted"
+
+    default = Backtester(config, DEFAULT_SPEC)
+    assert default.strategy_name == "smc", "the default must remain SMC"
+
+
+def test_the_score_gate_is_on_by_default_and_the_bypass_is_research_only(config):
+    """The scorer vetoes by default, exactly as live. Bypassing it exists
+    only to ask whether a strategy's signal has an edge separately from
+    whether it can pass the scorer — never to let a backtest take trades
+    the live bot would refuse without saying so."""
+
+    from bot.backtest.engine import Backtester
+    from fakes import DEFAULT_SPEC
+
+    assert Backtester(config, DEFAULT_SPEC).score_gate is True
+    assert Backtester(config, DEFAULT_SPEC, score_gate=False).score_gate is False
+    # The live orchestrator has no such switch and must never grow one.
+    import inspect
+
+    from bot.orchestrator import Orchestrator
+
+    assert "score_gate" not in inspect.signature(Orchestrator.__init__).parameters

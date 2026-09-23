@@ -211,6 +211,8 @@ class Backtester:
         starting_balance: float = 10_000.0,
         rate_lookup: RateLookup | None = None,
         halt_on_max_drawdown: bool = True,
+        strategy: Any | None = None,
+        score_gate: bool = True,
     ) -> None:
         self.config = config
         self.spec = spec
@@ -241,7 +243,21 @@ class Backtester:
         #: currency while reporting twelve. Leaving it None keeps that
         #: behaviour, and now it is a choice rather than an oversight.
         self.rate_lookup = rate_lookup
-        self.smc = SmcEngine(config)
+        # Any rule-14 strategy: `analyze(symbol, series, *, now, spread)`
+        # returning an SmcResult. Defaults to SMC. The attribute keeps its
+        # historical name so every caller and test that reaches for
+        # `tester.smc` still finds the strategy actually being run — and
+        # everything downstream of it (scorer, risk engine, fills) is the
+        # same code whichever strategy proposes.
+        self.smc = strategy if strategy is not None else SmcEngine(config)
+        self.strategy_name = getattr(getattr(self.smc, "profile", None), "key", "smc")
+        #: RESEARCH ONLY. Off takes every candidate the strategy produces at
+        #: tier B instead of letting the scorer veto it. It exists to ask
+        #: "does this strategy's signal have an edge?" separately from "can
+        #: it get past the scorer?" — which is how the reversion mode was
+        #: found to be unable to trade at all (docs/EXPERIMENT_REVERSION.md).
+        #: The live path has no equivalent and must never get one.
+        self.score_gate = score_gate
         self.scorer = SetupScorer(config)
         self.risk = RiskEngine(config)
 
@@ -379,7 +395,11 @@ class Backtester:
         candidate = analysis.candidate
         score = self.scorer.score(candidate)
         if not score.tradeable:
-            return None, "below tier"
+            if self.score_gate:
+                return None, "below tier"
+            from dataclasses import replace as _replace
+
+            score = _replace(score, tier="B")
 
         drawdown = (peak - balance) / peak if peak > 0 else 0.0
         if self.halt_on_max_drawdown and drawdown >= self.config.risk.max_drawdown_pct:

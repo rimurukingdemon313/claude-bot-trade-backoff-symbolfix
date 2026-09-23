@@ -61,6 +61,7 @@ from bot.config import load_config
 from bot.marketdata.candles import Candle
 
 from bot.research.data import load_bars
+from bot.strategy.reversion import ReversionStrategy
 
 
 def load_candles(path: Path, *, symbol: str, timeframe: str) -> tuple[list[Candle], float, int]:
@@ -278,6 +279,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--folds", type=int, default=3)
     parser.add_argument("--monte-carlo", action="store_true")
     parser.add_argument(
+        "--strategy",
+        choices=("smc", "reversion"),
+        default="smc",
+        help="which built-in strategy proposes trades; everything after it is identical",
+    )
+    parser.add_argument(
+        "--no-score-gate",
+        action="store_true",
+        help="RESEARCH: take every candidate at tier B instead of letting the scorer veto it",
+    )
+    parser.add_argument(
         "--measure-edge",
         action="store_true",
         help="do not stop at the max-drawdown limit; report where it WOULD have stopped",
@@ -309,9 +321,11 @@ def main(argv: list[str] | None = None) -> int:
     print("Data source : ejtraderLabs/historical-data (public, ~10y, ends 2022)")
     print("NOT this broker's prices. Evidence about strategy shape, not this")
     print("account's P/L. No parameter was tuned to these results.")
-    print(f"Engine      : SmcEngine + SetupScorer + RiskEngine, unmodified")
+    print(f"Strategy    : {args.strategy} (proposes) -> SetupScorer + RiskEngine (dispose), unmodified")
     print(f"Costs       : spread {args.spread_points}pts, slip {args.slippage_points}pts, "
           f"commission ${args.commission}/lot")
+    if args.no_score_gate:
+        print("Score gate  : BYPASSED (research) — every candidate taken at tier B")
     if args.measure_edge:
         print("Mode        : MEASURE EDGE — the max-drawdown halt is lifted so the whole")
         print("              history is measured. Everything else, including de-risking in")
@@ -350,6 +364,8 @@ def main(argv: list[str] | None = None) -> int:
             starting_balance=args.balance,
             rate_lookup=rate_lookup,
             halt_on_max_drawdown=not args.measure_edge,
+            strategy=ReversionStrategy(config) if args.strategy == "reversion" else None,
+            score_gate=not args.no_score_gate,
         )
         result = tester.run(m15, h1, warmup=args.warmup, step=args.step)
         entry = report(symbol, result, halt_limit=config.risk.max_drawdown_pct)

@@ -256,7 +256,67 @@ def build_rate_lookup(root: Path) -> tuple[dict[str, float], "callable"]:
     return medians, lookup
 
 
-def report(name: str, result, *, note: str = "") -> dict:
+def _halt_point(result, limit: float) -> dict | None:
+    """Where the live kill switch would have stopped this run.
+
+    Replays the equity after each close against the production drawdown
+    limit. With `halt_on_max_drawdown` off the run follows exactly the
+    production path up to this bar, so this is the real stopping point,
+    not an estimate.
+    """
+
+    closed = result.closed
+    balance = result.starting_balance
+    peak = balance
+    for index, trade in enumerate(closed):
+        balance += trade.pnl or 0.0
+        peak = max(peak, balance)
+        if peak > 0 and (peak - balance) / peak >= limit:
+            return {
+                "afterTrades": index + 1,
+                "date": trade.exit_time.date().isoformat() if trade.exit_time else None,
+                "drawdownPct": round((peak - balance) / peak * 100, 2),
+            }
+    return None
+
+
+def _significance(rs: list[float]) -> dict:
+    """Is the average R distinguishable from zero at all?
+
+    A t-statistic, reported as that and nothing grander. |t| < 2 means the
+    average could plausibly be zero — no edge in either direction has been
+    shown, whatever the sign of the mean. This is the number that stops a
+    +0.03R from being read as a strategy that works.
+    """
+
+    n = len(rs)
+    if n < 2:
+        return {"n": n, "std": None, "stderr": None, "t": None}
+    mean = sum(rs) / n
+    variance = sum((r - mean) ** 2 for r in rs) / (n - 1)
+    std = math.sqrt(variance)
+    stderr = std / math.sqrt(n) if std > 0 else None
+    return {
+        "n": n,
+        "std": round(std, 3),
+        "stderr": round(stderr, 4) if stderr else None,
+        "t": round(mean / stderr, 2) if stderr else None,
+    }
+
+
+def _by_year(closed) -> dict[str, dict]:
+    years: dict[str, list[float]] = {}
+    for trade in closed:
+        if trade.r_multiple is None or trade.exit_time is None:
+            continue
+        years.setdefault(str(trade.exit_time.year), []).append(trade.r_multiple)
+    return {
+        year: {"trades": len(rs), "avgR": round(sum(rs) / len(rs), 3), "sumR": round(sum(rs), 2)}
+        for year, rs in sorted(years.items())
+    }
+
+
+def report(name: str, result, *, note: str = "", halt_limit: float | None = None) -> dict:
     stats = result.statistics()
     closed = result.closed
     rs = [t.r_multiple for t in closed if t.r_multiple is not None]
@@ -286,6 +346,14 @@ def report(name: str, result, *, note: str = "") -> dict:
         "worstTrade": round(min((t.pnl for t in closed if t.pnl is not None), default=0.0), 2),
         "finalBalance": stats.get("finalBalance"),
         "sample": "INCONCLUSIVE" if len(closed) < 30 else "usable",
+        "firstTrade": closed[0].entry_time.date().isoformat() if closed else None,
+        "lastTrade": closed[-1].exit_time.date().isoformat()
+        if closed and closed[-1].exit_time
+        else None,
+        "significance": _significance(rs),
+        "sumR": round(sum(rs), 2) if rs else None,
+        "byYear": _by_year(closed),
+        "productionHalt": _halt_point(result, halt_limit) if halt_limit else None,
         "note": note,
         "topRejections": sorted(
             result.setups_rejected.items(), key=lambda kv: -kv[1]
@@ -309,6 +377,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--walk-forward", action="store_true")
     parser.add_argument("--folds", type=int, default=3)
     parser.add_argument("--monte-carlo", action="store_true")
+    parser.add_argument(
+        "--measure-edge",
+        action="store_true",
+        help="do not stop at the max-drawdown limit; report where it WOULD have stopped",
+    )
     parser.add_argument("--json", default="", help="write the full report here")
     args = parser.parse_args(argv)
 
@@ -339,6 +412,13 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Engine      : SmcEngine + SetupScorer + RiskEngine, unmodified")
     print(f"Costs       : spread {args.spread_points}pts, slip {args.slippage_points}pts, "
           f"commission ${args.commission}/lot")
+    if args.measure_edge:
+        print("Mode        : MEASURE EDGE — the max-drawdown halt is lifted so the whole")
+        print("              history is measured. Everything else, including de-risking in")
+        print("              drawdown, is exactly production. The live bot WOULD stop at the")
+        print("              point reported as productionHalt.")
+    else:
+        print("Mode        : PRODUCTION LIMITS — stops for good at max drawdown, as live")
     print("Cross rates : fixed MEDIAN of each USD pair — R figures exact, $ figures on "
           "crosses approximate")
     print("              " + ", ".join(f"{k}={v:g}" for k, v in sorted(rate_medians.items())))
@@ -369,9 +449,10 @@ def main(argv: list[str] | None = None) -> int:
             costs=costs,
             starting_balance=args.balance,
             rate_lookup=rate_lookup,
+            halt_on_max_drawdown=not args.measure_edge,
         )
         result = tester.run(m15, h1, warmup=args.warmup, step=args.step)
-        entry = report(symbol, result)
+        entry = report(symbol, result, halt_limit=config.risk.max_drawdown_pct)
         reports.append(entry)
 
         print(f"{'':8} trades={entry['trades']:<5} "
@@ -380,6 +461,14 @@ def main(argv: list[str] | None = None) -> int:
               f"PF={_num(entry['profitFactor'])} "
               f"net=${entry['netProfit']:<10} "
               f"maxDD={entry['maxDrawdownPct']}%  [{entry['sample']}]")
+        sig = entry["significance"]
+        halt = entry["productionHalt"]
+        print(f"{'':8} {entry['firstTrade']} .. {entry['lastTrade']}   "
+              f"sumR={entry['sumR']}  t={sig['t']}  "
+              f"{'(|t|<2: no edge shown either way)' if sig['t'] is not None and abs(sig['t']) < 2 else ''}")
+        print(f"{'':8} production halt: "
+              + (f"after {halt['afterTrades']} trades on {halt['date']} (DD {halt['drawdownPct']}%)"
+                 if halt else "never reached"))
 
         if args.walk_forward and len(result.closed) >= args.folds * 10:
             try:

@@ -355,3 +355,35 @@ def test_the_backtester_shows_the_engine_exactly_the_live_window(config):
     # And the look-ahead guarantee is untouched: the newest bar shown is
     # never later than the decision time.
     assert all(last <= now for _, _, last, now in seen if now is not None)
+
+
+def test_the_drawdown_halt_is_on_by_default_and_only_lifts_when_asked(config):
+    """A backtest simulates the bot unless told it is measuring.
+
+    Live, reaching max drawdown trips the kill switch and nothing more is
+    traded. The backtester does the same by default. Lifting it exists so
+    a long history can be MEASURED past that point — and must never be
+    what a run does without saying so.
+    """
+
+    from bot.backtest.engine import Backtester
+    from fakes import DEFAULT_SPEC, SETUP_END, aligned_htf, bullish_setup_m15
+
+    m15 = bullish_setup_m15()
+    h1 = aligned_htf(m15, timeframe="H1")
+    deep = dict(
+        index=len(m15) - 1,
+        cutoff=SETUP_END,
+        balance=8_000.0,   # 20% below peak — past the 10% limit
+        peak=10_000.0,
+        consecutive_losses=0,
+    )
+
+    halted = Backtester(config, DEFAULT_SPEC)
+    assert halted.halt_on_max_drawdown is True
+    _, reason = halted.propose(m15, h1, **deep)
+    assert reason == "max drawdown", "the default must stop exactly as the live kill switch does"
+
+    measuring = Backtester(config, DEFAULT_SPEC, halt_on_max_drawdown=False)
+    _, reason = measuring.propose(m15, h1, **deep)
+    assert reason != "max drawdown", "measure mode must look past the halt"

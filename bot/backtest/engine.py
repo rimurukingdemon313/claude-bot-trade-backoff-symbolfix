@@ -210,9 +210,26 @@ class Backtester:
         costs: BacktestCosts | None = None,
         starting_balance: float = 10_000.0,
         rate_lookup: RateLookup | None = None,
+        halt_on_max_drawdown: bool = True,
     ) -> None:
         self.config = config
         self.spec = spec
+        #: Whether reaching `max_drawdown_pct` stops the run for good, as
+        #: the kill switch does live. On by default: that IS what the bot
+        #: does.
+        #:
+        #: Off is for MEASURING, never for simulating the bot. With it on,
+        #: a long history answers only "when would it have stopped itself?"
+        #: — EURUSD reached the limit after 164 trades and the remaining
+        #: years contributed nothing but 3,425 "max drawdown" rejections.
+        #: That is a real and useful answer, and it is not "does the
+        #: strategy have an edge", which needs the whole history.
+        #:
+        #: Only the halt is lifted. The drawdown de-risking inside the risk
+        #: engine is untouched, so a run with this off follows exactly the
+        #: same path as one with it on up to the bar where the halt would
+        #: have fired — which is how a single run can report both answers.
+        self.halt_on_max_drawdown = halt_on_max_drawdown
         self.costs = costs or BacktestCosts()
         self.starting_balance = starting_balance
         #: How a quote currency converts into the account currency.
@@ -365,7 +382,7 @@ class Backtester:
             return None, "below tier"
 
         drawdown = (peak - balance) / peak if peak > 0 else 0.0
-        if drawdown >= self.config.risk.max_drawdown_pct:
+        if self.halt_on_max_drawdown and drawdown >= self.config.risk.max_drawdown_pct:
             return None, "max drawdown"
 
         # Sizing goes through the SAME risk engine the live path uses.
